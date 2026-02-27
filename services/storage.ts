@@ -1,8 +1,8 @@
 
 import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
-import { getCurrentUser } from './auth';
-import { db, auth } from './firebase';
+import { db, auth, storage } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 import { onAuthStateChanged } from 'firebase/auth';
 
 let isCloudSynced = false;
@@ -89,7 +89,9 @@ const syncFromCloud = async () => {
                 window.dispatchEvent(new Event('local-storage-update'));
             } else {
                 isCloudSynced = true;
-                syncToCloud(memoryState);
+                syncToCloud(memoryState).catch((error) => {
+                    console.error('[firestore] Initial store sync failed', error);
+                });
             }
         }, (error) => {
             console.error("Error listening to cloud data:", error);
@@ -121,15 +123,57 @@ const sanitizeData = (obj: any): any => {
     return newObj;
 };
 
+const isDataUrlImage = (value: string | undefined): boolean => {
+  return !!value && value.startsWith('data:image');
+};
+
+const uploadProductImageIfNeeded = async (product: Product, userId: string): Promise<Product> => {
+  if (!storage || !isDataUrlImage(product.image)) {
+    return product;
+  }
+
+  try {
+    const imageRef = ref(storage, `stores/${userId}/products/${product.id}-${Date.now()}.jpg`);
+    const uploadResult = await uploadString(imageRef, product.image, 'data_url');
+    const downloadURL = await getDownloadURL(uploadResult.ref);
+
+    console.debug('[storage] Product image uploaded', {
+      productId: product.id,
+      fullPath: uploadResult.ref.fullPath,
+      bucket: uploadResult.ref.bucket
+    });
+
+    return { ...product, image: downloadURL };
+  } catch (error) {
+    console.error('[storage] Product image upload failed', { productId: product.id, error });
+    throw new Error('Product image upload failed. Please check storage permissions and try again.');
+  }
+};
+
+const normalizeProductsForCloud = async (products: Product[], userId: string): Promise<Product[]> => {
+  return Promise.all(products.map(product => uploadProductImageIfNeeded(product, userId)));
+};
+
 const syncToCloud = async (data: AppState) => {
     if (!db || !isCloudSynced || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
-    try { 
-        const cleanData = sanitizeData(data);
-        await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true }); 
-    } catch (e) { 
-        console.error("Error syncing to cloud:", e); 
+
+    try {
+        const normalizedProducts = await normalizeProductsForCloud(data.products || [], user.uid);
+        const normalizedState = { ...data, products: normalizedProducts };
+        const cleanData = sanitizeData(normalizedState);
+        await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
+        console.debug('[firestore] Store sync successful', {
+          uid: user.uid,
+          productsCount: normalizedProducts.length
+        });
+    } catch (e) {
+        console.error('[firestore] Error syncing to cloud', {
+          uid: user.uid,
+          error: e
+        });
+        throw e;
     }
 };
 
@@ -165,48 +209,60 @@ export const getNextBarcode = (category: string): string => {
   return `GEN-${formattedNum}`;
 };
 
-export const saveData = (data: AppState) => {
+export const saveData = async (data: AppState, options?: { throwOnError?: boolean }) => {
   memoryState = data;
   window.dispatchEvent(new Event('local-storage-update'));
-  
-  if (db) {
-      syncToCloud(data);
+
+  if (!db) return;
+
+  try {
+    await syncToCloud(data);
+  } catch (error) {
+    if (options?.throwOnError) {
+      throw error;
+    }
+    console.error('[firestore] saveData failed', error);
   }
 };
 
 export const updateStoreProfile = (profile: StoreProfile) => {
     const data = loadData();
-    saveData({ ...data, profile });
+    void saveData({ ...data, profile });
 };
 
 export const resetData = () => {
     memoryState = { ...initialData };
     window.dispatchEvent(new Event('local-storage-update'));
     if (db) {
-        syncToCloud(memoryState);
+      syncToCloud(memoryState).catch((error) => {
+        console.error('[firestore] Reset sync failed', error);
+      });
     }
     window.location.reload();
 };
 
-export const addProduct = (product: Product): Product[] => {
+export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const newProduct = { ...product, totalSold: 0 };
-  const newProducts = [...data.products, newProduct];
-  saveData({ ...data, products: newProducts });
+  const userId = auth?.currentUser?.uid || 'local';
+  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 }, userId);
+  const newProducts = [...data.products, preparedProduct];
+  await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
 };
 
-export const updateProduct = (product: Product): Product[] => {
+export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const newProducts = data.products.map(p => p.id === product.id ? product : p);
-  saveData({ ...data, products: newProducts });
+  const userId = auth?.currentUser?.uid || 'local';
+  const preparedProduct = await uploadProductImageIfNeeded(product, userId);
+  const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
+  await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
 };
 
-export const deleteProduct = (id: string): Product[] => {
+export const deleteProduct = async (id: string): Promise<Product[]> => {
   const data = loadData();
   const newProducts = data.products.filter(p => p.id !== id);
-  saveData({ ...data, products: newProducts });
+  await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
 };
 
@@ -216,7 +272,7 @@ export const addCategory = (category: string): string[] => {
       return data.categories;
   }
   const newCategories = [...data.categories, category];
-  saveData({ ...data, categories: newCategories });
+  void saveData({ ...data, categories: newCategories });
   return newCategories;
 };
 
@@ -235,7 +291,7 @@ export const deleteCategory = (category: string): AppState => {
   );
 
   const newState = { ...data, categories: newCategories, products: newProducts };
-  saveData(newState);
+  void saveData(newState);
   return newState;
 };
 
@@ -246,7 +302,7 @@ export const renameCategory = (oldName: string, newName: string): AppState => {
         p.category === oldName ? { ...p, category: newName } : p
     );
     const newState = { ...data, categories: newCategories, products: newProducts };
-    saveData(newState);
+    void saveData(newState);
     return newState;
 };
 
@@ -254,7 +310,7 @@ export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     const newCustomer = { ...customer, totalDue: 0 };
     const newCustomers = [...data.customers, newCustomer];
-    saveData({ ...data, customers: newCustomers });
+    void saveData({ ...data, customers: newCustomers });
     return newCustomers;
 }
 
@@ -262,7 +318,7 @@ export const addUpfrontOrder = (order: UpfrontOrder): AppState => {
     const data = loadData();
     const newOrders = [...data.upfrontOrders, order];
     const newState = { ...data, upfrontOrders: newOrders };
-    saveData(newState);
+    void saveData(newState);
     return newState;
 };
 
@@ -270,7 +326,7 @@ export const updateUpfrontOrder = (order: UpfrontOrder): AppState => {
     const data = loadData();
     const newOrders = data.upfrontOrders.map(o => o.id === order.id ? order : o);
     const newState = { ...data, upfrontOrders: newOrders };
-    saveData(newState);
+    void saveData(newState);
     return newState;
 };
 
@@ -292,14 +348,14 @@ export const collectUpfrontPayment = (orderId: string, amount: number): AppState
 
     const newOrders = data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o);
     const newState = { ...data, upfrontOrders: newOrders };
-    saveData(newState);
+    void saveData(newState);
     return newState;
 };
 
 export const deleteCustomer = (id: string): Customer[] => {
     const data = loadData();
     const newCustomers = data.customers.filter(c => c.id !== id);
-    saveData({ ...data, customers: newCustomers });
+    void saveData({ ...data, customers: newCustomers });
     return newCustomers;
 }
 
@@ -347,7 +403,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       }
   }
   const newState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
-  saveData(newState);
+  void saveData(newState);
   return newState;
 };
 

@@ -2,6 +2,7 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { getStorage } from 'firebase/storage';
 
 const getEnv = (key: string) => {
     // @ts-ignore
@@ -20,15 +21,17 @@ const firebaseConfig = {
 let app: any = null;
 let db: any = null;
 let auth: any = null;
+let storage: any = null;
 
 if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "your_api_key") {
     try {
         app = initializeApp(firebaseConfig);
         db = getFirestore(app);
         auth = getAuth(app);
+        storage = getStorage(app);
     } catch (e) {
         console.error("Firebase initialization failed", e);
     }
 }
 
-export { app, db, auth };
+export { app, db, auth, storage };
