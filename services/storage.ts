@@ -127,6 +127,23 @@ const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
 };
 
+const STORAGE_UPLOAD_TIMEOUT_MS = 20000;
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const getStorageErrorMessage = (error: any): string => {
   const code = error?.code || '';
 
@@ -139,6 +156,11 @@ const getStorageErrorMessage = (error: any): string => {
   }
 
   if (code.includes('retry-limit-exceeded') || code.includes('unknown')) {
+    return 'Image upload failed. Please try again.';
+  }
+
+  if ((error?.message || '').toLowerCase().includes('timed out')) {
+    return 'Image upload failed. Please try again.';
     return 'Image upload failed due to a network or CORS configuration issue. Please try again.';
   }
 
@@ -152,6 +174,24 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
 
   try {
     const imageRef = ref(storage, `stores/${userId}/products/${product.id}-${Date.now()}.jpg`);
+    console.debug('[storage] Product image upload start', {
+      productId: product.id,
+      path: imageRef.fullPath
+    });
+
+    const uploadResult = await withTimeout(
+      uploadString(imageRef, product.image, 'data_url'),
+      STORAGE_UPLOAD_TIMEOUT_MS,
+      'Storage upload timed out'
+    );
+
+    const downloadURL = await withTimeout(
+      getDownloadURL(uploadResult.ref),
+      STORAGE_UPLOAD_TIMEOUT_MS,
+      'Storage download URL retrieval timed out'
+    );
+
+    console.debug('[storage] Product image upload success', {
     const uploadResult = await uploadString(imageRef, product.image, 'data_url');
     const downloadURL = await getDownloadURL(uploadResult.ref);
 
@@ -163,6 +203,8 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
 
     return { ...product, image: downloadURL };
   } catch (error) {
+    console.error('[storage] Product image upload failure', { productId: product.id, error });
+    throw new Error(getStorageErrorMessage(error));
     console.error('[storage] Product image upload failed', { productId: product.id, error });
     throw new Error(getStorageErrorMessage(error));
     throw new Error('Product image upload failed. Please check storage permissions and try again.');

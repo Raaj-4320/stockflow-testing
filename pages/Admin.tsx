@@ -134,6 +134,10 @@ export default function Admin() {
       console.error('Product save error:', saveError);
       const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
       setError(message);
+      const userMessage = message.toLowerCase().includes('image upload failed')
+        ? 'Image upload failed. Please try again.'
+        : message;
+      alert(userMessage);
       alert(message);
     } finally {
       setIsSaving(false);

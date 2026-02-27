@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "migrate-images": "node scripts/migrate-images-to-cloudinary.js"
   },
   "dependencies": {
     "@google/genai": "^1.31.0",
@@ -23,7 +24,9 @@
     "react-qr-code": "^2.0.18",
     "react-router-dom": "^7.10.1",
     "tailwind-merge": "^3.4.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "cloudinary": "^2.5.1",
+    "firebase-admin": "^12.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
