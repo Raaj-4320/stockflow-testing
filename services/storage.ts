@@ -165,6 +165,7 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
   } catch (error) {
     console.error('[storage] Product image upload failed', { productId: product.id, error });
     throw new Error(getStorageErrorMessage(error));
+    throw new Error('Product image upload failed. Please check storage permissions and try again.');
   }
 };
 
