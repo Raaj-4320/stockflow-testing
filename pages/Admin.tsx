@@ -138,7 +138,6 @@ export default function Admin() {
         ? 'Image upload failed. Please try again.'
         : message;
       alert(userMessage);
-      alert(message);
     } finally {
       setIsSaving(false);
     }
