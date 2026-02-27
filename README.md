@@ -57,3 +57,47 @@ gsutil cors set cors.json gs://stockflow-d8de7.firebasestorage.app
 # 4) Verify CORS configuration
 gsutil cors get gs://stockflow-d8de7.firebasestorage.app
 ```
+
+## One-time migration: Firebase Storage image URLs to Cloudinary
+
+This migration is **backend-only** and does not modify auth, transactions, or product IDs.
+
+### Required environment variables
+
+Add these to your `.env` (or exported shell env) before running:
+
+```env
+CLOUDINARY_CLOUD_NAME=
+CLOUDINARY_API_KEY=
+CLOUDINARY_API_SECRET=
+FIREBASE_PROJECT_ID=
+FIREBASE_CLIENT_EMAIL=
+FIREBASE_PRIVATE_KEY=
+```
+
+> For `FIREBASE_PRIVATE_KEY`, keep newline escapes (`\n`) if storing in `.env`.
+
+### What the script does
+
+- Scans `products` collection docs and also `stores/{storeId}.products[]` entries.
+- Migrates only Firebase-hosted image URLs to Cloudinary.
+- Skips already-Cloudinary URLs.
+- Updates only image field (`imageUrl` if present, otherwise `image`) plus migration metadata:
+  - `migratedAt`
+  - `imageProvider: "cloudinary"`
+- Never deletes Firebase images.
+- Continues on failures and prints final report.
+
+### Run migration
+
+Dry run (no upload, no Firestore writes):
+
+```bash
+npm run migrate-images -- --dry-run
+```
+
+Live migration:
+
+```bash
+npm run migrate-images
+```
