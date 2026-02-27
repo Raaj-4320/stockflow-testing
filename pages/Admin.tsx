@@ -98,7 +98,7 @@ export default function Admin() {
     }
   }, [barcodePreview]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     // Strict Validation
     if (!formData.name || !formData.barcode || !formData.category || 
         formData.buyPrice === '' || formData.sellPrice === '' || formData.stock === '') {
@@ -116,20 +116,35 @@ export default function Admin() {
       stock: Number(formData.stock)
     } as Product;
 
-    if (editingProduct) {
-      const updated = updateProduct(productPayload);
-      setProducts(updated);
-    } else {
-      const updated = addProduct(productPayload);
-      setProducts(updated);
+    try {
+      if (editingProduct) {
+        const updated = await updateProduct(productPayload);
+        console.debug('[product] update success', { productId: productPayload.id });
+        setProducts(updated);
+      } else {
+        const updated = await addProduct(productPayload);
+        console.debug('[product] create success', { productId: productPayload.id });
+        setProducts(updated);
+      }
+      closeModal();
+    } catch (saveError) {
+      console.error('Product save error:', saveError);
+      const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
+      setError(message);
+      alert(message);
     }
-    closeModal();
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (window.confirm('Are you sure you want to permanently delete this product?')) {
-      const updated = deleteProduct(id);
-      setProducts(updated);
+      try {
+        const updated = await deleteProduct(id);
+        console.debug('[product] delete success', { productId: id });
+        setProducts(updated);
+      } catch (deleteError) {
+        console.error('Product delete error:', deleteError);
+        alert('Product deletion failed. Please try again.');
+      }
     }
   };
 
