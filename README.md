@@ -18,3 +18,40 @@ View your app in AI Studio: https://ai.studio/apps/16134093-ab82-40de-a0c3-e8029
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Firebase Storage CORS setup (required for Netlify + local dev)
+
+If product image uploads fail with browser CORS errors, configure your Firebase Storage bucket CORS policy.
+
+Create `cors.json`:
+
+```json
+[
+  {
+    "origin": [
+      "https://testing-stockflow.netlify.app",
+      "http://localhost:5173"
+    ],
+    "method": ["GET", "POST", "PUT"],
+    "responseHeader": [
+      "Content-Type",
+      "Authorization",
+      "x-goog-resumable",
+      "x-goog-meta-*"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+Apply it (replace bucket name):
+
+```bash
+gsutil cors set cors.json gs://YOUR_FIREBASE_STORAGE_BUCKET
+```
+
+Verify:
+
+```bash
+gsutil cors get gs://YOUR_FIREBASE_STORAGE_BUCKET
+```

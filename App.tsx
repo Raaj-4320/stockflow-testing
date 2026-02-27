@@ -8,7 +8,10 @@ import Transactions from './pages/Transactions';
 import Customers from './pages/Customers';
 import Settings from './pages/Settings';
 import Auth from './pages/Auth';
+import VerificationRequired from './pages/VerificationRequired';
 import { getCurrentUser, logout } from './services/auth';
+import { auth } from './services/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, ScanQrCode, RotateCcw, Layers, Menu, X, Settings as SettingsIcon, LogOut } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
@@ -53,32 +56,71 @@ const MenuController = ({ setIsMenuOpen }: { setIsMenuOpen: (open: boolean) => v
     return null;
 };
 
+const ProtectedRoute = ({ isVerified, children }: { isVerified: boolean; children: React.ReactElement }) => {
+  if (!isVerified) {
+    return <Navigate to="/verify-email" replace />;
+  }
+
+  return children;
+};
+
 export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(!!getCurrentUser());
+  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unverified' | 'unauthenticated'>('loading');
+  const [currentEmail, setCurrentEmail] = useState<string | null>(getCurrentUser());
   const [storeName, setStoreName] = useState('StockFlow');
-  
+
   useEffect(() => {
-      if (isAuthenticated) {
+    if (!auth) {
+      const cachedUser = getCurrentUser();
+      setCurrentEmail(cachedUser);
+      setAuthStatus(cachedUser ? 'authenticated' : 'unauthenticated');
+      return;
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        setCurrentEmail(null);
+        setAuthStatus('unauthenticated');
+        return;
+      }
+
+      setCurrentEmail(user.email || null);
+      setAuthStatus(user.emailVerified ? 'authenticated' : 'unverified');
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+      if (authStatus === 'authenticated') {
           const data = loadData();
           setStoreName(data.profile.storeName || 'StockFlow');
       }
-      
+
       const handleStorageUpdate = () => {
          const data = loadData();
          setStoreName(data.profile.storeName || 'StockFlow');
       };
-      
+
       window.addEventListener('local-storage-update', handleStorageUpdate);
       return () => window.removeEventListener('local-storage-update', handleStorageUpdate);
-  }, [isAuthenticated]);
+  }, [authStatus]);
 
   const handleLoginSuccess = () => {
-      setIsAuthenticated(true);
+      setAuthStatus('authenticated');
   };
 
-  if (!isAuthenticated) {
+  if (authStatus === 'loading') {
+    return <div className="min-h-screen bg-background" />;
+  }
+
+  if (authStatus === 'unauthenticated') {
       return <Auth onLogin={handleLoginSuccess} />;
+  }
+
+  if (authStatus === 'unverified') {
+      return <VerificationRequired email={currentEmail || undefined} />;
   }
 
   return (
@@ -114,7 +156,7 @@ export default function App() {
           
           <div className="p-4 border-t flex flex-col gap-2">
              <div className="text-xs text-muted-foreground mt-2">
-                <p>User: {getCurrentUser()}</p>
+                <p>User: {currentEmail}</p>
              </div>
              <Button variant="ghost" size="sm" onClick={logout} className="w-full text-muted-foreground hover:text-destructive justify-start px-2">
                 <LogOut className="w-4 h-4 mr-2" /> Logout
@@ -192,16 +234,17 @@ export default function App() {
         <main className="flex-1 overflow-auto bg-background">
           <div className="h-full p-4 md:p-8 pb-20 md:pb-8 max-w-7xl mx-auto">
             <Routes>
-              <Route path="/" element={<Admin />} />
-              <Route path="/transactions" element={<Transactions />} />
-              <Route path="/customers" element={<Customers />} />
-              <Route path="/pdf" element={<Reports />} />
-              <Route path="/settings" element={<Settings />} />
+              <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
+              <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />
+              <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
+              <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
+              <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
               
               {/* Unprotected Route (POS) */}
-              <Route path="/sales" element={<Sales />} />
-              <Route path="/barcode-pos" element={<BarcodeSales />} />
+              <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />
+              <Route path="/barcode-pos" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><BarcodeSales /></ProtectedRoute>} />
               
+              <Route path="/verify-email" element={<VerificationRequired email={currentEmail || undefined} />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>
           </div>

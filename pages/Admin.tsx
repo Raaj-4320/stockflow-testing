@@ -45,6 +45,7 @@ export default function Admin() {
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
   
   const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   const refreshData = () => {
     const data = loadData();
@@ -83,7 +84,7 @@ export default function Admin() {
   // Barcode Generation Effect
   useEffect(() => {
     if (barcodePreview && barcodeCanvasRef.current) {
-        try {
+    try {
             JsBarcode(barcodeCanvasRef.current, barcodePreview.barcode, {
                 format: "CODE128",
                 displayValue: true, // This includes the barcode number
@@ -98,7 +99,8 @@ export default function Admin() {
     }
   }, [barcodePreview]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (isSaving) return;
     // Strict Validation
     if (!formData.name || !formData.barcode || !formData.category || 
         formData.buyPrice === '' || formData.sellPrice === '' || formData.stock === '') {
@@ -116,20 +118,38 @@ export default function Admin() {
       stock: Number(formData.stock)
     } as Product;
 
-    if (editingProduct) {
-      const updated = updateProduct(productPayload);
-      setProducts(updated);
-    } else {
-      const updated = addProduct(productPayload);
-      setProducts(updated);
+    setIsSaving(true);
+    try {
+      if (editingProduct) {
+        const updated = await updateProduct(productPayload);
+        console.debug('[product] update success', { productId: productPayload.id });
+        setProducts(updated);
+      } else {
+        const updated = await addProduct(productPayload);
+        console.debug('[product] create success', { productId: productPayload.id });
+        setProducts(updated);
+      }
+      closeModal();
+    } catch (saveError) {
+      console.error('Product save error:', saveError);
+      const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
+      setError(message);
+      alert(message);
+    } finally {
+      setIsSaving(false);
     }
-    closeModal();
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (window.confirm('Are you sure you want to permanently delete this product?')) {
-      const updated = deleteProduct(id);
-      setProducts(updated);
+      try {
+        const updated = await deleteProduct(id);
+        console.debug('[product] delete success', { productId: id });
+        setProducts(updated);
+      } catch (deleteError) {
+        console.error('Product delete error:', deleteError);
+        alert('Product deletion failed. Please try again.');
+      }
     }
   };
 
@@ -938,8 +958,8 @@ export default function Admin() {
                 </div>
                 
                 <div className="pt-2">
-                    <Button className="w-full h-11 text-base shadow-lg" onClick={handleSave}>
-                        <Save className="w-4 h-4 mr-2" /> {editingProduct ? 'Update Product' : 'Save Product'}
+                    <Button className="w-full h-11 text-base shadow-lg" onClick={handleSave} disabled={isSaving}>
+                        <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Saving...' : editingProduct ? 'Update Product' : 'Save Product'}
                     </Button>
                 </div>
             </CardContent>
