@@ -191,7 +191,7 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
       'Storage download URL retrieval timed out'
     );
 
-    console.debug('[storage] Product image upload success', {
+    console.debug('[storage] Product image upload success');
     const uploadResult = await uploadString(imageRef, product.image, 'data_url');
     const downloadURL = await getDownloadURL(uploadResult.ref);
 
