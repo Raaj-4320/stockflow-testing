@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { login, register, resetPassword, resendVerificationEmail } from '../services/auth';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label } from '../components/ui';
 import { Package, ArrowRight, Lock, Mail, Eye, EyeOff, Loader2, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
@@ -13,6 +13,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isResending, setIsResending] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
   
   const [successMessage, setSuccessMessage] = useState('');
   const [error, setError] = useState('');
@@ -20,6 +21,16 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
   
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [resendCooldown]);
 
   const handleResendVerification = async () => {
     if (!email || !password) {
@@ -34,8 +45,9 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
     try {
       const result = await resendVerificationEmail(email, password);
       if (result.success) {
-        setSuccessMessage(result.message || "Verification email resent.");
+        setSuccessMessage(result.message || "If the email address is valid, a verification link has been sent.");
         setShowResend(false);
+        setResendCooldown(60);
       } else {
         setError(result.message || "Failed to resend verification email.");
       }
@@ -83,7 +95,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
 
         const result = await register(email, password, name);
         if (result.success) {
-          setSuccessMessage("Verification email sent! Please check your inbox (and spam folder). Verify your email to complete registration.");
+          setSuccessMessage("If the email address is valid, a verification link has been sent. Please check your inbox and verify your account before logging in.");
           setIsRegister(false);
           // Keep email and password in state so they can resend if needed
           // setName(''); 
@@ -104,7 +116,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
           onLogin();
         } else {
           setError(result.message || "Invalid credentials");
-          if (result.message?.includes("verify your email")) {
+          if (result.requiresVerification || result.message?.toLowerCase().includes("not verified")) {
             setShowResend(true);
           }
         }
@@ -145,14 +157,14 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                 size="sm" 
                 className="w-full text-xs h-9 border-primary/20 text-primary hover:bg-primary/5 animate-in fade-in slide-in-from-top-1"
                 onClick={handleResendVerification}
-                disabled={isResending}
+                disabled={isResending || resendCooldown > 0}
               >
                 {isResending ? (
                   <Loader2 className="w-3 h-3 mr-2 animate-spin" />
                 ) : (
                   <RefreshCw className="w-3 h-3 mr-2" />
                 )}
-                Resend Verification Email
+                Resend Verification Email{resendCooldown > 0 ? ` (${resendCooldown}s)` : ""}
               </Button>
             )}
 

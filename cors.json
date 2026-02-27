@@ -1,0 +1,12 @@
+[
+  {
+    "origin": [
+      "https://testing-stockflow.netlify.app",
+      "https://deploy-preview-3--testing-stockflow.netlify.app",
+      "http://localhost:5173"
+    ],
+    "method": ["GET", "POST", "PUT"],
+    "responseHeader": ["Content-Type", "Authorization"],
+    "maxAgeSeconds": 3600
+  }
+]
