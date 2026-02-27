@@ -1,8 +1,7 @@
 
 import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
-import { db, auth, storage } from './firebase';
+import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
-import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 import { onAuthStateChanged } from 'firebase/auth';
 
 let isCloudSynced = false;
@@ -127,7 +126,14 @@ const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
 };
 
-const STORAGE_UPLOAD_TIMEOUT_MS = 20000;
+const CLOUDINARY_UPLOAD_TIMEOUT_MS = 20000;
+
+type CloudinarySignResponse = {
+  timestamp: number;
+  signature: string;
+  apiKey: string;
+  cloudName: string;
+};
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -144,78 +150,82 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMes
   }
 };
 
-const getStorageErrorMessage = (error: any): string => {
-  const code = error?.code || '';
+const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
+  const response = await withTimeout(
+    fetch('/.netlify/functions/cloudinary-sign-upload', {
+      method: 'POST'
+    }),
+    CLOUDINARY_UPLOAD_TIMEOUT_MS,
+    'Cloudinary signature request timed out'
+  );
 
-  if (code.includes('unauthorized') || code.includes('permission-denied')) {
-    return 'Image upload failed due to storage permissions. Please contact support.';
+  if (!response.ok) {
+    throw new Error('Image upload failed. Please try again.');
   }
 
-  if (code.includes('quota-exceeded')) {
-    return 'Image upload failed because storage quota was exceeded. Please try again later.';
-  }
-
-  if (code.includes('retry-limit-exceeded') || code.includes('unknown')) {
-    return 'Image upload failed. Please try again.';
-  }
-
-  if ((error?.message || '').toLowerCase().includes('timed out')) {
-    return 'Image upload failed. Please try again.';
-    return 'Image upload failed due to a network or CORS configuration issue. Please try again.';
-  }
-
-  return 'Image upload failed. Please try again.';
+  return response.json() as Promise<CloudinarySignResponse>;
 };
 
-const uploadProductImageIfNeeded = async (
-  product: Product,
-  userId: string
-): Promise<Product> => {
-  if (!storage || !isDataUrlImage(product.image)) {
+const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
+  const signedParams = await getCloudinarySignature();
+
+  const formData = new FormData();
+  formData.append('file', dataUrl);
+  formData.append('timestamp', String(signedParams.timestamp));
+  formData.append('signature', signedParams.signature);
+  formData.append('api_key', signedParams.apiKey);
+
+  const uploadResponse = await withTimeout(
+    fetch(`https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`, {
+      method: 'POST',
+      body: formData
+    }),
+    CLOUDINARY_UPLOAD_TIMEOUT_MS,
+    'Cloudinary upload timed out'
+  );
+
+  if (!uploadResponse.ok) {
+    throw new Error('Image upload failed. Please try again.');
+  }
+
+  const uploadBody = await uploadResponse.json();
+  if (!uploadBody?.secure_url) {
+    throw new Error('Image upload failed. Please try again.');
+  }
+
+  return uploadBody.secure_url as string;
+};
+
+const uploadProductImageIfNeeded = async (product: Product): Promise<Product> => {
+  if (!isDataUrlImage(product.image)) {
     return product;
   }
 
   try {
-    const imageRef = ref(
-      storage,
-      `stores/${userId}/products/${product.id}-${Date.now()}.jpg`
-    );
-
-    console.debug('[storage] Product image upload start', {
-      productId: product.id,
-      path: imageRef.fullPath
+    console.debug('[cloudinary] Product image upload start', {
+      productId: product.id
     });
 
-    const uploadResult = await withTimeout(
-      uploadString(imageRef, product.image, 'data_url'),
-      STORAGE_UPLOAD_TIMEOUT_MS,
-      'Storage upload timed out'
-    );
+    const secureUrl = await uploadDataUrlToCloudinary(product.image);
 
-    const downloadURL = await withTimeout(
-      getDownloadURL(uploadResult.ref),
-      STORAGE_UPLOAD_TIMEOUT_MS,
-      'Storage download URL retrieval timed out'
-    );
-
-    console.debug('[storage] Product image uploaded', {
+    console.debug('[cloudinary] Product image upload success', {
       productId: product.id,
-      fullPath: uploadResult.ref.fullPath,
-      bucket: uploadResult.ref.bucket
+      imageUrl: secureUrl
     });
 
-    return { ...product, image: downloadURL };
+    return { ...product, image: secureUrl };
   } catch (error) {
-    console.error('[storage] Product image upload failure', {
+    console.error('[cloudinary] Product image upload failure', {
       productId: product.id,
       error
     });
 
-    throw new Error(getStorageErrorMessage(error));
+    throw new Error('Image upload failed. Please try again.');
   }
 };
-const normalizeProductsForCloud = async (products: Product[], userId: string): Promise<Product[]> => {
-  return Promise.all(products.map(product => uploadProductImageIfNeeded(product, userId)));
+
+const normalizeProductsForCloud = async (products: Product[]): Promise<Product[]> => {
+  return Promise.all(products.map(product => uploadProductImageIfNeeded(product)));
 };
 
 const syncToCloud = async (data: AppState) => {
@@ -224,7 +234,7 @@ const syncToCloud = async (data: AppState) => {
     if (!user) return;
 
     try {
-        const normalizedProducts = await normalizeProductsForCloud(data.products || [], user.uid);
+        const normalizedProducts = await normalizeProductsForCloud(data.products || []);
         const normalizedState = { ...data, products: normalizedProducts };
         const cleanData = sanitizeData(normalizedState);
         await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
@@ -307,8 +317,7 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const userId = auth?.currentUser?.uid || 'local';
-  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 }, userId);
+  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 });
   const newProducts = [...data.products, preparedProduct];
   await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
@@ -316,8 +325,7 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const userId = auth?.currentUser?.uid || 'local';
-  const preparedProduct = await uploadProductImageIfNeeded(product, userId);
+  const preparedProduct = await uploadProductImageIfNeeded(product);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
   await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
