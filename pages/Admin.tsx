@@ -45,6 +45,7 @@ export default function Admin() {
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
   
   const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   const refreshData = () => {
     const data = loadData();
@@ -83,7 +84,7 @@ export default function Admin() {
   // Barcode Generation Effect
   useEffect(() => {
     if (barcodePreview && barcodeCanvasRef.current) {
-        try {
+    try {
             JsBarcode(barcodeCanvasRef.current, barcodePreview.barcode, {
                 format: "CODE128",
                 displayValue: true, // This includes the barcode number
@@ -99,6 +100,7 @@ export default function Admin() {
   }, [barcodePreview]);
 
   const handleSave = async () => {
+    if (isSaving) return;
     // Strict Validation
     if (!formData.name || !formData.barcode || !formData.category || 
         formData.buyPrice === '' || formData.sellPrice === '' || formData.stock === '') {
@@ -116,6 +118,7 @@ export default function Admin() {
       stock: Number(formData.stock)
     } as Product;
 
+    setIsSaving(true);
     try {
       if (editingProduct) {
         const updated = await updateProduct(productPayload);
@@ -132,6 +135,8 @@ export default function Admin() {
       const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
       setError(message);
       alert(message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -953,8 +958,8 @@ export default function Admin() {
                 </div>
                 
                 <div className="pt-2">
-                    <Button className="w-full h-11 text-base shadow-lg" onClick={handleSave}>
-                        <Save className="w-4 h-4 mr-2" /> {editingProduct ? 'Update Product' : 'Save Product'}
+                    <Button className="w-full h-11 text-base shadow-lg" onClick={handleSave} disabled={isSaving}>
+                        <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Saving...' : editingProduct ? 'Update Product' : 'Save Product'}
                     </Button>
                 </div>
             </CardContent>

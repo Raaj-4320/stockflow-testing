@@ -127,6 +127,24 @@ const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
 };
 
+const getStorageErrorMessage = (error: any): string => {
+  const code = error?.code || '';
+
+  if (code.includes('unauthorized') || code.includes('permission-denied')) {
+    return 'Image upload failed due to storage permissions. Please contact support.';
+  }
+
+  if (code.includes('quota-exceeded')) {
+    return 'Image upload failed because storage quota was exceeded. Please try again later.';
+  }
+
+  if (code.includes('retry-limit-exceeded') || code.includes('unknown')) {
+    return 'Image upload failed due to a network or CORS configuration issue. Please try again.';
+  }
+
+  return 'Image upload failed. Please try again.';
+};
+
 const uploadProductImageIfNeeded = async (product: Product, userId: string): Promise<Product> => {
   if (!storage || !isDataUrlImage(product.image)) {
     return product;
@@ -146,6 +164,7 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
     return { ...product, image: downloadURL };
   } catch (error) {
     console.error('[storage] Product image upload failed', { productId: product.id, error });
+    throw new Error(getStorageErrorMessage(error));
     throw new Error('Product image upload failed. Please check storage permissions and try again.');
   }
 };
@@ -406,4 +425,3 @@ export const processTransaction = (transaction: Transaction): AppState => {
   void saveData(newState);
   return newState;
 };
-
