@@ -26,6 +26,7 @@ If product image uploads fail with browser CORS errors, configure your Firebase 
 ⚠️ **Important:** Merging this PR does **not** fix browser CORS errors by itself. You must run `gsutil cors set cors.json gs://stockflow-d8de7.firebasestorage.app` in Google Cloud for the bucket configuration change to take effect.
 
 Create `cors.json` with the exact content below:
+Create `cors.json`:
 
 ```json
 [
@@ -37,6 +38,15 @@ Create `cors.json` with the exact content below:
     ],
     "method": ["GET", "POST", "PUT"],
     "responseHeader": ["Content-Type", "Authorization"],
+      "http://localhost:5173"
+    ],
+    "method": ["GET", "POST", "PUT"],
+    "responseHeader": [
+      "Content-Type",
+      "Authorization",
+      "x-goog-resumable",
+      "x-goog-meta-*"
+    ],
     "maxAgeSeconds": 3600
   }
 ]
@@ -100,4 +110,14 @@ Live migration:
 
 ```bash
 npm run migrate-images
+Apply it (replace bucket name):
+
+```bash
+gsutil cors set cors.json gs://YOUR_FIREBASE_STORAGE_BUCKET
+```
+
+Verify:
+
+```bash
+gsutil cors get gs://YOUR_FIREBASE_STORAGE_BUCKET
 ```

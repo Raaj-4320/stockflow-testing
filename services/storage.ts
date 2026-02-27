@@ -161,6 +161,7 @@ const getStorageErrorMessage = (error: any): string => {
 
   if ((error?.message || '').toLowerCase().includes('timed out')) {
     return 'Image upload failed. Please try again.';
+    return 'Image upload failed due to a network or CORS configuration issue. Please try again.';
   }
 
   return 'Image upload failed. Please try again.';
@@ -191,6 +192,10 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
     );
 
     console.debug('[storage] Product image upload success', {
+    const uploadResult = await uploadString(imageRef, product.image, 'data_url');
+    const downloadURL = await getDownloadURL(uploadResult.ref);
+
+    console.debug('[storage] Product image uploaded', {
       productId: product.id,
       fullPath: uploadResult.ref.fullPath,
       bucket: uploadResult.ref.bucket
@@ -200,6 +205,9 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
   } catch (error) {
     console.error('[storage] Product image upload failure', { productId: product.id, error });
     throw new Error(getStorageErrorMessage(error));
+    console.error('[storage] Product image upload failed', { productId: product.id, error });
+    throw new Error(getStorageErrorMessage(error));
+    throw new Error('Product image upload failed. Please check storage permissions and try again.');
   }
 };
 
