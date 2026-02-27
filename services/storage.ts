@@ -167,13 +167,20 @@ const getStorageErrorMessage = (error: any): string => {
   return 'Image upload failed. Please try again.';
 };
 
-const uploadProductImageIfNeeded = async (product: Product, userId: string): Promise<Product> => {
+const uploadProductImageIfNeeded = async (
+  product: Product,
+  userId: string
+): Promise<Product> => {
   if (!storage || !isDataUrlImage(product.image)) {
     return product;
   }
 
   try {
-    const imageRef = ref(storage, `stores/${userId}/products/${product.id}-${Date.now()}.jpg`);
+    const imageRef = ref(
+      storage,
+      `stores/${userId}/products/${product.id}-${Date.now()}.jpg`
+    );
+
     console.debug('[storage] Product image upload start', {
       productId: product.id,
       path: imageRef.fullPath
@@ -191,10 +198,6 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
       'Storage download URL retrieval timed out'
     );
 
-    console.debug('[storage] Product image upload success');
-    const uploadResult = await uploadString(imageRef, product.image, 'data_url');
-    const downloadURL = await getDownloadURL(uploadResult.ref);
-
     console.debug('[storage] Product image uploaded', {
       productId: product.id,
       fullPath: uploadResult.ref.fullPath,
@@ -203,14 +206,14 @@ const uploadProductImageIfNeeded = async (product: Product, userId: string): Pro
 
     return { ...product, image: downloadURL };
   } catch (error) {
-    console.error('[storage] Product image upload failure', { productId: product.id, error });
+    console.error('[storage] Product image upload failure', {
+      productId: product.id,
+      error
+    });
+
     throw new Error(getStorageErrorMessage(error));
-    console.error('[storage] Product image upload failed', { productId: product.id, error });
-    throw new Error(getStorageErrorMessage(error));
-    throw new Error('Product image upload failed. Please check storage permissions and try again.');
   }
 };
-
 const normalizeProductsForCloud = async (products: Product[], userId: string): Promise<Product[]> => {
   return Promise.all(products.map(product => uploadProductImageIfNeeded(product, userId)));
 };
