@@ -1,0 +1,1123 @@
+
+import React, { useState, useEffect, useMemo } from 'react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import { Customer, Transaction, Product, UpfrontOrder } from '../types';
+import { loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment } from '../services/storage';
+import { generateReceiptPDF } from '../services/pdf';
+import { ExportModal } from '../components/ExportModal';
+import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
+import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label } from '../components/ui';
+import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
+
+export default function Customers() {
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  
+  // Modal States
+  const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
+  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isUpfrontOrderModalOpen, setIsUpfrontOrderModalOpen] = useState(false);
+  const [isCollectPaymentModalOpen, setIsCollectPaymentModalOpen] = useState(false);
+  const [isAdminPasswordModalOpen, setIsAdminPasswordModalOpen] = useState(false);
+  const [editingUpfrontOrder, setEditingUpfrontOrder] = useState<UpfrontOrder | null>(null);
+  const [selectedUpfrontOrder, setSelectedUpfrontOrder] = useState<UpfrontOrder | null>(null);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportType, setExportType] = useState<'statement' | 'dues_report' | 'invoice'>('statement');
+  const [txToExport, setTxToExport] = useState<Transaction | null>(null);
+
+  // Form State
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Online'>('Cash');
+  const [paymentNote, setPaymentNote] = useState('');
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [addCustomerError, setAddCustomerError] = useState<string | null>(null);
+  const [upfrontOrderError, setUpfrontOrderError] = useState<string | null>(null);
+  const [collectPaymentError, setCollectPaymentError] = useState<string | null>(null);
+  
+  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '' });
+  
+  // Upfront Order Form State
+  const [upfrontOrderForm, setUpfrontOrderForm] = useState({
+    productName: '',
+    quantity: '',
+    isCarton: true,
+    cartonPriceAdmin: '',
+    cartonPriceCustomer: '',
+    totalCost: '',
+    advancePaid: '',
+    reminderDate: '',
+    notes: ''
+  });
+  const [adminPassword, setAdminPassword] = useState('');
+  const [collectAmount, setCollectAmount] = useState('');
+
+  // Filter & Sort State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterType, setFilterType] = useState('all_time');
+  const [sortBy, setSortBy] = useState<'spend' | 'due' | 'lastVisit'>('spend');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  const refreshData = () => {
+    const data = loadData();
+    setCustomers(data.customers);
+    setTransactions(data.transactions);
+    setUpfrontOrders(data.upfrontOrders || []);
+    
+    if (viewingCustomer) {
+        const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
+        if (updatedC) setViewingCustomer(updatedC);
+        else setViewingCustomer(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshData();
+    window.addEventListener('storage', refreshData);
+    window.addEventListener('local-storage-update', refreshData);
+    return () => {
+        window.removeEventListener('storage', refreshData);
+        window.removeEventListener('local-storage-update', refreshData);
+    };
+  }, []);
+
+  const highValueThreshold = useMemo(() => {
+    if (customers.length < 3) return Infinity;
+    const sorted = [...customers].sort((a, b) => b.totalSpend - a.totalSpend);
+    const index = Math.max(0, Math.floor(customers.length * 0.1));
+    return sorted[index].totalSpend;
+  }, [customers]);
+
+  const filteredData = useMemo(() => {
+    let processed = [...customers];
+    
+    if (searchQuery) {
+        const lowerQ = searchQuery.toLowerCase();
+        processed = processed.filter(c => 
+            c.name.toLowerCase().includes(lowerQ) || 
+            c.phone.includes(lowerQ)
+        );
+    }
+    
+    if (filterType === 'has_due') {
+        processed = processed.filter(c => c.totalDue > 0);
+    }
+    
+    processed.sort((a, b) => {
+        let valA, valB;
+        if (sortBy === 'spend') { valA = a.totalSpend; valB = b.totalSpend; }
+        else if (sortBy === 'due') { valA = a.totalDue; valB = b.totalDue; }
+        else { valA = new Date(a.lastVisit).getTime(); valB = new Date(b.lastVisit).getTime(); }
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+    });
+
+    const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
+    return { displayCustomers: processed, totalDues, totalCount: processed.length };
+  }, [customers, searchQuery, filterType, sortBy, sortOrder]);
+
+  const customerHistory = useMemo(() => {
+      if (!viewingCustomer) return [];
+      const txs = transactions.filter(t => t.customerId === viewingCustomer.id);
+      const orders = upfrontOrders.filter(o => o.customerId === viewingCustomer.id);
+      
+      const combined = [
+          ...txs.map(t => ({ ...t, historyType: 'transaction' as const })),
+          ...orders.map(o => ({ ...o, historyType: 'upfrontOrder' as const }))
+      ];
+
+      return combined.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }, [transactions, upfrontOrders, viewingCustomer]);
+
+  const handleRecordPayment = () => {
+      setPaymentError(null);
+      if (!viewingCustomer || !paymentAmount) return;
+      const amount = parseFloat(paymentAmount);
+      
+      if (isNaN(amount) || amount <= 0) {
+          setPaymentError("Please enter a valid amount.");
+          return;
+      }
+
+      // ADMIN RESTRICTION: Payment cannot exceed current outstanding due
+      if (amount > (viewingCustomer.totalDue + 0.01)) { // Tiny buffer for float precision
+          setPaymentError(`Cannot pay more than outstanding due (Max: ₹${viewingCustomer.totalDue.toFixed(2)})`);
+          return;
+      }
+
+      const tx: Transaction = {
+          id: Date.now().toString(),
+          items: [],
+          total: amount,
+          date: new Date().toISOString(),
+          type: 'payment',
+          customerId: viewingCustomer.id,
+          customerName: viewingCustomer.name,
+          paymentMethod: paymentMethod,
+          notes: paymentNote
+      };
+      processTransaction(tx);
+      refreshData();
+      setIsPaymentModalOpen(false);
+      setPaymentAmount('');
+      setPaymentNote('');
+      setPaymentError(null);
+  };
+
+  const handleAddCustomerSubmit = () => {
+      setAddCustomerError(null);
+      const name = newCustomer.name.trim();
+      const rawPhone = newCustomer.phone.trim();
+      
+      if (!name || !rawPhone) {
+          setAddCustomerError("Name and phone number are required.");
+          return;
+      }
+
+      const normalizedPhoneInput = rawPhone.replace(/\D/g, '');
+      const currentData = loadData();
+      const isDuplicate = currentData.customers.some(c => c.phone.replace(/\D/g, '') === normalizedPhoneInput);
+
+      if (isDuplicate) {
+          setAddCustomerError(`Customer with phone "${rawPhone}" already exists.`);
+          return;
+      }
+
+      const customer: Customer = {
+          id: Date.now().toString(),
+          name: name,
+          phone: rawPhone,
+          totalSpend: 0,
+          totalDue: 0,
+          visitCount: 0,
+          lastVisit: new Date().toISOString()
+      };
+      
+      addCustomer(customer);
+      refreshData();
+      setIsAddModalOpen(false);
+      setNewCustomer({ name: '', phone: '' });
+  };
+
+  const handleSaveUpfrontOrder = () => {
+      if (!viewingCustomer) return;
+      setUpfrontOrderError(null);
+      
+      const cost = parseFloat(upfrontOrderForm.totalCost) || 0;
+      const advance = parseFloat(upfrontOrderForm.advancePaid) || 0;
+
+      if (cost <= 0) {
+          setUpfrontOrderError("Total cost must be greater than zero.");
+          return;
+      }
+
+      if (advance > cost) {
+          setUpfrontOrderError("Advance payment cannot exceed total cost.");
+          return;
+      }
+
+      const remaining = cost - advance;
+      
+      const order: UpfrontOrder = {
+          id: editingUpfrontOrder?.id || Date.now().toString(),
+          customerId: viewingCustomer.id,
+          productName: upfrontOrderForm.productName,
+          quantity: parseFloat(upfrontOrderForm.quantity) || 0,
+          isCarton: upfrontOrderForm.isCarton,
+          cartonPriceAdmin: parseFloat(upfrontOrderForm.cartonPriceAdmin) || 0,
+          cartonPriceCustomer: parseFloat(upfrontOrderForm.cartonPriceCustomer) || 0,
+          totalCost: cost,
+          advancePaid: advance,
+          remainingAmount: Math.max(0, remaining),
+          date: editingUpfrontOrder?.date || new Date().toISOString(),
+          reminderDate: upfrontOrderForm.reminderDate,
+          status: remaining <= 0 ? 'cleared' : 'unpaid',
+          notes: upfrontOrderForm.notes
+      };
+
+      if (editingUpfrontOrder) {
+          updateUpfrontOrder(order);
+      } else {
+          addUpfrontOrder(order);
+      }
+      
+      refreshData();
+      setIsUpfrontOrderModalOpen(false);
+      setEditingUpfrontOrder(null);
+      setUpfrontOrderForm({
+          productName: '',
+          quantity: '',
+          isCarton: true,
+          cartonPriceAdmin: '',
+          cartonPriceCustomer: '',
+          totalCost: '',
+          advancePaid: '',
+          reminderDate: '',
+          notes: ''
+      });
+  };
+
+  const handleCollectUpfrontPayment = () => {
+      if (!selectedUpfrontOrder || !collectAmount) return;
+      setCollectPaymentError(null);
+      
+      const amount = parseFloat(collectAmount);
+      if (isNaN(amount) || amount <= 0) {
+          setCollectPaymentError("Please enter a valid amount.");
+          return;
+      }
+
+      if (amount > selectedUpfrontOrder.remainingAmount + 0.01) {
+          setCollectPaymentError(`Cannot collect more than remaining balance (₹${selectedUpfrontOrder.remainingAmount.toFixed(2)})`);
+          return;
+      }
+
+      collectUpfrontPayment(selectedUpfrontOrder.id, amount);
+      refreshData();
+      setIsCollectPaymentModalOpen(false);
+      setCollectAmount('');
+      setSelectedUpfrontOrder(null);
+      setCollectPaymentError(null);
+  };
+
+  const handleAdminPasswordSubmit = () => {
+      // Password check removed as per new security policy
+      setIsAdminPasswordModalOpen(false);
+      setAdminPassword('');
+      if (selectedUpfrontOrder) {
+          setEditingUpfrontOrder(selectedUpfrontOrder);
+          setUpfrontOrderForm({
+              productName: selectedUpfrontOrder.productName,
+              quantity: selectedUpfrontOrder.quantity.toString(),
+              isCarton: selectedUpfrontOrder.isCarton,
+              cartonPriceAdmin: selectedUpfrontOrder.cartonPriceAdmin.toString(),
+              cartonPriceCustomer: selectedUpfrontOrder.cartonPriceCustomer.toString(),
+              totalCost: selectedUpfrontOrder.totalCost.toString(),
+              advancePaid: selectedUpfrontOrder.advancePaid.toString(),
+              reminderDate: selectedUpfrontOrder.reminderDate || '',
+              notes: selectedUpfrontOrder.notes || ''
+          });
+          setIsUpfrontOrderModalOpen(true);
+          setSelectedUpfrontOrder(null);
+      }
+  };
+
+  const handleDeleteCustomer = () => {
+      if (!viewingCustomer) return;
+      if (deleteConfirmName.trim() === viewingCustomer.name) {
+          deleteCustomer(viewingCustomer.id);
+          refreshData();
+          setIsDeleteModalOpen(false);
+          setDeleteConfirmName('');
+          setViewingCustomer(null);
+      }
+  };
+
+  const generateStatementPDF = () => {
+      if (!viewingCustomer) return;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const { profile } = loadData();
+
+      // Header Banner
+      doc.setFillColor(15, 48, 87);
+      doc.rect(0, 0, pageWidth, 15, 'F');
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(14);
+      doc.setTextColor(255, 255, 255);
+      doc.text(profile.storeName?.toUpperCase() || "STOCKFLOW ERP", pageWidth / 2, 10, { align: "center" });
+
+      // Period Section
+      const history = [...customerHistory].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      const startDate = history.length > 0 ? new Date(history[0].date).toLocaleDateString() : "N/A";
+      const endDate = history.length > 0 ? new Date(history[history.length - 1].date).toLocaleDateString() : new Date().toLocaleDateString();
+
+      doc.setDrawColor(15, 48, 87);
+      doc.setFillColor(211, 227, 245);
+      doc.rect(14, 20, 40, 10, 'F');
+      doc.rect(14, 20, 40, 10, 'D');
+      doc.setFontSize(10);
+      doc.setTextColor(15, 48, 87);
+      doc.text("Period", 34, 26, { align: "center" });
+
+      doc.setFillColor(255, 255, 255);
+      doc.rect(54, 20, pageWidth - 68, 10, 'F');
+      doc.rect(54, 20, pageWidth - 68, 10, 'D');
+      doc.setFontSize(10);
+      doc.setTextColor(0, 0, 0);
+      doc.text(`${startDate} To ${endDate}`, (54 + pageWidth - 14) / 2, 26, { align: "center" });
+
+      // Party Details
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "bold");
+      doc.text("Party Statement", 14, 40);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.text(`Party Name: ${viewingCustomer.name.toUpperCase()}`, 14, 46);
+      doc.text(`Contact: ${viewingCustomer.phone}`, 14, 51);
+      doc.text(`Email: ${profile.email || "-"}`, pageWidth - 14, 46, { align: "right" });
+      doc.text(`GSTIN: ${profile.gstin || "-"}`, pageWidth - 14, 51, { align: "right" });
+
+      // Ledger Logic (Correcting the running balance bug)
+      let runningBalance = 0;
+      let totalSalesAmount = 0;
+      let totalReceiptsAmount = 0;
+
+      const bodyData = history.map((tx) => {
+          const isSale = tx.type === 'sale';
+          const isPayment = tx.type === 'payment';
+          const isReturn = tx.type === 'return';
+          const isCredit = tx.paymentMethod === 'Credit';
+          
+          const amount = Math.abs(tx.total);
+          
+          // DEBIT logic: Every sale is a debit (entry in ledger)
+          const debit = isSale ? amount : 0;
+          
+          // CREDIT logic: 
+          // 1. Payments and returns are always credits
+          // 2. IMPORTANT: If a sale was PAID (Cash/Online), it is ALSO a credit (offsets the debit immediately)
+          let credit = (isPayment || isReturn) ? amount : 0;
+          if (isSale && !isCredit) {
+              credit += amount; // Instant offset for cash sales
+          }
+          
+          if (isSale) totalSalesAmount += debit;
+          if (isPayment || isReturn) totalReceiptsAmount += (isPayment ? amount : 0);
+          
+          runningBalance += (debit - credit);
+
+          const statusLabel = runningBalance >= 0 ? "Dr" : "Cr";
+          const description = isSale ? `Invoice #${tx.id.slice(-6)}` : 
+                             (isReturn ? `Return #${tx.id.slice(-6)}` : `Payment #${tx.id.slice(-6)}`);
+
+          return {
+              date: new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }),
+              desc: description,
+              debit: debit > 0 ? `${debit.toFixed(2)}` : "",
+              credit: credit > 0 ? `${credit.toFixed(2)}` : "",
+              type: statusLabel,
+              balance: `${Math.abs(runningBalance).toFixed(2)}`,
+              rawType: tx.type,
+              pm: tx.paymentMethod
+          };
+      });
+
+      const tableRows = bodyData.map(d => [d.date, d.desc, d.debit, d.credit, d.type, d.balance]);
+      tableRows.unshift([startDate, "Opening Balance", "", "", "Dr", "0.00"]);
+
+      autoTable(doc, {
+          startY: 60,
+          head: [['Date', 'Description', 'Debit (Rs.)', 'Credit (Rs.)', 'Dr/CR', 'Balance (Rs.)']],
+          body: tableRows,
+          theme: 'grid',
+          headStyles: { 
+              fillColor: [247, 201, 172],
+              textColor: [0, 0, 0], 
+              fontSize: 9, 
+              fontStyle: 'bold',
+              halign: 'center'
+          },
+          styles: { 
+              fontSize: 8, 
+              cellPadding: 2.5, 
+              halign: 'center',
+              lineColor: [200, 200, 200]
+          },
+          columnStyles: {
+              0: { cellWidth: 20 },
+              1: { halign: 'left', cellWidth: 'auto' },
+              2: { halign: 'right', cellWidth: 28 }, 
+              3: { halign: 'right', cellWidth: 28 }, 
+              4: { cellWidth: 15 },
+              5: { halign: 'right', fontStyle: 'bold', cellWidth: 35 }
+          },
+          didParseCell: (data) => {
+              if (data.section === 'body' && data.row.index > 0) {
+                  const rowMeta = bodyData[data.row.index - 1];
+                  
+                  // Color Debit Column
+                  if (data.column.index === 2 && rowMeta.debit !== "") {
+                      // Sale: Green if Paid, Red if Unpaid (Credit)
+                      if (rowMeta.pm === 'Cash' || rowMeta.pm === 'Online') {
+                          data.cell.styles.textColor = [21, 128, 61]; // Green
+                      } else {
+                          data.cell.styles.textColor = [185, 28, 28]; // Red
+                      }
+                  }
+                  
+                  // Color Credit Column
+                  if (data.column.index === 3 && rowMeta.credit !== "") {
+                      if (rowMeta.rawType === 'payment') {
+                          data.cell.styles.textColor = [217, 119, 6]; // Yellow (Payment towards dues)
+                      } else if (rowMeta.rawType === 'return') {
+                          data.cell.styles.textColor = [185, 28, 28]; // Red (Return)
+                      } else {
+                          // Automatic credit for cash sale
+                          data.cell.styles.textColor = [21, 128, 61]; // Green
+                      }
+                  }
+              }
+          }
+      });
+
+      // Summary Block
+      const finalY = (doc as any).lastAutoTable.finalY + 10;
+      doc.setFillColor(15, 48, 87);
+      doc.rect(pageWidth - 84, finalY, 70, 32, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(10);
+      doc.text("Statement Summary", pageWidth - 49, finalY + 7, { align: "center" });
+      
+      doc.setFontSize(8);
+      doc.text(`Total Sales: Rs. ${totalSalesAmount.toLocaleString()}`, pageWidth - 80, finalY + 15);
+      doc.text(`Total Receipts: Rs. ${totalReceiptsAmount.toLocaleString()}`, pageWidth - 80, finalY + 20);
+      
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "bold");
+      doc.text(`Final Due: Rs. ${Math.abs(runningBalance).toLocaleString()}`, pageWidth - 80, finalY + 27);
+
+      doc.save(`Statement_${viewingCustomer.name.replace(/\s+/g, '_')}.pdf`);
+  };
+
+  const generateAllCustomersPDF = () => {
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      doc.setFillColor(15, 23, 42); doc.rect(0, 0, pageWidth, 40, 'F');
+      doc.setFontSize(20); doc.setTextColor(255, 255, 255); doc.text("Customer Dues Report", 14, 20);
+      doc.setFontSize(10); doc.setTextColor(203, 213, 225); doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
+      const tableBody = filteredData.displayCustomers.map(c => [c.name, c.phone, `Rs.${c.totalSpend.toFixed(0)}`, `Rs.${c.totalDue.toFixed(2)}`]);
+      tableBody.push(['TOTAL', '', '', `Rs.${filteredData.totalDues.toFixed(2)}`]);
+      autoTable(doc, { startY: 50, head: [['Name', 'Phone', 'Total Spend', 'Current Due']], body: tableBody, theme: 'striped', columnStyles: { 3: { halign: 'right', fontStyle: 'bold', textColor: [220, 38, 38] } } });
+      doc.save(`Customer_Dues_Report.pdf`);
+  };
+
+  const handleExport = (format: 'pdf' | 'excel') => {
+      if (exportType === 'statement' && viewingCustomer) {
+          if (format === 'pdf') {
+              generateStatementPDF();
+          } else {
+              exportCustomerStatementToExcel(viewingCustomer, customerHistory);
+          }
+      } else if (exportType === 'dues_report') {
+          if (format === 'pdf') {
+              generateAllCustomersPDF();
+          } else {
+              exportCustomersToExcel(filteredData.displayCustomers);
+          }
+      } else if (exportType === 'invoice' && txToExport) {
+          if (format === 'pdf') {
+              generateReceiptPDF(txToExport, customers);
+          } else {
+              exportInvoiceToExcel(txToExport);
+          }
+      }
+  };
+
+  return (
+    <div className="space-y-6 pb-24 md:pb-0 relative">
+      <div className="sticky top-0 z-30 -mx-4 px-4 py-3 bg-background/80 backdrop-blur-md border-b shadow-sm space-y-3">
+          <div className="flex justify-between items-center">
+              <div>
+                <h1 className="text-xl md:text-3xl font-bold tracking-tight text-slate-900">Customers</h1>
+                <p className="text-xs md:text-sm text-muted-foreground hidden sm:block font-medium">Credit tracking and customer database.</p>
+              </div>
+              <div className="flex gap-2">
+                  <Button onClick={() => setIsAddModalOpen(true)} size="sm" className="h-8 md:h-9 bg-primary shadow-sm">
+                      <Plus className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Add Customer</span>
+                  </Button>
+                  <Button onClick={() => { setExportType('dues_report'); setIsExportModalOpen(true); }} variant="outline" size="sm" className="h-8 md:h-9 shadow-sm">
+                      <FileText className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Dues Report</span>
+                  </Button>
+              </div>
+          </div>
+          
+          {filteredData.totalDues > 0 && (
+             <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex justify-between items-center animate-in slide-in-from-top-2">
+                 <div className="flex items-center gap-2 text-red-700">
+                     <AlertCircle className="w-5 h-5" />
+                     <span className="text-xs font-bold uppercase tracking-wider">Overall Outstanding Dues</span>
+                 </div>
+                 <span className="text-lg font-bold text-red-800">₹{filteredData.totalDues.toLocaleString()}</span>
+             </div>
+          )}
+
+          <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input placeholder="Search name or phone..." className="pl-9 h-10 rounded-xl bg-slate-50 border-slate-200" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+            </div>
+            <div className="flex items-center bg-white rounded-xl px-2 border border-slate-200 shrink-0 shadow-sm">
+               <Select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)} className="h-full text-xs border-0 bg-transparent w-24 font-bold text-slate-700">
+                   <option value="spend">Spend</option>
+                   <option value="due">Due</option>
+                   <option value="lastVisit">Recent</option>
+               </Select>
+               <Button variant="ghost" size="icon" className="h-7 w-7 text-slate-500" onClick={() => setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}>
+                   {sortOrder === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+               </Button>
+            </div>
+          </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
+          {filteredData.displayCustomers.map((customer) => {
+              const isHighValue = customer.totalSpend >= highValueThreshold && customer.totalSpend > 0;
+              const hasDue = customer.totalDue > 0;
+              const lastActive = new Date(customer.lastVisit);
+              const isInactive = (new Date().getTime() - lastActive.getTime()) > (30 * 24 * 60 * 60 * 1000);
+              
+              return (
+                <Card 
+                    key={customer.id} 
+                    className={`cursor-pointer group flex flex-col hover:shadow-xl transition-all duration-300 relative border overflow-hidden min-h-[240px] ${isHighValue ? 'border-slate-800 bg-slate-50/10 shadow-md' : 'border-slate-200 bg-white'}`}
+                    onClick={() => setViewingCustomer(customer)}
+                >
+                    {isHighValue && (
+                        <div className="absolute top-0 right-0 p-1.5 z-10">
+                            <Badge className="bg-slate-800 text-white border-0 shadow-md text-[8px] h-4 sm:h-5 sm:text-[9px] font-bold uppercase tracking-tight">
+                                <Award className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1 mr-0.5 text-amber-400" /> Premium
+                            </Badge>
+                        </div>
+                    )}
+
+                    <CardContent className="p-2.5 sm:p-4 flex flex-col h-full justify-between items-center text-center">
+                        <div className="flex flex-col items-center w-full">
+                            <div className={`w-10 h-10 sm:w-16 sm:h-16 rounded-full flex items-center justify-center text-sm sm:text-2xl font-black text-white shadow-md transition-transform group-hover:scale-105 ${isHighValue ? 'bg-gradient-to-br from-slate-700 to-slate-900 ring-2 ring-slate-100' : 'bg-gradient-to-br from-slate-400 to-slate-500'}`}>
+                                {customer.name.charAt(0).toUpperCase()}
+                            </div>
+                            <div className="mt-2 sm:mt-3">
+                                <h3 className={`font-extrabold text-[11px] sm:text-sm line-clamp-1 leading-tight ${isHighValue ? 'text-slate-900' : 'text-slate-700'}`}>{customer.name}</h3>
+                                <p className="text-[10px] sm:text-xs text-slate-500 font-medium flex items-center justify-center gap-1 mt-1">
+                                    <Phone className="w-2.5 h-2.5" /> {customer.phone}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="w-full grid grid-cols-2 gap-0.5 py-1.5 sm:py-2.5 border-y border-slate-100 mt-1.5 sm:mt-3">
+                            <div className="flex flex-col items-center">
+                                <span className="text-[7px] sm:text-[9px] uppercase font-bold text-slate-400 leading-none mb-0.5">Purchases</span>
+                                <span className={`text-[10px] sm:text-xs font-black ${isHighValue ? 'text-slate-900' : 'text-slate-800'}`}>₹{customer.totalSpend.toLocaleString()}</span>
+                            </div>
+                            <div className="flex flex-col items-center border-l border-slate-100">
+                                <span className="text-[7px] sm:text-[9px] uppercase font-bold text-slate-400 leading-none mb-0.5">Dues</span>
+                                <span className={`text-[10px] sm:text-xs font-black ${hasDue ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(0)}</span>
+                            </div>
+                        </div>
+
+                        <div className="w-full pt-1.5 flex flex-col gap-1.5 mt-auto">
+                            {hasDue ? (
+                                <Badge variant="destructive" className="w-full justify-center py-0.5 h-4 sm:h-5 text-[8px] sm:text-[10px] font-bold rounded-sm shadow-sm">
+                                    OUTSTANDING
+                                </Badge>
+                            ) : (
+                                <Badge variant="outline" className="w-full justify-center py-0.5 h-4 sm:h-5 text-[8px] sm:text-[10px] text-emerald-700 bg-emerald-50 border-emerald-100 rounded-sm font-bold">
+                                    SETTLED
+                                </Badge>
+                            )}
+                            
+                            <div className="flex items-center justify-between text-[7px] sm:text-[9px] text-slate-400 px-0.5 font-medium min-h-[14px]">
+                                <span className="flex items-center gap-1">
+                                    <Activity className={`w-2 h-2 sm:w-2.5 sm:h-2.5 ${isInactive ? 'text-slate-200' : 'text-emerald-500'}`} />
+                                    {isInactive ? 'Inactive' : 'Active'}
+                                </span>
+                                <span>{new Date(customer.lastVisit).toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' })}</span>
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+              );
+          })}
+      </div>
+
+      {isAddModalOpen && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+              <Card className="w-full max-w-sm shadow-2xl animate-in zoom-in duration-300">
+                  <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
+                      <CardTitle className="text-lg">New Customer</CardTitle>
+                      <Button variant="ghost" size="icon" onClick={() => setIsAddModalOpen(false)}><X className="w-4 h-4" /></Button>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-6">
+                      {addCustomerError && (
+                          <div className="bg-destructive/10 text-destructive text-xs p-3 rounded-md flex items-center gap-2 font-bold animate-in slide-in-from-top-2 border border-destructive/20 shadow-sm">
+                              <AlertCircle className="w-4 h-4 shrink-0" /> {addCustomerError}
+                          </div>
+                      )}
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Full Name</Label>
+                        <Input placeholder="John Doe" value={newCustomer.name} onChange={e => setNewCustomer({...newCustomer, name: e.target.value})} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Phone Number</Label>
+                        <Input placeholder="9876543210" value={newCustomer.phone} onChange={e => setNewCustomer({...newCustomer, phone: e.target.value})} />
+                      </div>
+                      <Button className="w-full h-11 shadow-lg bg-primary hover:bg-primary/90 font-bold" onClick={handleAddCustomerSubmit}>
+                          Create Profile
+                      </Button>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {viewingCustomer && (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center sm:p-4">
+              <Card className="w-full h-[95vh] sm:h-[85vh] sm:max-w-lg flex flex-col rounded-t-2xl sm:rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-10">
+                  <CardHeader className="border-b pb-4 bg-muted/5">
+                      <div className="flex justify-between items-start">
+                          <div className="flex items-center gap-3">
+                                <div className="h-12 w-12 rounded-full bg-slate-800 text-white flex items-center justify-center text-xl font-bold shadow-lg">
+                                    {viewingCustomer.name.charAt(0).toUpperCase()}
+                                </div>
+                                <div>
+                                    <CardTitle className="text-xl flex items-center gap-2 leading-none">
+                                        {viewingCustomer.name}
+                                        {viewingCustomer.totalSpend >= highValueThreshold && <Badge className="bg-amber-100 text-amber-800 border-amber-200">VIP</Badge>}
+                                    </CardTitle>
+                                    <div className="text-sm text-muted-foreground flex items-center gap-2 mt-2"><Phone className="w-3 h-3" /> {viewingCustomer.phone}</div>
+                                </div>
+                          </div>
+                          <div className="flex gap-1">
+                              <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => setIsDeleteModalOpen(true)}><Trash2 className="w-4 h-4" /></Button>
+                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setViewingCustomer(null)}><X className="w-4 h-4" /></Button>
+                          </div>
+                      </div>
+                      <div className="flex gap-3 mt-6">
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomer.totalDue > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
+                               <div className={`text-2xl font-black ${viewingCustomer.totalDue > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{viewingCustomer.totalDue.toFixed(2)}</div>
+                           </div>
+                           <div className="flex flex-col gap-2">
+                               <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={viewingCustomer.totalDue <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
+                                   <Coins className="w-4 h-4 mr-1.5" /> Record Payment
+                               </Button>
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
+                                   <FileText className="w-4 h-4 mr-1.5" /> Get Statement
+                               </Button>
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-primary text-primary shadow-sm" onClick={() => { setUpfrontOrderError(null); setIsUpfrontOrderModalOpen(true); }}>
+                                   <Plus className="w-4 h-4 mr-1.5" /> Create Order +
+                               </Button>
+                           </div>
+                      </div>
+                  </CardHeader>
+                  <CardContent className="flex-1 overflow-y-auto p-0 bg-background">
+                      <div className="bg-slate-50 p-2.5 text-[10px] uppercase font-black px-4 text-slate-500 border-b tracking-widest flex justify-between sticky top-0 z-10 backdrop-blur-md bg-opacity-90">
+                          <span>History & Orders</span>
+                          <span className="flex items-center gap-1"><History className="w-3 h-3" /> Ledger List</span>
+                      </div>
+                      {customerHistory.length === 0 ? (
+                          <div className="p-16 flex flex-col items-center justify-center text-muted-foreground/40 italic">
+                             <ShoppingBag className="w-12 h-12 mb-2" />
+                             No activity yet.
+                          </div>
+                      ) : (
+                          <div className="divide-y divide-slate-100">
+                              {customerHistory.map(item => {
+                                if (item.historyType === 'transaction') {
+                                  const tx = item as Transaction;
+                                  return (
+                                    <div key={tx.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group cursor-pointer" onClick={() => tx.type !== 'payment' && setSelectedTx(tx)}>
+                                        <div className="flex items-center gap-3">
+                                            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-sm ${tx.type === 'payment' ? 'bg-emerald-100 text-emerald-700' : (tx.paymentMethod === 'Credit' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700')}`}>
+                                                {tx.type === 'payment' ? <Wallet className="w-5 h-5" /> : (tx.paymentMethod === 'Credit' ? <AlertCircle className="w-5 h-5" /> : <Package className="w-5 h-5" />)}
+                                            </div>
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">#{tx.id.slice(-6)}</span>
+                                                    <Badge variant={tx.type === 'payment' ? 'success' : (tx.paymentMethod === 'Credit' ? 'destructive' : 'secondary')} className="h-4 px-1.5 text-[9px] font-extrabold uppercase">
+                                                        {tx.type}
+                                                    </Badge>
+                                                </div>
+                                                <div className="text-xs font-bold mt-1 text-slate-800">
+                                                    {new Date(tx.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                                                    {tx.notes && <span className="font-medium text-muted-foreground ml-2 truncate max-w-[120px] inline-block align-middle border-l pl-2 italic">- {tx.notes}</span>}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3 text-right">
+                                            <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-emerald-700' : (tx.paymentMethod === 'Credit' ? 'text-red-700' : 'text-slate-900')}`}>
+                                                {tx.type === 'payment' ? '-' : ''}₹{Math.abs(tx.total).toFixed(2)}
+                                            </div>
+                                            {tx.type !== 'payment' && (
+                                                <div className="flex items-center gap-1">
+                                                    <Button 
+                                                        variant="ghost" 
+                                                        size="icon" 
+                                                        className="h-7 w-7 text-muted-foreground hover:text-primary"
+                                                        onClick={(e) => { e.stopPropagation(); setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}
+                                                        title="Download Receipt"
+                                                    >
+                                                        <FileText className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                  );
+                                } else {
+                                  const order = item as UpfrontOrder;
+                                  return (
+                                    <div key={order.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group cursor-pointer" onClick={() => { setCollectPaymentError(null); setSelectedUpfrontOrder(order); setIsCollectPaymentModalOpen(true); }}>
+                                        <div className="flex items-center gap-3">
+                                            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-sm bg-amber-100 text-amber-700`}>
+                                                <ShoppingBag className="w-5 h-5" />
+                                            </div>
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">#{order.id.slice(-6)}</span>
+                                                    <Badge className={`h-4 px-1.5 text-[9px] font-extrabold uppercase ${order.status === 'cleared' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                                        {order.status === 'cleared' ? 'Cleared' : 'Unpaid Order'}
+                                                    </Badge>
+                                                </div>
+                                                <div className="text-xs font-bold mt-1 text-slate-800">
+                                                    {order.productName} ({order.quantity} {order.isCarton ? 'Cartons' : 'Units'})
+                                                </div>
+                                                <div className="text-[10px] text-muted-foreground font-medium">
+                                                    {new Date(order.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3 text-right">
+                                            <div className="text-sm sm:text-base font-black text-amber-700">
+                                                ₹{order.totalCost.toFixed(2)}
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                                {order.status !== 'cleared' && (
+                                                    <Button 
+                                                        variant="ghost" 
+                                                        size="icon" 
+                                                        className="h-7 w-7 text-muted-foreground hover:text-primary"
+                                                        onClick={(e) => { e.stopPropagation(); setSelectedUpfrontOrder(order); setIsAdminPasswordModalOpen(true); }}
+                                                        title="Edit Order"
+                                                    >
+                                                        <Edit className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                )}
+                                                <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                  );
+                                }
+                              })}
+                          </div>
+                      )}
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {isPaymentModalOpen && viewingCustomer && (
+          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+              <Card className="w-full max-w-xs shadow-2xl animate-in zoom-in border-t-4 border-t-emerald-600 overflow-hidden">
+                  <CardHeader className="text-center bg-emerald-50/30 pb-4">
+                      <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-emerald-200">
+                          <Coins className="w-6 h-6" />
+                      </div>
+                      <CardTitle className="text-lg">Record Receipt</CardTitle>
+                      <p className="text-xs text-muted-foreground">Settling dues for <b>{viewingCustomer.name}</b></p>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-6">
+                      {paymentError && (
+                          <div className="bg-destructive/10 text-destructive text-[10px] p-2 rounded flex items-center gap-2 font-bold border border-destructive/20 animate-in slide-in-from-top-1">
+                              <AlertCircle className="w-4 h-4 shrink-0 text-red-600" /> {paymentError}
+                          </div>
+                      )}
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Amount Received</Label>
+                        <div className="relative group">
+                          <span className="absolute left-3 top-2.5 font-black text-slate-300 group-focus-within:text-emerald-500 transition-colors">₹</span>
+                          <Input 
+                            type="number" 
+                            className={`pl-8 text-xl font-black text-emerald-700 border-2 bg-slate-50 ${paymentError ? 'border-destructive' : 'focus:border-emerald-500'}`} 
+                            value={paymentAmount} 
+                            onChange={e => { setPaymentAmount(e.target.value); setPaymentError(null); }} 
+                            autoFocus 
+                          />
+                        </div>
+                        <p className="text-[10px] text-muted-foreground font-bold">Limit: ₹{viewingCustomer.totalDue.toFixed(2)}</p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Method</Label>
+                        <div className="grid grid-cols-2 gap-2">
+                            <Button size="sm" variant={paymentMethod === 'Cash' ? 'default' : 'outline'} className={paymentMethod === 'Cash' ? 'bg-emerald-600 hover:bg-emerald-700' : ''} onClick={() => setPaymentMethod('Cash')}>Cash</Button>
+                            <Button size="sm" variant={paymentMethod === 'Online' ? 'default' : 'outline'} className={paymentMethod === 'Online' ? 'bg-emerald-600 hover:bg-emerald-700' : ''} onClick={() => setPaymentMethod('Online')}>Online</Button>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Note</Label>
+                        <Input placeholder="Ref / Memo" value={paymentNote} onChange={e => setPaymentNote(e.target.value)} />
+                      </div>
+                      <div className="flex gap-2 pt-4 border-t">
+                          <Button variant="ghost" className="flex-1 font-bold text-xs" onClick={() => { setIsPaymentModalOpen(false); setPaymentError(null); }}>Cancel</Button>
+                          <Button className="flex-1 bg-emerald-700 font-bold text-xs shadow-md" onClick={handleRecordPayment}>Finalize</Button>
+                      </div>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {isDeleteModalOpen && viewingCustomer && (
+          <div className="fixed inset-0 bg-black/80 z-[70] flex items-center justify-center p-4">
+              <Card className="w-full max-w-sm border-t-4 border-t-destructive shadow-2xl animate-in zoom-in">
+                  <CardHeader><CardTitle className="text-destructive flex items-center gap-2"><Trash2 className="w-5 h-5" /> Delete Profile?</CardTitle></CardHeader>
+                  <CardContent className="space-y-4 pt-2">
+                      <p className="text-sm text-muted-foreground bg-red-50 p-3 rounded-lg border border-red-100">
+                         Removing <b>{viewingCustomer.name}</b> will clear their profile data and dues history.
+                      </p>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold text-slate-500 uppercase tracking-tight">Confirm Name</Label>
+                        <Input value={deleteConfirmName} onChange={e => setDeleteConfirmName(e.target.value)} placeholder={viewingCustomer.name} className="text-center font-bold" />
+                      </div>
+                      <div className="flex gap-2 pt-2">
+                        <Button variant="ghost" className="flex-1 font-bold" onClick={() => { setIsDeleteModalOpen(false); setDeleteConfirmName(''); }}>Cancel</Button>
+                        <Button className="flex-1 bg-destructive font-bold" disabled={deleteConfirmName !== viewingCustomer.name} onClick={handleDeleteCustomer}>Delete</Button>
+                      </div>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {selectedTx && (
+          <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-[70] backdrop-blur-sm">
+              <Card className="w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl animate-in zoom-in">
+                  <CardHeader className="border-b bg-slate-50/50 flex flex-row justify-between items-center py-4 px-6">
+                      <CardTitle className="text-lg font-black">Order Review #{selectedTx.id.slice(-6)}</CardTitle>
+                      <div className="flex items-center gap-1">
+                          <Button 
+                              variant="outline" 
+                              size="sm" 
+                              className="h-8 gap-1.5 text-xs font-bold"
+                              onClick={() => { setTxToExport(selectedTx); setExportType('invoice'); setIsExportModalOpen(true); }}
+                          >
+                              <Download className="w-3.5 h-3.5" />
+                              Invoice
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => setSelectedTx(null)} className="rounded-full"><X className="w-4 h-4" /></Button>
+                      </div>
+                  </CardHeader>
+                  <CardContent className="overflow-y-auto p-4 space-y-4">
+                      <div className="space-y-3">
+                        {selectedTx.items.map((item, i) => (
+                            <div key={i} className="flex gap-4 items-center border-b border-slate-100 pb-4 last:border-0">
+                                <div className="h-12 w-12 bg-white rounded-xl flex items-center justify-center shrink-0 border shadow-sm overflow-hidden">
+                                    {item.image ? <img src={item.image} className="w-full h-full object-contain" /> : <Package className="w-6 h-6 opacity-20" />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-black text-slate-800 leading-tight truncate">{item.name}</p>
+                                    <p className="text-[10px] font-bold text-muted-foreground mt-1 tracking-tight">
+                                        Qty: {item.quantity} <span className="mx-1">•</span> ₹{item.sellPrice.toFixed(0)}
+                                    </p>
+                                    {item.discountAmount !== undefined && item.discountAmount > 0 ? (
+                                        <p className="text-[9px] font-bold text-emerald-600 mt-0.5">
+                                            Discount: -₹{item.discountAmount.toFixed(2)} ({item.discountPercent}%)
+                                        </p>
+                                    ) : null}
+                                </div>
+                                <div className="text-sm font-black text-slate-900 bg-slate-50 px-2 py-1 rounded-lg">
+                                    ₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}
+                                </div>
+                            </div>
+                        ))}
+                      </div>
+
+                      <div className="bg-slate-900 p-5 rounded-2xl text-sm space-y-3 text-white shadow-xl mt-4">
+                          <div className="flex justify-between text-slate-400 font-bold uppercase text-[10px] tracking-widest">
+                              <span>Subtotal</span>
+                              <span>₹{selectedTx.subtotal?.toFixed(2)}</span>
+                          </div>
+                          
+                          <div className="flex justify-between text-emerald-400 font-bold uppercase text-[10px] tracking-widest">
+                              <span>Savings</span>
+                              {selectedTx.discount && selectedTx.discount > 0 ? (
+                                  <span>-₹{selectedTx.discount.toFixed(2)}</span>
+                              ) : (
+                                  <span className="text-slate-500 normal-case font-medium">No discount</span>
+                              )}
+                          </div>
+
+                          <div className="flex justify-between text-slate-400 font-bold uppercase text-[10px] tracking-widest">
+                              <span>Tax {selectedTx.tax && selectedTx.tax > 0 ? `(${selectedTx.taxLabel})` : ''}</span>
+                              {selectedTx.tax && selectedTx.tax > 0 ? (
+                                  <span>₹{selectedTx.tax.toFixed(2)}</span>
+                              ) : (
+                                  <span className="text-slate-500 normal-case font-medium">No tax applied</span>
+                              )}
+                          </div>
+
+                          <div className="h-px bg-slate-800 my-1"></div>
+                          <div className="flex justify-between font-black text-xl text-white"><span>Grand Total</span><span>₹{Math.abs(selectedTx.total).toFixed(2)}</span></div>
+                      </div>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {/* Upfront Order Modal */}
+      {isUpfrontOrderModalOpen && viewingCustomer && (
+          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+              <Card className="w-full max-w-md shadow-2xl animate-in zoom-in border-t-4 border-t-primary overflow-hidden">
+                  <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
+                      <CardTitle className="text-lg">{editingUpfrontOrder ? 'Edit Order' : 'Create New Order'}</CardTitle>
+                      <Button variant="ghost" size="icon" onClick={() => { setIsUpfrontOrderModalOpen(false); setEditingUpfrontOrder(null); setUpfrontOrderError(null); }}><X className="w-4 h-4" /></Button>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-6 max-h-[70vh] overflow-y-auto">
+                      {upfrontOrderError && (
+                          <div className="bg-red-50 border border-red-200 text-red-600 text-[10px] font-bold p-2 rounded-lg flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
+                              <AlertCircle className="w-3 h-3" />
+                              {upfrontOrderError}
+                          </div>
+                      )}
+                      <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Product Name</Label>
+                          <Input value={upfrontOrderForm.productName} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, productName: e.target.value})} placeholder="e.g. Premium Cotton Fabric" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Quantity</Label>
+                              <Input type="number" value={upfrontOrderForm.quantity} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, quantity: e.target.value})} placeholder="0" />
+                          </div>
+                          <div className="space-y-2">
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Unit Type</Label>
+                              <div className="flex gap-2">
+                                  <Button size="sm" variant={upfrontOrderForm.isCarton ? 'default' : 'outline'} className="flex-1" onClick={() => setUpfrontOrderForm({...upfrontOrderForm, isCarton: true})}>Carton</Button>
+                                  <Button size="sm" variant={!upfrontOrderForm.isCarton ? 'default' : 'outline'} className="flex-1" onClick={() => setUpfrontOrderForm({...upfrontOrderForm, isCarton: false})}>Unit</Button>
+                              </div>
+                          </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Admin Price ({upfrontOrderForm.isCarton ? 'Carton' : 'Unit'})</Label>
+                              <Input type="number" value={upfrontOrderForm.cartonPriceAdmin} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, cartonPriceAdmin: e.target.value})} placeholder="0.00" />
+                          </div>
+                          <div className="space-y-2">
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Cust Price ({upfrontOrderForm.isCarton ? 'Carton' : 'Unit'})</Label>
+                              <Input type="number" value={upfrontOrderForm.cartonPriceCustomer} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, cartonPriceCustomer: e.target.value})} placeholder="0.00" />
+                          </div>
+                      </div>
+                      <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Total Order Cost</Label>
+                          <Input type="number" value={upfrontOrderForm.totalCost} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, totalCost: e.target.value})} placeholder="0.00" />
+                      </div>
+                      <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Advance Paid</Label>
+                          <div className="relative">
+                              <Input type="number" value={upfrontOrderForm.advancePaid} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, advancePaid: e.target.value})} placeholder="0.00" />
+                              <div className="text-[10px] mt-1 font-bold text-red-600">
+                                  Remaining: ₹{(parseFloat(upfrontOrderForm.totalCost || '0') - parseFloat(upfrontOrderForm.advancePaid || '0')).toFixed(2)}
+                              </div>
+                          </div>
+                      </div>
+                      <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Reminder Date (Optional)</Label>
+                          <Input type="date" value={upfrontOrderForm.reminderDate} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, reminderDate: e.target.value})} />
+                      </div>
+                      <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Notes</Label>
+                          <Input value={upfrontOrderForm.notes} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, notes: e.target.value})} placeholder="Optional notes..." />
+                      </div>
+                      <Button className="w-full h-11 shadow-lg font-bold mt-4" onClick={handleSaveUpfrontOrder}>
+                          {editingUpfrontOrder ? 'Update Order' : 'Save Order'}
+                      </Button>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {/* Collect Payment Modal */}
+      {isCollectPaymentModalOpen && selectedUpfrontOrder && (
+          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+              <Card className="w-full max-w-xs shadow-2xl animate-in zoom-in border-t-4 border-t-emerald-600 overflow-hidden">
+                  <CardHeader className="text-center bg-emerald-50/30 pb-4">
+                      <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-emerald-200">
+                          <Coins className="w-6 h-6" />
+                      </div>
+                      <CardTitle className="text-lg">Collect Balance</CardTitle>
+                      <p className="text-xs text-muted-foreground">Order: <b>{selectedUpfrontOrder.productName}</b></p>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-6">
+                      {collectPaymentError && (
+                          <div className="bg-red-50 border border-red-200 text-red-600 text-[10px] font-bold p-2 rounded-lg flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
+                              <AlertCircle className="w-3 h-3" />
+                              {collectPaymentError}
+                          </div>
+                      )}
+                      <div className="bg-slate-50 p-3 rounded-lg border space-y-1">
+                          <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                              <span>Total Cost</span>
+                              <span>₹{selectedUpfrontOrder.totalCost.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between text-[10px] font-bold text-emerald-600 uppercase tracking-wider">
+                              <span>Paid So Far</span>
+                              <span>₹{selectedUpfrontOrder.advancePaid.toFixed(2)}</span>
+                          </div>
+                          <div className="h-px bg-slate-200 my-1"></div>
+                          <div className="flex justify-between text-xs font-black text-red-600">
+                              <span>Remaining</span>
+                              <span>₹{selectedUpfrontOrder.remainingAmount.toFixed(2)}</span>
+                          </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Amount to Collect</Label>
+                        <Input 
+                            type="number" 
+                            className="text-xl font-black text-emerald-700 border-2 bg-slate-50 focus:border-emerald-500" 
+                            value={collectAmount} 
+                            onChange={e => setCollectAmount(e.target.value)} 
+                            placeholder="0.00"
+                            autoFocus 
+                        />
+                      </div>
+                      <div className="flex gap-2 pt-4 border-t">
+                          <Button variant="ghost" className="flex-1 font-bold text-xs" onClick={() => { setIsCollectPaymentModalOpen(false); setSelectedUpfrontOrder(null); setCollectPaymentError(null); }}>Cancel</Button>
+                          <Button className="flex-1 bg-emerald-700 font-bold text-xs shadow-md" onClick={handleCollectUpfrontPayment}>Collect Payment</Button>
+                      </div>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {/* Admin Password Modal */}
+      {isAdminPasswordModalOpen && (
+          <div className="fixed inset-0 bg-black/80 z-[70] flex items-center justify-center p-4 backdrop-blur-sm">
+              <Card className="w-full max-w-xs shadow-2xl animate-in zoom-in border-t-4 border-t-slate-800 overflow-hidden">
+                  <CardHeader className="text-center pb-4">
+                      <div className="w-12 h-12 bg-slate-100 text-slate-800 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-slate-200">
+                          <AlertCircle className="w-6 h-6" />
+                      </div>
+                      <CardTitle className="text-lg">Admin Verification</CardTitle>
+                      <p className="text-xs text-muted-foreground">Enter password to edit order details</p>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-6">
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Admin Password</Label>
+                        <Input 
+                            type="password" 
+                            value={adminPassword} 
+                            onChange={e => setAdminPassword(e.target.value)} 
+                            placeholder="••••••••"
+                            autoFocus 
+                        />
+                      </div>
+                      <div className="flex gap-2 pt-4 border-t">
+                          <Button variant="ghost" className="flex-1 font-bold text-xs" onClick={() => { setIsAdminPasswordModalOpen(false); setAdminPassword(''); }}>Cancel</Button>
+                          <Button className="flex-1 bg-slate-900 text-white font-bold text-xs shadow-md" onClick={handleAdminPasswordSubmit}>Verify</Button>
+                      </div>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+      <ExportModal 
+        isOpen={isExportModalOpen} 
+        onClose={() => setIsExportModalOpen(false)} 
+        onExport={handleExport}
+        title={exportType === 'statement' ? "Export Statement" : exportType === 'dues_report' ? "Export Dues Report" : "Export Invoice"}
+      />
+    </div>
+  );
+}

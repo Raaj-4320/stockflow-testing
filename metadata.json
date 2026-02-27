@@ -1,0 +1,7 @@
+{
+  "name": "StockFlow - Smart Inventory & POS",
+  "description": "A modern, offline-capable inventory and sales management system with QR scanning, PDF reporting, and AI-assisted insights.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
