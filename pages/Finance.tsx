@@ -59,6 +59,8 @@ export default function Finance() {
 
   const [openingBalance, setOpeningBalance] = useState('');
   const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
+  const [editingOpeningBalance, setEditingOpeningBalance] = useState(false);
+  const [openingBalanceEditValue, setOpeningBalanceEditValue] = useState('');
   const [closingBalance, setClosingBalance] = useState('');
 
   const [expenseTitle, setExpenseTitle] = useState('');
@@ -92,6 +94,7 @@ export default function Finance() {
   const todayKey = todayISO();
   const previousDayKey = previousDayISO();
   const todaySessionExists = cashSessions.some(session => isSameDay(session.startTime, todayKey));
+  const isOpenSessionToday = !!openSession && isSameDay(openSession.startTime, todayKey);
 
   const previousDayClosedSession = useMemo(() => {
     return cashHistory.find(session => (
@@ -102,7 +105,7 @@ export default function Finance() {
   }, [cashHistory, previousDayKey]);
 
   useEffect(() => {
-    if (openSession || todaySessionExists || openingBalance.trim()) return;
+    if (openSession || todaySessionExists || openingBalance.trim() || editingOpeningBalance) return;
 
     if (previousDayClosedSession?.closingBalance !== undefined) {
       setOpeningBalance(previousDayClosedSession.closingBalance.toFixed(2));
@@ -111,7 +114,7 @@ export default function Finance() {
     }
 
     setOpeningBalanceAutoFilled(false);
-  }, [openSession, openingBalance, previousDayClosedSession, todaySessionExists]);
+  }, [openSession, openingBalance, previousDayClosedSession, todaySessionExists, editingOpeningBalance]);
 
   const buildCashSessionId = (sessions: CashSession[]) => {
     const existingIds = new Set(sessions.map(session => session.id));
@@ -258,7 +261,8 @@ export default function Finance() {
     }
 
     const systemCashTotal = dailyCashTotals.systemCashTotal;
-    const difference = counted - systemCashTotal;
+    const expectedClosing = openSession.openingBalance + systemCashTotal;
+    const difference = counted - expectedClosing;
 
     const updated = (data.cashSessions || []).map(session =>
       session.id === openSession.id
@@ -275,6 +279,45 @@ export default function Finance() {
 
     await persistState({ ...data, cashSessions: updated });
     setClosingBalance('');
+  };
+
+  const startOpeningBalanceEdit = () => {
+    if (!openSession || !isOpenSessionToday || !isAdmin) return;
+
+    setOpeningBalanceEditValue(openSession.openingBalance.toFixed(2));
+    setEditingOpeningBalance(true);
+    setErrors(null);
+  };
+
+  const cancelOpeningBalanceEdit = () => {
+    setEditingOpeningBalance(false);
+    setOpeningBalanceEditValue('');
+  };
+
+  const saveOpeningBalanceEdit = async () => {
+    if (!openSession || !isOpenSessionToday || !isAdmin) {
+      setErrors('Only admin can start or close shifts.');
+      return;
+    }
+
+    const value = Number(openingBalanceEditValue);
+    if (!Number.isFinite(value) || value < 0) {
+      setErrors('Please enter a valid opening balance.');
+      return;
+    }
+
+    const updated = (data.cashSessions || []).map(session =>
+      session.id === openSession.id
+        ? {
+            ...session,
+            openingBalance: value
+          }
+        : session
+    );
+
+    await persistState({ ...data, cashSessions: updated });
+    setEditingOpeningBalance(false);
+    setOpeningBalanceEditValue('');
   };
 
   const addExpense = async () => {
@@ -446,10 +489,37 @@ export default function Finance() {
             </div>
 
             {openSession && (
-              <div className="p-3 rounded border bg-amber-50/50 text-sm">
-                <div className="flex items-center justify-between">
+              <div className="p-3 rounded border text-sm bg-blue-50/60 border-blue-200">
+                <div className="flex items-center justify-between gap-2">
                   <span>Open Session Started: {new Date(openSession.startTime).toLocaleString()}</span>
-                  <Badge variant="secondary">open</Badge>
+                  <div className="flex items-center gap-2">
+                    {isOpenSessionToday && <Badge variant="secondary">Today</Badge>}
+                    <Badge variant="secondary">open</Badge>
+                  </div>
+                </div>
+                <div className="mt-2">
+                  {editingOpeningBalance ? (
+                    <div className="flex flex-col md:flex-row md:items-center gap-2">
+                      <Input
+                        type="number"
+                        min="0"
+                        value={openingBalanceEditValue}
+                        onChange={e => setOpeningBalanceEditValue(e.target.value)}
+                        placeholder="0.00"
+                      />
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={saveOpeningBalanceEdit}>Save Opening Balance</Button>
+                        <Button size="sm" variant="outline" onClick={cancelOpeningBalanceEdit}>Cancel</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                      <p className="text-sm">Current Opening Balance: ₹{openSession.openingBalance.toFixed(2)}</p>
+                      {isOpenSessionToday && isAdmin && (
+                        <Button size="sm" variant="outline" onClick={startOpeningBalanceEdit}>Edit Opening Balance</Button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -458,7 +528,7 @@ export default function Finance() {
               <h3 className="font-semibold">Cash History</h3>
               <div className="space-y-2">
                 {cashHistory.map(session => (
-                  <div key={session.id} className="p-3 border rounded flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                  <div key={session.id} className={`p-3 border rounded flex flex-col md:flex-row md:items-center md:justify-between gap-2 ${isSameDay(session.startTime, todayKey) ? 'bg-blue-50/40 border-blue-200' : ''}`}>
                     <div className="text-sm">
                       <p>Start: {new Date(session.startTime).toLocaleString()}</p>
                       {session.endTime && <p>End: {new Date(session.endTime).toLocaleString()}</p>}
@@ -475,7 +545,10 @@ export default function Finance() {
                         </p>
                       )}
                     </div>
-                    <Badge variant={session.status === 'open' ? 'destructive' : 'secondary'}>{session.status}</Badge>
+                    <div className="flex items-center gap-2">
+                      {isSameDay(session.startTime, todayKey) && <Badge variant="secondary">Today</Badge>}
+                      <Badge variant={session.status === 'open' ? 'destructive' : 'secondary'}>{session.status}</Badge>
+                    </div>
                   </div>
                 ))}
                 {!cashHistory.length && <p className="text-sm text-muted-foreground">No cash sessions yet.</p>}
