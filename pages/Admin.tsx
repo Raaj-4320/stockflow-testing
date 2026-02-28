@@ -461,7 +461,12 @@ export default function Admin() {
         try {
             const pdfImageSource = await getPdfImageSource(product.image);
             if (pdfImageSource) {
-                doc.addImage(pdfImageSource, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
+                const formatMatch = pdfImageSource.match(/^data:image\/(png|jpeg|jpg)/i);
+                const format =
+                  formatMatch?.[1]?.toLowerCase() === 'png'
+                    ? 'PNG'
+                    : 'JPEG';
+                doc.addImage(pdfImageSource, format, imgX, imgY, imgSize, imgSize, undefined, 'FAST');
             } else {
                  doc.setFillColor(245, 245, 245);
                  doc.rect(imgX, imgY, imgSize, imgSize, 'F');
@@ -592,7 +597,12 @@ export default function Admin() {
             try {
                 const pdfImageSource = await getPdfImageSource(product.image);
                 if (pdfImageSource) {
-                    doc.addImage(pdfImageSource, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
+                    const formatMatch = pdfImageSource.match(/^data:image\/(png|jpeg|jpg)/i);
+                const format =
+                  formatMatch?.[1]?.toLowerCase() === 'png'
+                    ? 'PNG'
+                    : 'JPEG';
+                doc.addImage(pdfImageSource, format, imgX, imgY, imgSize, imgSize, undefined, 'FAST');
                 } else {
                      // Placeholder
                      doc.setFillColor(245, 245, 245);
