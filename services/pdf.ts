@@ -4,11 +4,16 @@ import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
 import { loadData } from './storage';
 
-export const generateReceiptPDF = (transaction: Transaction, customers: Customer[]) => {
+type ReceiptPaymentDetails = {
+    cashReceived?: number;
+    changeReturned?: number;
+};
+
+export const generateReceiptPDF = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
     const { profile } = loadData();
     
     if (profile.invoiceFormat === 'thermal') {
-        printThermalInvoice(transaction, customers);
+        printThermalInvoice(transaction, customers, paymentDetails);
         return;
     }
 
@@ -148,12 +153,19 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
 
     summaryY += 13;
     doc.setFont("helvetica", "normal");
+    const isCashSale = transaction.type === 'sale' && transaction.paymentMethod === 'Cash';
+    const hasCashDetails = isCashSale && typeof paymentDetails?.cashReceived === 'number';
+    const receivedAmount = hasCashDetails ? paymentDetails!.cashReceived! : Math.round(transaction.total);
+    const changeAmount = hasCashDetails
+        ? Math.max(0, paymentDetails?.changeReturned ?? (paymentDetails!.cashReceived! - transaction.total))
+        : 0;
+
     doc.text("Received", totalsX - 45, summaryY);
-    doc.text(`Rs. ${Math.round(transaction.total).toFixed(2)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`Rs. ${receivedAmount.toFixed(2)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
-    doc.text("Balance", totalsX - 45, summaryY);
-    doc.text(`Rs. 0.00`, totalsX, summaryY, { align: "right" });
+    doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsX - 45, summaryY);
+    doc.text(`Rs. ${changeAmount.toFixed(2)}`, totalsX, summaryY, { align: "right" });
 
     const youSaved = transaction.discount || 0;
     if (youSaved > 0) {
@@ -202,7 +214,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.save(`invoice_${transaction.id.slice(-6)}.pdf`);
 };
 
-export const printThermalInvoice = (transaction: Transaction, customers: Customer[]) => {
+export const printThermalInvoice = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
     const { profile } = loadData();
     const customer = customers.find(c => c.id === transaction.customerId);
     
@@ -402,11 +414,11 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
       </div>
       <div class="row">
         <span>Received</span>
-        <span>₹${transaction.total.toFixed(0)}</span>
+        <span>₹${(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? paymentDetails.cashReceived : transaction.total).toFixed(0)}</span>
       </div>
       <div class="row">
-        <span>Balance</span>
-        <span>₹0</span>
+        <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? 'Change Returned' : 'Balance'}</span>
+        <span>₹${(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? Math.max(0, paymentDetails.changeReturned ?? (paymentDetails.cashReceived - transaction.total)) : 0).toFixed(0)}</span>
       </div>
       <div class="row">
         <span>Prev Bal</span>

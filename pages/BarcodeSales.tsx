@@ -41,6 +41,8 @@ export default function BarcodeSales() {
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
+  const [cashReceived, setCashReceived] = useState('');
+  const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
@@ -241,21 +243,27 @@ export default function BarcodeSales() {
       const taxableAmount = subtotal - totalDiscount;
       const taxAmount = (taxableAmount * (selectedTax.value / 100));
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
+      let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
+      if (!isReturnMode && paymentMethod === 'Cash') {
+          const receivedAmount = Number(cashReceived);
+          if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
+          currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+      }
       const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
       const newState = processTransaction(tx);
       setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
-      setIsCustomerModalOpen(false); setTransactionComplete(tx); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch('');
+      setIsCustomerModalOpen(false); setTransactionComplete(tx); setTransactionCashDetails(currentCashDetails); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashReceived('');
   };
 
   const handlePrintReceipt = () => {
     if (!transactionComplete) return;
-    generateReceiptPDF(transactionComplete, customers);
+    generateReceiptPDF(transactionComplete, customers, transactionCashDetails || undefined);
   };
 
   const handleExport = (format: 'pdf' | 'excel') => {
     if (!transactionComplete) return;
     if (format === 'pdf') {
-      generateReceiptPDF(transactionComplete, customers);
+      generateReceiptPDF(transactionComplete, customers, transactionCashDetails || undefined);
     } else {
       exportInvoiceToExcel(transactionComplete);
     }
@@ -385,8 +393,18 @@ export default function BarcodeSales() {
                       {!isReturnMode && (
                         <div className="flex gap-2 mb-4">
                             <Button variant={paymentMethod === 'Cash' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => setPaymentMethod('Cash')}><Coins className="w-3.5 h-3.5 mr-1.5" /> Cash</Button>
-                            <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => setPaymentMethod('Online')}><Wallet className="w-3.5 h-3.5 mr-1.5" /> Online</Button>
-                            <Button variant={paymentMethod === 'Credit' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => setPaymentMethod('Credit')}><CreditCard className="w-3.5 h-3.5 mr-1.5" /> Credit</Button>
+                            <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => { setPaymentMethod('Online'); setCashReceived(''); }}><Wallet className="w-3.5 h-3.5 mr-1.5" /> Online</Button>
+                            <Button variant={paymentMethod === 'Credit' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => { setPaymentMethod('Credit'); setCashReceived(''); }}><CreditCard className="w-3.5 h-3.5 mr-1.5" /> Credit</Button>
+                        </div>
+                      )}
+
+                      {!isReturnMode && paymentMethod === 'Cash' && (
+                        <div className="space-y-1.5 mb-3">
+                          <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Received</Label>
+                          <Input type="number" min="0" step="0.01" placeholder="Enter received amount" value={cashReceived} onChange={e => { setCashReceived(e.target.value); setCheckoutError(null); }} />
+                          {Number(cashReceived) >= grandTotal && grandTotal > 0 && (
+                            <p className="text-xs font-bold text-green-700">₹{(Number(cashReceived) - grandTotal).toFixed(2)} change to be given</p>
+                          )}
                         </div>
                       )}
                       <div className="flex p-1 bg-muted rounded-lg w-full mb-2">
@@ -443,9 +461,9 @@ export default function BarcodeSales() {
                   <CardContent className="pt-8 pb-6 space-y-4">
                       <div className="h-16 w-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto"><CheckCircle className="w-10 h-10" /></div>
                       <h2 className="text-2xl font-bold">Successful!</h2>
-                      <p className="text-muted-foreground text-sm">Receipt #{transactionComplete.id.slice(-6)} has been generated.</p>
+                      <p className="text-muted-foreground text-sm">Receipt #{transactionComplete.id.slice(-6)} has been generated.</p>{transactionCashDetails && (<div className="text-sm bg-muted rounded-lg p-3 space-y-1"><p>Total: ₹{transactionComplete.total.toFixed(2)}</p><p>Cash Received: ₹{transactionCashDetails.cashReceived.toFixed(2)}</p><p className="font-bold text-green-700">Change Returned: ₹{transactionCashDetails.changeReturned.toFixed(2)}</p></div>)}
                       <div className="flex gap-3 pt-4">
-                          <Button variant="outline" className="flex-1" onClick={() => setTransactionComplete(null)}>Close</Button>
+                          <Button variant="outline" className="flex-1" onClick={() => { setTransactionComplete(null); setTransactionCashDetails(null); }}>Close</Button>
                           <Button className="flex-1" onClick={handlePrintReceipt}><Printer className="w-4 h-4 mr-2" /> Download</Button>
                       </div>
                   </CardContent>
