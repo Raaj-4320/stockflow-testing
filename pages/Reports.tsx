@@ -28,7 +28,37 @@ export default function Reports() {
     };
   }, []);
 
-  const generatePDF = (reportType: 'internal' | 'customer' | 'detailed_sales') => {
+
+  const getPdfImageSource = async (image: string | undefined): Promise<string | null> => {
+    if (!image) return null;
+
+    if (image.startsWith('data:image')) {
+      return image;
+    }
+
+    if (!/^https?:\/\//i.test(image)) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(image);
+      if (!response.ok) {
+        return null;
+      }
+
+      const blob = await response.blob();
+      return await new Promise<string | null>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const generatePDF = async (reportType: 'internal' | 'customer' | 'detailed_sales') => {
     if (reportType === 'detailed_sales') {
         // For now, detailed sales is Excel only as it's a data-heavy report
         // We could add PDF later if needed, but Excel is better for analysis
@@ -64,7 +94,8 @@ export default function Reports() {
     doc.line(margin, 25, pageWidth - margin, 25);
 
     // --- Product Loop ---
-    products.forEach((product, index) => {
+    for (let index = 0; index < products.length; index += 1) {
+        const product = products[index];
         // Check for Page Break
         if (y + cardHeight > pageHeight - margin) {
             doc.addPage();
@@ -82,8 +113,9 @@ export default function Reports() {
         const imgY = y + 5;
         
         try {
-            if (product.image && product.image.startsWith('data:image')) {
-                doc.addImage(product.image, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
+            const pdfImageSource = await getPdfImageSource(product.image);
+            if (pdfImageSource) {
+                doc.addImage(pdfImageSource, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
             } else {
                  // Placeholder
                  doc.setFillColor(245, 245, 245);
@@ -193,14 +225,14 @@ export default function Reports() {
             x = margin;
             y += cardHeight + rowGap;
         }
-    });
+    }
     
     doc.save(`stockflow-${reportType}-report.pdf`);
   };
 
   const handleExport = (format: 'pdf' | 'excel') => {
       if (format === 'pdf') {
-          generatePDF(reportType);
+          void generatePDF(reportType);
       } else {
           if (reportType === 'detailed_sales') {
               exportDetailedSalesToExcel(transactions);
