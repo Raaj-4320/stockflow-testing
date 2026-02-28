@@ -1,8 +1,7 @@
 
 import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
-import { db, auth, storage } from './firebase';
+import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
-import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 import { onAuthStateChanged } from 'firebase/auth';
 
 let isCloudSynced = false;
@@ -127,7 +126,50 @@ const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
 };
 
-const STORAGE_UPLOAD_TIMEOUT_MS = 20000;
+const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
+const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
+const CLOUDINARY_RETRY_DELAY_MS = 1200;
+const CLOUDINARY_MAX_ATTEMPTS = 2;
+
+type CloudinarySignResponse = {
+  timestamp: number;
+  signature: string;
+  apiKey: string;
+  cloudName: string;
+};
+
+type CloudinaryStage = 'signature' | 'upload';
+
+class CloudinaryUploadError extends Error {
+  stage: CloudinaryStage;
+  reason: string;
+  attempt: number;
+  endpoint?: string;
+  status?: number;
+
+  constructor({
+    message,
+    stage,
+    reason,
+    attempt,
+    endpoint,
+    status
+  }: {
+    message: string;
+    stage: CloudinaryStage;
+    reason: string;
+    attempt: number;
+    endpoint?: string;
+    status?: number;
+  }) {
+    super(message);
+    this.stage = stage;
+    this.reason = reason;
+    this.attempt = attempt;
+    this.endpoint = endpoint;
+    this.status = status;
+  }
+}
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -144,78 +186,202 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMes
   }
 };
 
-const getStorageErrorMessage = (error: any): string => {
-  const code = error?.code || '';
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  if (code.includes('unauthorized') || code.includes('permission-denied')) {
-    return 'Image upload failed due to storage permissions. Please contact support.';
+const CLOUDINARY_SIGN_ENDPOINTS = [
+  '/.netlify/functions/cloudinary-sign-upload',
+  '/netlify/functions/cloudinary-sign-upload'
+];
+
+const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
+    for (const endpoint of CLOUDINARY_SIGN_ENDPOINTS) {
+      try {
+        console.debug('[cloudinary] signature fetch start', { endpoint, attempt });
+
+        const response = await withTimeout(
+          fetch(endpoint, {
+            method: 'POST'
+          }),
+          CLOUDINARY_SIGNATURE_TIMEOUT_MS,
+          `Cloudinary signature request timed out (${endpoint})`
+        );
+
+        if (!response.ok) {
+          const error = new CloudinaryUploadError({
+            message: `Cloudinary signature endpoint failed with ${response.status}`,
+            stage: 'signature',
+            reason: response.status === 404 ? 'bad-endpoint' : 'http-failure',
+            attempt,
+            endpoint,
+            status: response.status
+          });
+          console.error('[cloudinary] signature fetch failure', error);
+          lastError = error;
+          continue;
+        }
+
+        const body = await response.json() as CloudinarySignResponse;
+        if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp) {
+          const error = new CloudinaryUploadError({
+            message: 'Cloudinary signature response missing required fields',
+            stage: 'signature',
+            reason: 'invalid-response',
+            attempt,
+            endpoint
+          });
+          console.error('[cloudinary] signature fetch failure', error);
+          lastError = error;
+          continue;
+        }
+
+        console.debug('[cloudinary] signature fetch success', { endpoint, attempt });
+        return body;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const categorizedError = new CloudinaryUploadError({
+          message,
+          stage: 'signature',
+          reason: message.toLowerCase().includes('timed out') ? 'timeout' : 'network-error',
+          attempt,
+          endpoint
+        });
+        console.error('[cloudinary] signature fetch failure', categorizedError);
+        lastError = categorizedError;
+      }
+    }
+
+    if (attempt < CLOUDINARY_MAX_ATTEMPTS) {
+      await sleep(CLOUDINARY_RETRY_DELAY_MS * attempt);
+    }
   }
 
-  if (code.includes('quota-exceeded')) {
-    return 'Image upload failed because storage quota was exceeded. Please try again later.';
-  }
-
-  if (code.includes('retry-limit-exceeded') || code.includes('unknown')) {
-    return 'Image upload failed. Please try again.';
-  }
-
-  if ((error?.message || '').toLowerCase().includes('timed out')) {
-    return 'Image upload failed. Please try again.';
-    return 'Image upload failed due to a network or CORS configuration issue. Please try again.';
-  }
-
-  return 'Image upload failed. Please try again.';
+  throw lastError instanceof Error ? lastError : new Error('Cloudinary signature request failed');
 };
 
-const uploadProductImageIfNeeded = async (
-  product: Product,
-  userId: string
-): Promise<Product> => {
-  if (!storage || !isDataUrlImage(product.image)) {
+const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
+  const signedParams = await getCloudinarySignature();
+  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      console.debug('[cloudinary] upload request start', {
+        attempt,
+        endpoint: uploadEndpoint
+      });
+
+      const formData = new FormData();
+      formData.append('file', dataUrl);
+      formData.append('timestamp', String(signedParams.timestamp));
+      formData.append('signature', signedParams.signature);
+      formData.append('api_key', signedParams.apiKey);
+
+      const uploadResponse = await withTimeout(
+        fetch(uploadEndpoint, {
+          method: 'POST',
+          body: formData
+        }),
+        CLOUDINARY_UPLOAD_TIMEOUT_MS,
+        'Cloudinary upload timed out'
+      );
+
+      if (!uploadResponse.ok) {
+        let providerError: unknown = null;
+        try {
+          providerError = await uploadResponse.json();
+        } catch {
+          providerError = null;
+        }
+
+        const error = new CloudinaryUploadError({
+          message: `Cloudinary upload failed with ${uploadResponse.status}`,
+          stage: 'upload',
+          reason: uploadResponse.status === 404 ? 'bad-endpoint' : 'http-failure',
+          attempt,
+          endpoint: uploadEndpoint,
+          status: uploadResponse.status
+        });
+        console.error('[cloudinary] upload failure', {
+          ...error,
+          providerError
+        });
+        lastError = error;
+      } else {
+        const uploadBody = await uploadResponse.json();
+        if (!uploadBody?.secure_url) {
+          const error = new CloudinaryUploadError({
+            message: 'Cloudinary upload response missing secure_url',
+            stage: 'upload',
+            reason: 'invalid-response',
+            attempt,
+            endpoint: uploadEndpoint,
+            status: uploadResponse.status
+          });
+          console.error('[cloudinary] upload failure', error);
+          lastError = error;
+        } else {
+          console.debug('[cloudinary] upload request success', {
+            attempt,
+            endpoint: uploadEndpoint,
+            imageUrl: uploadBody.secure_url
+          });
+          return uploadBody.secure_url as string;
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const categorizedError = new CloudinaryUploadError({
+        message,
+        stage: 'upload',
+        reason: message.toLowerCase().includes('timed out') ? 'timeout' : 'network-error',
+        attempt,
+        endpoint: uploadEndpoint
+      });
+      console.error('[cloudinary] upload failure', categorizedError);
+      lastError = categorizedError;
+    }
+
+    if (attempt < CLOUDINARY_MAX_ATTEMPTS) {
+      await sleep(CLOUDINARY_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Cloudinary upload failed');
+};
+
+const uploadProductImageIfNeeded = async (product: Product): Promise<Product> => {
+  if (!isDataUrlImage(product.image)) {
     return product;
   }
 
   try {
-    const imageRef = ref(
-      storage,
-      `stores/${userId}/products/${product.id}-${Date.now()}.jpg`
-    );
-
-    console.debug('[storage] Product image upload start', {
-      productId: product.id,
-      path: imageRef.fullPath
+    console.debug('[cloudinary] Product image upload start', {
+      productId: product.id
     });
 
-    const uploadResult = await withTimeout(
-      uploadString(imageRef, product.image, 'data_url'),
-      STORAGE_UPLOAD_TIMEOUT_MS,
-      'Storage upload timed out'
-    );
+    const secureUrl = await uploadDataUrlToCloudinary(product.image);
 
-    const downloadURL = await withTimeout(
-      getDownloadURL(uploadResult.ref),
-      STORAGE_UPLOAD_TIMEOUT_MS,
-      'Storage download URL retrieval timed out'
-    );
-
-    console.debug('[storage] Product image uploaded', {
+    console.debug('[cloudinary] Product image upload success', {
       productId: product.id,
-      fullPath: uploadResult.ref.fullPath,
-      bucket: uploadResult.ref.bucket
+      imageUrl: secureUrl
     });
 
-    return { ...product, image: downloadURL };
+    return { ...product, image: secureUrl };
   } catch (error) {
-    console.error('[storage] Product image upload failure', {
+    console.error('[cloudinary] Product image upload failure', {
       productId: product.id,
       error
     });
 
-    throw new Error(getStorageErrorMessage(error));
+    throw new Error('Image upload failed. Please try again.');
   }
 };
-const normalizeProductsForCloud = async (products: Product[], userId: string): Promise<Product[]> => {
-  return Promise.all(products.map(product => uploadProductImageIfNeeded(product, userId)));
+
+const normalizeProductsForCloud = async (products: Product[]): Promise<Product[]> => {
+  return Promise.all(products.map(product => uploadProductImageIfNeeded(product)));
 };
 
 const syncToCloud = async (data: AppState) => {
@@ -224,7 +390,7 @@ const syncToCloud = async (data: AppState) => {
     if (!user) return;
 
     try {
-        const normalizedProducts = await normalizeProductsForCloud(data.products || [], user.uid);
+        const normalizedProducts = await normalizeProductsForCloud(data.products || []);
         const normalizedState = { ...data, products: normalizedProducts };
         const cleanData = sanitizeData(normalizedState);
         await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
@@ -307,8 +473,7 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const userId = auth?.currentUser?.uid || 'local';
-  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 }, userId);
+  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 });
   const newProducts = [...data.products, preparedProduct];
   await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
@@ -316,8 +481,7 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const userId = auth?.currentUser?.uid || 'local';
-  const preparedProduct = await uploadProductImageIfNeeded(product, userId);
+  const preparedProduct = await uploadProductImageIfNeeded(product);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
   await saveData({ ...data, products: newProducts }, { throwOnError: true });
   return newProducts;
