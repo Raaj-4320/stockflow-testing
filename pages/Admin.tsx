@@ -386,7 +386,37 @@ export default function Admin() {
       return result;
   }, [products, lowStockCategoryFilter, lowStockSortOption]);
 
-  const handleDownloadLowStockPDF = () => {
+
+  const getPdfImageSource = async (image: string | undefined): Promise<string | null> => {
+    if (!image) return null;
+
+    if (image.startsWith('data:image')) {
+      return image;
+    }
+
+    if (!/^https?:\/\//i.test(image)) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(image);
+      if (!response.ok) {
+        return null;
+      }
+
+      const blob = await response.blob();
+      return await new Promise<string | null>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const handleDownloadLowStockPDF = async () => {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -413,7 +443,8 @@ export default function Admin() {
     doc.setDrawColor(200, 200, 200);
     doc.line(margin, 25, pageWidth - margin, 25);
 
-    lowStockProducts.forEach((product, index) => {
+    for (let index = 0; index < lowStockProducts.length; index += 1) {
+        const product = lowStockProducts[index];
         if (y + cardHeight > pageHeight - margin) {
             doc.addPage();
             y = margin;
@@ -428,8 +459,9 @@ export default function Admin() {
         const imgY = y + 5;
         
         try {
-            if (product.image && product.image.startsWith('data:image')) {
-                doc.addImage(product.image, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
+            const pdfImageSource = await getPdfImageSource(product.image);
+            if (pdfImageSource) {
+                doc.addImage(pdfImageSource, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
             } else {
                  doc.setFillColor(245, 245, 245);
                  doc.rect(imgX, imgY, imgSize, imgSize, 'F');
@@ -479,12 +511,12 @@ export default function Admin() {
             x = margin;
             y += cardHeight + rowGap;
         }
-    });
+    }
     
     doc.save(`low-stock-report-${new Date().toISOString().split('T')[0]}.pdf`);
   };
 
-  const handleDownloadCategoryPDF = () => {
+  const handleDownloadCategoryPDF = async () => {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -509,7 +541,7 @@ export default function Admin() {
     const sortedCategories = Object.keys(groupedProducts).sort();
     let isFirstCategory = true;
 
-    sortedCategories.forEach((cat) => {
+    for (const cat of sortedCategories) {
         if (!isFirstCategory) {
             doc.addPage();
         }
@@ -538,7 +570,8 @@ export default function Admin() {
         );
 
         // --- Product Loop ---
-        catProducts.forEach((product, index) => {
+        for (let index = 0; index < catProducts.length; index += 1) {
+            const product = catProducts[index];
             // Check for Page Break
             if (y + cardHeight > pageHeight - margin) {
                 doc.addPage();
@@ -557,8 +590,9 @@ export default function Admin() {
             const imgY = y + 5;
             
             try {
-                if (product.image && product.image.startsWith('data:image')) {
-                    doc.addImage(product.image, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
+                const pdfImageSource = await getPdfImageSource(product.image);
+                if (pdfImageSource) {
+                    doc.addImage(pdfImageSource, 'JPEG', imgX, imgY, imgSize, imgSize, undefined, 'FAST');
                 } else {
                      // Placeholder
                      doc.setFillColor(245, 245, 245);
@@ -626,8 +660,8 @@ export default function Admin() {
                 x = margin;
                 y += cardHeight + rowGap;
             }
-        });
-    });
+        }
+    }
     
     doc.save(`customer-catalog-${categoryFilter}.pdf`);
   };
@@ -635,13 +669,13 @@ export default function Admin() {
   const handleExport = (format: 'pdf' | 'excel') => {
       if (exportType === 'inventory') {
           if (format === 'pdf') {
-              handleDownloadCategoryPDF();
+              void handleDownloadCategoryPDF();
           } else {
               exportProductsToExcel(filteredProducts);
           }
       } else if (exportType === 'low-stock') {
           if (format === 'pdf') {
-              handleDownloadLowStockPDF();
+              void handleDownloadLowStockPDF();
           } else {
               exportProductsToExcel(lowStockProducts);
           }
