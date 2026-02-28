@@ -126,6 +126,10 @@ const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
 };
 
+const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
+const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
+const CLOUDINARY_RETRY_DELAY_MS = 1200;
+const CLOUDINARY_MAX_ATTEMPTS = 2;
 const CLOUDINARY_UPLOAD_TIMEOUT_MS = 20000;
 
 type CloudinarySignResponse = {
@@ -134,6 +138,39 @@ type CloudinarySignResponse = {
   apiKey: string;
   cloudName: string;
 };
+
+type CloudinaryStage = 'signature' | 'upload';
+
+class CloudinaryUploadError extends Error {
+  stage: CloudinaryStage;
+  reason: string;
+  attempt: number;
+  endpoint?: string;
+  status?: number;
+
+  constructor({
+    message,
+    stage,
+    reason,
+    attempt,
+    endpoint,
+    status
+  }: {
+    message: string;
+    stage: CloudinaryStage;
+    reason: string;
+    attempt: number;
+    endpoint?: string;
+    status?: number;
+  }) {
+    super(message);
+    this.stage = stage;
+    this.reason = reason;
+    this.attempt = attempt;
+    this.endpoint = endpoint;
+    this.status = status;
+  }
+}
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -150,6 +187,170 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMes
   }
 };
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const CLOUDINARY_SIGN_ENDPOINTS = [
+  '/.netlify/functions/cloudinary-sign-upload',
+  '/netlify/functions/cloudinary-sign-upload'
+];
+
+const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
+    for (const endpoint of CLOUDINARY_SIGN_ENDPOINTS) {
+      try {
+        console.debug('[cloudinary] signature fetch start', { endpoint, attempt });
+
+        const response = await withTimeout(
+          fetch(endpoint, {
+            method: 'POST'
+          }),
+          CLOUDINARY_SIGNATURE_TIMEOUT_MS,
+          `Cloudinary signature request timed out (${endpoint})`
+        );
+
+        if (!response.ok) {
+          const error = new CloudinaryUploadError({
+            message: `Cloudinary signature endpoint failed with ${response.status}`,
+            stage: 'signature',
+            reason: response.status === 404 ? 'bad-endpoint' : 'http-failure',
+            attempt,
+            endpoint,
+            status: response.status
+          });
+          console.error('[cloudinary] signature fetch failure', error);
+          lastError = error;
+          continue;
+        }
+
+        const body = await response.json() as CloudinarySignResponse;
+        if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp) {
+          const error = new CloudinaryUploadError({
+            message: 'Cloudinary signature response missing required fields',
+            stage: 'signature',
+            reason: 'invalid-response',
+            attempt,
+            endpoint
+          });
+          console.error('[cloudinary] signature fetch failure', error);
+          lastError = error;
+          continue;
+        }
+
+        console.debug('[cloudinary] signature fetch success', { endpoint, attempt });
+        return body;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const categorizedError = new CloudinaryUploadError({
+          message,
+          stage: 'signature',
+          reason: message.toLowerCase().includes('timed out') ? 'timeout' : 'network-error',
+          attempt,
+          endpoint
+        });
+        console.error('[cloudinary] signature fetch failure', categorizedError);
+        lastError = categorizedError;
+      }
+    }
+
+    if (attempt < CLOUDINARY_MAX_ATTEMPTS) {
+      await sleep(CLOUDINARY_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Cloudinary signature request failed');
+};
+
+const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
+  const signedParams = await getCloudinarySignature();
+  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      console.debug('[cloudinary] upload request start', {
+        attempt,
+        endpoint: uploadEndpoint
+      });
+
+      const formData = new FormData();
+      formData.append('file', dataUrl);
+      formData.append('timestamp', String(signedParams.timestamp));
+      formData.append('signature', signedParams.signature);
+      formData.append('api_key', signedParams.apiKey);
+
+      const uploadResponse = await withTimeout(
+        fetch(uploadEndpoint, {
+          method: 'POST',
+          body: formData
+        }),
+        CLOUDINARY_UPLOAD_TIMEOUT_MS,
+        'Cloudinary upload timed out'
+      );
+
+      if (!uploadResponse.ok) {
+        let providerError: unknown = null;
+        try {
+          providerError = await uploadResponse.json();
+        } catch {
+          providerError = null;
+        }
+
+        const error = new CloudinaryUploadError({
+          message: `Cloudinary upload failed with ${uploadResponse.status}`,
+          stage: 'upload',
+          reason: uploadResponse.status === 404 ? 'bad-endpoint' : 'http-failure',
+          attempt,
+          endpoint: uploadEndpoint,
+          status: uploadResponse.status
+        });
+        console.error('[cloudinary] upload failure', {
+          ...error,
+          providerError
+        });
+        lastError = error;
+      } else {
+        const uploadBody = await uploadResponse.json();
+        if (!uploadBody?.secure_url) {
+          const error = new CloudinaryUploadError({
+            message: 'Cloudinary upload response missing secure_url',
+            stage: 'upload',
+            reason: 'invalid-response',
+            attempt,
+            endpoint: uploadEndpoint,
+            status: uploadResponse.status
+          });
+          console.error('[cloudinary] upload failure', error);
+          lastError = error;
+        } else {
+          console.debug('[cloudinary] upload request success', {
+            attempt,
+            endpoint: uploadEndpoint,
+            imageUrl: uploadBody.secure_url
+          });
+          return uploadBody.secure_url as string;
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const categorizedError = new CloudinaryUploadError({
+        message,
+        stage: 'upload',
+        reason: message.toLowerCase().includes('timed out') ? 'timeout' : 'network-error',
+        attempt,
+        endpoint: uploadEndpoint
+      });
+      console.error('[cloudinary] upload failure', categorizedError);
+      lastError = categorizedError;
+    }
+
+    if (attempt < CLOUDINARY_MAX_ATTEMPTS) {
+      await sleep(CLOUDINARY_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Cloudinary upload failed');
 const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
   const response = await withTimeout(
     fetch('/.netlify/functions/cloudinary-sign-upload', {
