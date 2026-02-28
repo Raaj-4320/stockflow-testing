@@ -25,7 +25,10 @@ const initialData: AppState = {
   categories: [],
   customers: [],
   profile: defaultProfile,
-  upfrontOrders: []
+  upfrontOrders: [],
+  cashSessions: [],
+  expenses: [],
+  expenseCategories: ['General']
 };
 
 let memoryState: AppState = { ...initialData };
@@ -74,6 +77,9 @@ const syncFromCloud = async () => {
                     categories: cloudData.categories || [],
                     customers: cloudData.customers || [],
                     upfrontOrders: cloudData.upfrontOrders || [],
+                    cashSessions: cloudData.cashSessions || [],
+                    expenses: cloudData.expenses || [],
+                    expenseCategories: cloudData.expenseCategories || ['General'],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {

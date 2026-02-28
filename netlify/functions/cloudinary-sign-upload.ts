@@ -8,7 +8,11 @@ const json = (statusCode: number, body: Record<string, unknown>) => ({
   body: JSON.stringify(body)
 });
 
-export const handler = async () => {
+export const handler = async (event: { httpMethod?: string }) => {
+  if (event.httpMethod !== 'POST') {
+    return json(405, { error: 'Method Not Allowed' });
+  }
+
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
   const apiSecret = process.env.CLOUDINARY_API_SECRET;

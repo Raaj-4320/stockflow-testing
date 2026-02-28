@@ -88,6 +88,27 @@ export interface UpfrontOrder {
   notes?: string;
 }
 
+
+export interface CashSession {
+  id: string;
+  startTime: string;
+  endTime?: string;
+  openingBalance: number;
+  closingBalance?: number;
+  systemCashTotal?: number;
+  difference?: number;
+  status: 'open' | 'closed';
+}
+
+export interface Expense {
+  id: string;
+  title: string;
+  amount: number;
+  category: string;
+  note?: string;
+  createdAt: string;
+}
+
 export interface AppState {
   products: Product[];
   transactions: Transaction[];
@@ -95,6 +116,9 @@ export interface AppState {
   customers: Customer[];
   profile: StoreProfile;
   upfrontOrders: UpfrontOrder[];
+  cashSessions?: CashSession[];
+  expenses?: Expense[];
+  expenseCategories?: string[];
 }
 
 export const TAX_OPTIONS = [
