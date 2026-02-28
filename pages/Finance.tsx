@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { loadData, saveData, processTransaction } from '../services/storage';
@@ -25,10 +25,23 @@ type Expense = {
   createdAt: string;
 };
 
-const todayISO = () => new Date().toISOString().split('T')[0];
+const dateKeyFromDate = (date: Date) => {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
+
+const todayISO = () => dateKeyFromDate(new Date());
+
+const previousDayISO = () => {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return dateKeyFromDate(date);
+};
 
 const isSameDay = (iso: string, dateKey: string) => {
-  return new Date(iso).toISOString().split('T')[0] === dateKey;
+  return dateKeyFromDate(new Date(iso)) === dateKey;
 };
 
 const monthKeyOf = (iso: string) => {
@@ -45,6 +58,7 @@ export default function Finance() {
   const [openSections, setOpenSections] = useState({ cash: true, expenses: true, credit: true, profit: true });
 
   const [openingBalance, setOpeningBalance] = useState('');
+  const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
   const [closingBalance, setClosingBalance] = useState('');
 
   const [expenseTitle, setExpenseTitle] = useState('');
@@ -73,6 +87,42 @@ export default function Finance() {
 
   const openSession = cashSessions.find(s => s.status === 'open');
   const cashHistory = [...cashSessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+
+  const isAdmin = true; // Placeholder for future role-based access integration.
+  const todayKey = todayISO();
+  const previousDayKey = previousDayISO();
+  const todaySessionExists = cashSessions.some(session => isSameDay(session.startTime, todayKey));
+
+  const previousDayClosedSession = useMemo(() => {
+    return cashHistory.find(session => (
+      session.status === 'closed'
+      && isSameDay(session.startTime, previousDayKey)
+      && Number.isFinite(session.closingBalance)
+    ));
+  }, [cashHistory, previousDayKey]);
+
+  useEffect(() => {
+    if (openSession || todaySessionExists || openingBalance.trim()) return;
+
+    if (previousDayClosedSession?.closingBalance !== undefined) {
+      setOpeningBalance(previousDayClosedSession.closingBalance.toFixed(2));
+      setOpeningBalanceAutoFilled(true);
+      return;
+    }
+
+    setOpeningBalanceAutoFilled(false);
+  }, [openSession, openingBalance, previousDayClosedSession, todaySessionExists]);
+
+  const buildCashSessionId = (sessions: CashSession[]) => {
+    const existingIds = new Set(sessions.map(session => session.id));
+    let candidate = `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+
+    while (existingIds.has(candidate)) {
+      candidate = `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+    }
+
+    return candidate;
+  };
 
   const dailyCashTotals = useMemo(() => {
     const key = todayISO();
@@ -153,18 +203,33 @@ export default function Finance() {
   };
 
   const startShift = async () => {
-    const value = Number(openingBalance);
-    if (!Number.isFinite(value) || value < 0) {
-      setErrors('Please enter a valid opening balance.');
+    if (!isAdmin) {
+      setErrors('Only admin can start or close shifts.');
       return;
     }
+
+    if (todaySessionExists) {
+      setErrors('Cash session for today already exists.');
+      return;
+    }
+
     if (openSession) {
       setErrors('An open cash session already exists.');
       return;
     }
 
+    const autoCarryBalance = previousDayClosedSession?.closingBalance;
+    const value = openingBalance.trim()
+      ? Number(openingBalance)
+      : (autoCarryBalance !== undefined ? autoCarryBalance : Number.NaN);
+
+    if (!Number.isFinite(value) || value < 0) {
+      setErrors('Please enter a valid opening balance.');
+      return;
+    }
+
     const session: CashSession = {
-      id: Date.now().toString(),
+      id: buildCashSessionId(cashSessions),
       startTime: new Date().toISOString(),
       openingBalance: value,
       status: 'open'
@@ -172,9 +237,15 @@ export default function Finance() {
 
     await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
     setOpeningBalance('');
+    setOpeningBalanceAutoFilled(false);
   };
 
   const closeShift = async () => {
+    if (!isAdmin) {
+      setErrors('Only admin can start or close shifts.');
+      return;
+    }
+
     if (!openSession) {
       setErrors('No open cash session found.');
       return;
@@ -344,8 +415,23 @@ export default function Finance() {
               <Card className="bg-muted/30">
                 <CardContent className="pt-4 space-y-3">
                   <Label>Opening Balance</Label>
-                  <Input type="number" min="0" value={openingBalance} onChange={e => setOpeningBalance(e.target.value)} placeholder="0.00" />
-                  <Button onClick={startShift} disabled={!!openSession}>Start Shift</Button>
+                  <Input
+                    type="number"
+                    min="0"
+                    value={openingBalance}
+                    onChange={e => {
+                      setOpeningBalance(e.target.value);
+                      setOpeningBalanceAutoFilled(false);
+                    }}
+                    placeholder="0.00"
+                  />
+                  {openingBalanceAutoFilled && (
+                    <p className="text-xs text-muted-foreground">Carried forward from previous closing balance</p>
+                  )}
+                  {todaySessionExists && (
+                    <p className="text-xs text-destructive">Cash session for today already exists.</p>
+                  )}
+                  <Button onClick={startShift} disabled={!isAdmin || !!openSession || todaySessionExists}>Start Shift</Button>
                 </CardContent>
               </Card>
 
@@ -354,7 +440,7 @@ export default function Finance() {
                   <Label>Closing Cash Counted</Label>
                   <Input type="number" min="0" value={closingBalance} onChange={e => setClosingBalance(e.target.value)} placeholder="0.00" />
                   <p className="text-sm text-muted-foreground">System Cash Total (today): ₹{dailyCashTotals.systemCashTotal.toFixed(2)}</p>
-                  <Button onClick={closeShift} disabled={!openSession}>Close Shift</Button>
+                  <Button onClick={closeShift} disabled={!isAdmin || !openSession}>Close Shift</Button>
                 </CardContent>
               </Card>
             </div>
