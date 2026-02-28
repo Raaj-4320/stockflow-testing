@@ -1,4 +1,3 @@
-
 import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
@@ -130,7 +129,6 @@ const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
 const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
 const CLOUDINARY_RETRY_DELAY_MS = 1200;
 const CLOUDINARY_MAX_ATTEMPTS = 2;
-const CLOUDINARY_UPLOAD_TIMEOUT_MS = 20000;
 
 type CloudinarySignResponse = {
   timestamp: number;
@@ -351,50 +349,6 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
   }
 
   throw lastError instanceof Error ? lastError : new Error('Cloudinary upload failed');
-const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
-  const response = await withTimeout(
-    fetch('/.netlify/functions/cloudinary-sign-upload', {
-      method: 'POST'
-    }),
-    CLOUDINARY_UPLOAD_TIMEOUT_MS,
-    'Cloudinary signature request timed out'
-  );
-
-  if (!response.ok) {
-    throw new Error('Image upload failed. Please try again.');
-  }
-
-  return response.json() as Promise<CloudinarySignResponse>;
-};
-
-const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
-  const signedParams = await getCloudinarySignature();
-
-  const formData = new FormData();
-  formData.append('file', dataUrl);
-  formData.append('timestamp', String(signedParams.timestamp));
-  formData.append('signature', signedParams.signature);
-  formData.append('api_key', signedParams.apiKey);
-
-  const uploadResponse = await withTimeout(
-    fetch(`https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`, {
-      method: 'POST',
-      body: formData
-    }),
-    CLOUDINARY_UPLOAD_TIMEOUT_MS,
-    'Cloudinary upload timed out'
-  );
-
-  if (!uploadResponse.ok) {
-    throw new Error('Image upload failed. Please try again.');
-  }
-
-  const uploadBody = await uploadResponse.json();
-  if (!uploadBody?.secure_url) {
-    throw new Error('Image upload failed. Please try again.');
-  }
-
-  return uploadBody.secure_url as string;
 };
 
 const uploadProductImageIfNeeded = async (product: Product): Promise<Product> => {
