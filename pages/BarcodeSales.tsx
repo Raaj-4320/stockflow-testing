@@ -41,6 +41,7 @@ export default function BarcodeSales() {
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
+  const [returnExcessMode, setReturnExcessMode] = useState<'store_credit' | 'cash_refund'>('store_credit');
   const [cashReceived, setCashReceived] = useState('');
   const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
@@ -211,7 +212,7 @@ export default function BarcodeSales() {
       e?.stopPropagation();
       if (cart.length === 0) return;
       setCheckoutError(null);
-      if (isReturnMode) setPaymentMethod('Cash');
+      if (isReturnMode) { setPaymentMethod('Cash'); setReturnExcessMode('store_credit'); }
       setIsCustomerModalOpen(true);
   };
 
@@ -249,7 +250,7 @@ export default function BarcodeSales() {
           if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
           currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
       }
-      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
+      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod, returnExcessMode: isReturnMode ? returnExcessMode : undefined };
       const newState = processTransaction(tx);
       setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
       setIsCustomerModalOpen(false); setTransactionComplete(tx); setTransactionCashDetails(currentCashDetails); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashReceived('');
@@ -405,6 +406,17 @@ export default function BarcodeSales() {
                           {Number(cashReceived) >= grandTotal && grandTotal > 0 && (
                             <p className="text-xs font-bold text-green-700">₹{(Number(cashReceived) - grandTotal).toFixed(2)} change to be given</p>
                           )}
+                        </div>
+                      )}
+
+                      {isReturnMode && selectedCustomer && Math.abs(grandTotal) > (selectedCustomer.totalDue || 0) + 0.01 && (
+                        <div className="mb-3 rounded-lg border border-orange-200 bg-orange-50 p-3 space-y-2">
+                          <p className="text-[11px] font-bold uppercase text-orange-700">Excess Return Handling</p>
+                          <div className="flex gap-2">
+                            <Button variant={returnExcessMode === 'store_credit' ? 'default' : 'outline'} className="flex-1 h-8 text-[11px]" onClick={() => setReturnExcessMode('store_credit')}>Store Credit</Button>
+                            <Button variant={returnExcessMode === 'cash_refund' ? 'default' : 'outline'} className="flex-1 h-8 text-[11px]" onClick={() => setReturnExcessMode('cash_refund')}>Cash Refund</Button>
+                          </div>
+                          <p className="text-[11px] text-orange-700/80">Due: ₹{(selectedCustomer.totalDue || 0).toFixed(2)} · Return: ₹{Math.abs(grandTotal).toFixed(2)}</p>
                         </div>
                       )}
                       <div className="flex p-1 bg-muted rounded-lg w-full mb-2">
