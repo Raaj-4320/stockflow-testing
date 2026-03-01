@@ -1,4 +1,4 @@
-import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
+import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder, ReturnExcessMode, ReturnSettlement } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -28,7 +28,8 @@ const initialData: AppState = {
   upfrontOrders: [],
   cashSessions: [],
   expenses: [],
-  expenseCategories: ['General']
+  expenseCategories: ['General'],
+  creditLedger: []
 };
 
 let memoryState: AppState = { ...initialData };
@@ -80,6 +81,7 @@ const syncFromCloud = async () => {
                     cashSessions: cloudData.cashSessions || [],
                     expenses: cloudData.expenses || [],
                     expenseCategories: cloudData.expenseCategories || ['General'],
+                    creditLedger: cloudData.creditLedger || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {
@@ -682,6 +684,58 @@ const assertPaymentMethodByType = (type: Transaction['type'], paymentMethod: Tra
   }
 };
 
+
+const resolveReturnSettlement = ({
+  returnAmount,
+  currentDue,
+  requestedMode
+}: {
+  returnAmount: number;
+  currentDue: number;
+  requestedMode?: ReturnExcessMode;
+}): ReturnSettlement => {
+  const sanitizedDue = Math.max(0, currentDue);
+  const appliedToDue = Math.min(returnAmount, sanitizedDue);
+  const excess = Math.max(0, returnAmount - appliedToDue);
+  const excessMode: ReturnExcessMode = requestedMode === 'cash_refund' ? 'cash_refund' : 'store_credit';
+
+  return {
+    appliedToDue,
+    refundedCash: excessMode === 'cash_refund' ? excess : 0,
+    creditedAmount: excessMode === 'store_credit' ? excess : 0,
+    excessMode
+  };
+};
+
+const assertReturnSettlementConsistency = (transaction: Transaction, customerDue: number): ReturnSettlement | null => {
+  if (transaction.type !== 'return') return null;
+
+  const returnAmount = Math.abs(transaction.total);
+  const computed = resolveReturnSettlement({
+    returnAmount,
+    currentDue: customerDue,
+    requestedMode: transaction.returnExcessMode
+  });
+
+  if (transaction.returnSettlement) {
+    const provided = transaction.returnSettlement;
+    const invalid =
+      Math.abs((provided.appliedToDue || 0) - computed.appliedToDue) > MONEY_EPSILON
+      || Math.abs((provided.refundedCash || 0) - computed.refundedCash) > MONEY_EPSILON
+      || Math.abs((provided.creditedAmount || 0) - computed.creditedAmount) > MONEY_EPSILON
+      || (provided.excessMode || 'store_credit') !== computed.excessMode;
+
+    if (invalid) {
+      failValidation('INVALID_RETURN_SETTLEMENT', 'Return settlement metadata is inconsistent with computed values.', {
+        provided,
+        expected: computed
+      });
+    }
+  }
+
+  return computed;
+};
+
 const assertTransactionFinancials = (transaction: Transaction) => {
   if (transaction.type === 'payment') {
     if (!Number.isFinite(transaction.total) || transaction.total <= 0) {
@@ -790,7 +844,7 @@ export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers);
 
-    const newCustomer = { ...customer, totalDue: 0 };
+    const newCustomer = { ...customer, totalDue: 0, storeCreditBalance: customer.storeCreditBalance || 0 };
     const newCustomers = [...data.customers, newCustomer];
     void saveData({ ...data, customers: newCustomers });
     return newCustomers;
@@ -878,7 +932,6 @@ export const processTransaction = (transaction: Transaction): AppState => {
   assertTransactionFinancials(transaction);
   assertTransactionInventoryRules(transaction, data.products, data.transactions);
 
-  const newTransactions = [transaction, ...data.transactions];
   let newProducts = [...data.products];
   if (transaction.type !== 'payment') {
       newProducts = data.products.map(p => {
@@ -895,6 +948,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       });
   }
   let newCustomers = [...data.customers];
+  let normalizedTransaction: Transaction = transaction;
   if (transaction.customerId) {
       const customerIndex = newCustomers.findIndex(c => c.id === transaction.customerId);
       if (customerIndex === -1) {
@@ -906,6 +960,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       let newTotalDue = c.totalDue;
       let newVisitCount = c.visitCount;
       let newLastVisit = c.lastVisit;
+      let storeCreditBalance = c.storeCreditBalance || 0;
       const amount = Math.abs(transaction.total);
       if (transaction.type === 'sale') {
           newTotalSpend += amount;
@@ -914,16 +969,33 @@ export const processTransaction = (transaction: Transaction): AppState => {
           if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
       } else if (transaction.type === 'return') {
           newTotalSpend -= amount;
-          if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
+          const settlement = assertReturnSettlementConsistency(transaction, newTotalDue) || resolveReturnSettlement({
+            returnAmount: amount,
+            currentDue: newTotalDue,
+            requestedMode: transaction.returnExcessMode
+          });
+
+          newTotalDue = Math.max(0, newTotalDue - settlement.appliedToDue);
+          storeCreditBalance += settlement.creditedAmount;
+
+          normalizedTransaction = {
+            ...transaction,
+            returnExcessMode: settlement.excessMode,
+            returnSettlement: {
+              ...settlement,
+              linkedSaleId: transaction.returnSettlement?.linkedSaleId
+            }
+          };
       } else if (transaction.type === 'payment') {
           newTotalDue -= amount;
           newLastVisit = new Date().toISOString();
       }
 
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
+      if (newTotalDue < -MONEY_EPSILON || storeCreditBalance < -MONEY_EPSILON) {
+        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer balance state.', {
           customerId: c.id,
-          resultingTotalDue: newTotalDue
+          resultingTotalDue: newTotalDue,
+          resultingStoreCredit: storeCreditBalance
         });
       }
 
@@ -931,11 +1003,14 @@ export const processTransaction = (transaction: Transaction): AppState => {
         ...c,
         totalSpend: newTotalSpend,
         totalDue: Math.max(0, newTotalDue),
+        storeCreditBalance: Math.max(0, storeCreditBalance),
         visitCount: newVisitCount,
         lastVisit: newLastVisit
       };
   }
-  const newState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
+  const persistedTransaction = normalizedTransaction;
+  const finalTransactions = [persistedTransaction, ...data.transactions];
+  const newState = { ...data, products: newProducts, transactions: finalTransactions, customers: newCustomers };
   void saveData(newState);
   return newState;
 };

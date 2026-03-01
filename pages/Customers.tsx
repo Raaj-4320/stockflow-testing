@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Customer, Transaction, Product, UpfrontOrder } from '../types';
+import { Customer, Transaction, Product, UpfrontOrder, CreditLedgerEntry } from '../types';
 import { loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
@@ -15,6 +15,7 @@ export default function Customers() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [creditLedger, setCreditLedger] = useState<CreditLedgerEntry[]>([]);
   
   // Modal States
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
@@ -69,6 +70,7 @@ export default function Customers() {
     setCustomers(data.customers);
     setTransactions(data.transactions);
     setUpfrontOrders(data.upfrontOrders || []);
+    setCreditLedger(data.creditLedger || []);
     
     if (viewingCustomer) {
         const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
@@ -120,6 +122,14 @@ export default function Customers() {
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [customers, searchQuery, filterType, sortBy, sortOrder]);
+
+  const getCustomerCreditBalance = (customer: Customer): number => {
+      const direct = customer.storeCreditBalance || 0;
+      const ledgerEntries = creditLedger.filter(entry => entry.customerId === customer.id);
+      if (!ledgerEntries.length) return direct;
+      const latest = ledgerEntries[0]?.balanceAfter;
+      return typeof latest === 'number' ? Math.max(direct, latest) : direct;
+  };
 
   const customerHistory = useMemo(() => {
       if (!viewingCustomer) return [];
@@ -690,6 +700,10 @@ export default function Customers() {
                            <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomer.totalDue > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
                                <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
                                <div className={`text-2xl font-black ${viewingCustomer.totalDue > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{viewingCustomer.totalDue.toFixed(2)}</div>
+                           </div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomer.storeCreditBalance || 0) > 0 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomer.storeCreditBalance || 0) > 0 ? 'text-blue-600' : 'text-slate-500'}`}>Store Credit</div>
+                               <div className={`text-2xl font-black ${(viewingCustomer.storeCreditBalance || 0) > 0 ? 'text-blue-700' : 'text-slate-600'}`}>₹{(viewingCustomer.storeCreditBalance || 0).toFixed(2)}</div>
                            </div>
                            <div className="flex flex-col gap-2">
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={viewingCustomer.totalDue <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>

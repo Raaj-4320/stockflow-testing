@@ -25,8 +25,19 @@ export interface Customer {
   phone: string;
   totalSpend: number;
   totalDue: number;
+  storeCreditBalance?: number;
   lastVisit: string;
   visitCount: number;
+}
+
+export type ReturnExcessMode = 'store_credit' | 'cash_refund';
+
+export interface ReturnSettlement {
+  linkedSaleId?: string;
+  appliedToDue: number;
+  refundedCash: number;
+  creditedAmount: number;
+  excessMode: ReturnExcessMode;
 }
 
 export interface Transaction {
@@ -44,6 +55,8 @@ export interface Transaction {
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
   notes?: string;
+  returnExcessMode?: ReturnExcessMode;
+  returnSettlement?: ReturnSettlement;
 }
 
 export interface StoreProfile {
@@ -119,6 +132,7 @@ export interface AppState {
   cashSessions?: CashSession[];
   expenses?: Expense[];
   expenseCategories?: string[];
+  creditLedger?: CreditLedgerEntry[];
 }
 
 export const TAX_OPTIONS = [
