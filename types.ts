@@ -132,6 +132,7 @@ export interface AppState {
   cashSessions?: CashSession[];
   expenses?: Expense[];
   expenseCategories?: string[];
+  creditLedger?: CreditLedgerEntry[];
 }
 
 export const TAX_OPTIONS = [

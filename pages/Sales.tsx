@@ -359,10 +359,14 @@ export default function Sales() {
       const taxAmount = (taxableAmount * (selectedTax.value / 100));
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
 
+      const availableCredit = !isReturnMode && finalCustomer ? (finalCustomer.storeCreditBalance || 0) : 0;
+      const creditToUse = useStoreCredit ? Math.min(availableCredit, Math.max(0, total)) : 0;
+      const payableAfterCredit = Math.max(0, total - creditToUse);
+
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
           const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
+          if (!Number.isFinite(receivedAmount) || receivedAmount < payableAfterCredit) {
               setCheckoutError('Received amount is less than total bill.');
               return;
           }
@@ -613,6 +617,19 @@ export default function Sales() {
                             <Button variant={paymentMethod === 'Cash' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => setPaymentMethod('Cash')}><Coins className="w-3.5 h-3.5 mr-1.5" /> Cash</Button>
                             <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => { setPaymentMethod('Online'); setCashReceived(''); }}><Wallet className="w-3.5 h-3.5 mr-1.5" /> Online</Button>
                             <Button variant={paymentMethod === 'Credit' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => { setPaymentMethod('Credit'); setCashReceived(''); }}><CreditCard className="w-3.5 h-3.5 mr-1.5" /> Credit</Button>
+                        </div>
+                      )}
+
+
+                      {!isReturnMode && selectedCustomer && (selectedCustomer.storeCreditBalance || 0) > 0 && (
+                        <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[11px] font-bold uppercase text-blue-700">Store Credit Available</p>
+                            <span className="text-xs font-bold text-blue-700">₹{(selectedCustomer.storeCreditBalance || 0).toFixed(2)}</span>
+                          </div>
+                          <Button variant={useStoreCredit ? 'default' : 'outline'} className="w-full h-8 text-[11px]" onClick={() => setUseStoreCredit(v => !v)}>
+                            {useStoreCredit ? 'Using Store Credit' : 'Use Store Credit'}
+                          </Button>
                         </div>
                       )}
 
