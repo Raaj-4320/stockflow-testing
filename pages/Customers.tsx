@@ -701,9 +701,9 @@ export default function Customers() {
                                <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
                                <div className={`text-2xl font-black ${viewingCustomer.totalDue > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{viewingCustomer.totalDue.toFixed(2)}</div>
                            </div>
-                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${getCustomerCreditBalance(viewingCustomer) > 0 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'}`}>
-                               <div className={`text-[10px] uppercase font-black tracking-widest ${getCustomerCreditBalance(viewingCustomer) > 0 ? 'text-blue-600' : 'text-slate-500'}`}>Store Credit</div>
-                               <div className={`text-2xl font-black ${getCustomerCreditBalance(viewingCustomer) > 0 ? 'text-blue-700' : 'text-slate-600'}`}>₹{getCustomerCreditBalance(viewingCustomer).toFixed(2)}</div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomer.storeCreditBalance || 0) > 0 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomer.storeCreditBalance || 0) > 0 ? 'text-blue-600' : 'text-slate-500'}`}>Store Credit</div>
+                               <div className={`text-2xl font-black ${(viewingCustomer.storeCreditBalance || 0) > 0 ? 'text-blue-700' : 'text-slate-600'}`}>₹{(viewingCustomer.storeCreditBalance || 0).toFixed(2)}</div>
                            </div>
                            <div className="flex flex-col gap-2">
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={viewingCustomer.totalDue <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>

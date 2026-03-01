@@ -43,7 +43,6 @@ export default function BarcodeSales() {
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
   const [returnExcessMode, setReturnExcessMode] = useState<'store_credit' | 'cash_refund'>('store_credit');
-  const [useStoreCredit, setUseStoreCredit] = useState(false);
   const [cashReceived, setCashReceived] = useState('');
   const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
@@ -224,7 +223,7 @@ export default function BarcodeSales() {
       e?.stopPropagation();
       if (cart.length === 0) return;
       setCheckoutError(null);
-      if (isReturnMode) { setPaymentMethod('Cash'); setReturnExcessMode('store_credit'); setUseStoreCredit(false); }
+      if (isReturnMode) { setPaymentMethod('Cash'); setReturnExcessMode('store_credit'); }
       setIsCustomerModalOpen(true);
   };
 
@@ -257,7 +256,7 @@ export default function BarcodeSales() {
       const taxAmount = (taxableAmount * (selectedTax.value / 100));
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
 
-      const availableCredit = !isReturnMode ? getAvailableStoreCredit(finalCustomer) : 0;
+      const availableCredit = !isReturnMode && finalCustomer ? (finalCustomer.storeCreditBalance || 0) : 0;
       const creditToUse = useStoreCredit ? Math.min(availableCredit, Math.max(0, total)) : 0;
       const payableAfterCredit = Math.max(0, total - creditToUse);
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
@@ -266,7 +265,7 @@ export default function BarcodeSales() {
           if (!Number.isFinite(receivedAmount) || receivedAmount < payableAfterCredit) { setCheckoutError('Received amount is less than total bill.'); return; }
           currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
       }
-      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod, returnExcessMode: isReturnMode ? returnExcessMode : undefined, useStoreCredit: !isReturnMode ? useStoreCredit : undefined };
+      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod, returnExcessMode: isReturnMode ? returnExcessMode : undefined };
       const newState = processTransaction(tx);
       setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
       setIsCustomerModalOpen(false); setTransactionComplete(tx); setTransactionCashDetails(currentCashDetails); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashReceived('');
@@ -416,11 +415,11 @@ export default function BarcodeSales() {
                       )}
 
 
-                      {!isReturnMode && selectedCustomer && getAvailableStoreCredit(selectedCustomer) > 0 && (
+                      {!isReturnMode && selectedCustomer && (selectedCustomer.storeCreditBalance || 0) > 0 && (
                         <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-2">
                           <div className="flex items-center justify-between">
                             <p className="text-[11px] font-bold uppercase text-blue-700">Store Credit Available</p>
-                            <span className="text-xs font-bold text-blue-700">₹{getAvailableStoreCredit(selectedCustomer).toFixed(2)}</span>
+                            <span className="text-xs font-bold text-blue-700">₹{(selectedCustomer.storeCreditBalance || 0).toFixed(2)}</span>
                           </div>
                           <Button variant={useStoreCredit ? 'default' : 'outline'} className="w-full h-8 text-[11px]" onClick={() => setUseStoreCredit(v => !v)}>
                             {useStoreCredit ? 'Using Store Credit' : 'Use Store Credit'}
