@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
+import { Product, CartItem, Transaction, Customer, TAX_OPTIONS, CreditLedgerEntry } from '../types';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
@@ -15,6 +15,7 @@ export default function BarcodeSales() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [creditLedger, setCreditLedger] = useState<CreditLedgerEntry[]>([]);
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const cartRef = useRef<CartItem[]>([]);
@@ -47,11 +48,21 @@ export default function BarcodeSales() {
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
+  const getAvailableStoreCredit = (customer: Customer | null): number => {
+      if (!customer) return 0;
+      const customerCredit = customer.storeCreditBalance || 0;
+      const ledgerEntries = creditLedger.filter(entry => entry.customerId === customer.id);
+      if (!ledgerEntries.length) return customerCredit;
+      const latestBalance = ledgerEntries[0]?.balanceAfter;
+      return typeof latestBalance === 'number' ? Math.max(customerCredit, latestBalance) : customerCredit;
+  };
+
   const refreshData = () => {
       const data = loadData();
       setProducts(data.products);
       setCustomers(data.customers);
       setTransactions(data.transactions);
+      setCreditLedger(data.creditLedger || []);
       if (data.profile.defaultTaxLabel) {
           const defaultOpt = TAX_OPTIONS.find(o => o.label === data.profile.defaultTaxLabel) || TAX_OPTIONS[0];
           setSelectedTax(defaultOpt);

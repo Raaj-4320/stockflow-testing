@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Customer, Transaction, Product, UpfrontOrder } from '../types';
+import { Customer, Transaction, Product, UpfrontOrder, CreditLedgerEntry } from '../types';
 import { loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
@@ -15,6 +15,7 @@ export default function Customers() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [creditLedger, setCreditLedger] = useState<CreditLedgerEntry[]>([]);
   
   // Modal States
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
@@ -69,6 +70,7 @@ export default function Customers() {
     setCustomers(data.customers);
     setTransactions(data.transactions);
     setUpfrontOrders(data.upfrontOrders || []);
+    setCreditLedger(data.creditLedger || []);
     
     if (viewingCustomer) {
         const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
@@ -120,6 +122,14 @@ export default function Customers() {
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [customers, searchQuery, filterType, sortBy, sortOrder]);
+
+  const getCustomerCreditBalance = (customer: Customer): number => {
+      const direct = customer.storeCreditBalance || 0;
+      const ledgerEntries = creditLedger.filter(entry => entry.customerId === customer.id);
+      if (!ledgerEntries.length) return direct;
+      const latest = ledgerEntries[0]?.balanceAfter;
+      return typeof latest === 'number' ? Math.max(direct, latest) : direct;
+  };
 
   const customerHistory = useMemo(() => {
       if (!viewingCustomer) return [];
