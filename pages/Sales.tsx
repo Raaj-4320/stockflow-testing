@@ -155,6 +155,16 @@ export default function Sales() {
   
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const safeUseStoreCredit = typeof useStoreCredit === 'boolean' ? useStoreCredit : false;
+
+  const getAvailableStoreCredit = (customer: Customer | null): number => {
+      if (!customer) return 0;
+      const customerCredit = customer.storeCreditBalance || 0;
+      const ledgerEntries = creditLedger.filter(entry => entry.customerId === customer.id);
+      if (!ledgerEntries.length) return customerCredit;
+      const latestBalance = ledgerEntries[0]?.balanceAfter;
+      return typeof latestBalance === 'number' ? Math.max(customerCredit, latestBalance) : customerCredit;
+  };
 
   const getAvailableStoreCredit = (customer: Customer | null): number => {
       if (!customer) return 0;
