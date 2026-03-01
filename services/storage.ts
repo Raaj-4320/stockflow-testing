@@ -1,4 +1,4 @@
-import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder, ReturnExcessMode, ReturnSettlement, CreditLedgerEntry } from '../types';
+import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder, ReturnExcessMode, ReturnSettlement } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -595,10 +595,6 @@ const failValidation = (code: string, message: string, details?: Record<string, 
 
 const MONEY_EPSILON = 0.01;
 
-
-const toPaise = (amount: number): number => Math.round(amount * 100);
-const fromPaise = (paise: number): number => Number((paise / 100).toFixed(2));
-
 const isValidMoney = (value: unknown): value is number => {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 };
@@ -698,17 +694,15 @@ const resolveReturnSettlement = ({
   currentDue: number;
   requestedMode?: ReturnExcessMode;
 }): ReturnSettlement => {
-  const returnPaise = Math.max(0, toPaise(returnAmount));
-  const duePaise = Math.max(0, toPaise(currentDue));
-
-  const appliedToDuePaise = Math.min(returnPaise, duePaise);
-  const excessPaise = Math.max(0, returnPaise - appliedToDuePaise);
+  const sanitizedDue = Math.max(0, currentDue);
+  const appliedToDue = Math.min(returnAmount, sanitizedDue);
+  const excess = Math.max(0, returnAmount - appliedToDue);
   const excessMode: ReturnExcessMode = requestedMode === 'cash_refund' ? 'cash_refund' : 'store_credit';
 
   return {
-    appliedToDue: fromPaise(appliedToDuePaise),
-    refundedCash: excessMode === 'cash_refund' ? fromPaise(excessPaise) : 0,
-    creditedAmount: excessMode === 'store_credit' ? fromPaise(excessPaise) : 0,
+    appliedToDue,
+    refundedCash: excessMode === 'cash_refund' ? excess : 0,
+    creditedAmount: excessMode === 'store_credit' ? excess : 0,
     excessMode
   };
 };
@@ -925,7 +919,6 @@ export const deleteCustomer = (id: string): Customer[] => {
 
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
-  let creditLedger = [...(data.creditLedger || [])];
 
   if (!transaction || typeof transaction !== 'object') {
     failValidation('INVALID_TRANSACTION_PAYLOAD', 'Transaction payload is invalid.');
@@ -936,10 +929,6 @@ export const processTransaction = (transaction: Transaction): AppState => {
   }
 
   assertPaymentMethodByType(transaction.type, transaction.paymentMethod);
-  if (transaction.useStoreCredit && !transaction.customerId) {
-    failValidation('INVALID_STORE_CREDIT_USAGE', 'Store credit can only be applied when a customer is selected.');
-  }
-
   assertTransactionFinancials(transaction);
   assertTransactionInventoryRules(transaction, data.products, data.transactions);
 
@@ -973,39 +962,11 @@ export const processTransaction = (transaction: Transaction): AppState => {
       let newLastVisit = c.lastVisit;
       let storeCreditBalance = c.storeCreditBalance || 0;
       const amount = Math.abs(transaction.total);
-      const amountPaise = toPaise(amount);
       if (transaction.type === 'sale') {
           newTotalSpend += amount;
           newVisitCount += 1;
           newLastVisit = new Date().toISOString();
-
-          let creditAppliedPaise = 0;
-          if (transaction.useStoreCredit && storeCreditBalance > 0) {
-            creditAppliedPaise = Math.min(toPaise(storeCreditBalance), amountPaise);
-            storeCreditBalance = fromPaise(toPaise(storeCreditBalance) - creditAppliedPaise);
-
-            if (creditAppliedPaise > 0) {
-              creditLedger = [{
-                id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                customerId: c.id,
-                transactionId: transaction.id,
-                date: new Date().toISOString(),
-                type: 'credit_used',
-                amount: fromPaise(creditAppliedPaise),
-                balanceAfter: storeCreditBalance,
-                note: 'Store credit applied to sale'
-              }, ...creditLedger];
-            }
-          }
-
-          const dueIncreasePaise = transaction.paymentMethod === 'Credit' ? Math.max(0, amountPaise - creditAppliedPaise) : 0;
-          newTotalDue = fromPaise(toPaise(newTotalDue) + dueIncreasePaise);
-
-          normalizedTransaction = {
-            ...normalizedTransaction,
-            creditApplied: fromPaise(creditAppliedPaise),
-            useStoreCredit: !!transaction.useStoreCredit
-          };
+          if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
       } else if (transaction.type === 'return') {
           newTotalSpend -= amount;
           const settlement = assertReturnSettlementConsistency(transaction, newTotalDue) || resolveReturnSettlement({
@@ -1014,22 +975,8 @@ export const processTransaction = (transaction: Transaction): AppState => {
             requestedMode: transaction.returnExcessMode
           });
 
-          const dueAfterPaise = Math.max(0, toPaise(newTotalDue) - toPaise(settlement.appliedToDue));
-          newTotalDue = fromPaise(dueAfterPaise);
-          storeCreditBalance = fromPaise(toPaise(storeCreditBalance) + toPaise(settlement.creditedAmount));
-
-          if (settlement.creditedAmount > 0) {
-            creditLedger = [{
-              id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              customerId: c.id,
-              transactionId: transaction.id,
-              date: new Date().toISOString(),
-              type: 'credit_issued',
-              amount: settlement.creditedAmount,
-              balanceAfter: storeCreditBalance,
-              note: 'Store credit issued from return excess'
-            }, ...creditLedger];
-          }
+          newTotalDue = Math.max(0, newTotalDue - settlement.appliedToDue);
+          storeCreditBalance += settlement.creditedAmount;
 
           normalizedTransaction = {
             ...transaction,
@@ -1040,7 +987,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
             }
           };
       } else if (transaction.type === 'payment') {
-          newTotalDue = fromPaise(Math.max(0, toPaise(newTotalDue) - amountPaise));
+          newTotalDue -= amount;
           newLastVisit = new Date().toISOString();
       }
 
@@ -1063,7 +1010,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   }
   const persistedTransaction = normalizedTransaction;
   const finalTransactions = [persistedTransaction, ...data.transactions];
-  const newState = { ...data, products: newProducts, transactions: finalTransactions, customers: newCustomers, creditLedger };
+  const newState = { ...data, products: newProducts, transactions: finalTransactions, customers: newCustomers };
   void saveData(newState);
   return newState;
 };
