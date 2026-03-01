@@ -193,16 +193,52 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMes
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const CLOUDINARY_SIGN_ENDPOINTS = [
+const CLOUDINARY_SIGN_ENDPOINT_PATHS = [
+  '/api/cloudinary-sign-upload',
   '/.netlify/functions/cloudinary-sign-upload',
   '/netlify/functions/cloudinary-sign-upload'
 ];
 
+const getConfiguredCloudinarySignUrl = (): string | null => {
+  const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any).env) ? (import.meta as any).env : null;
+  const configured =
+    (metaEnv && metaEnv.VITE_CLOUDINARY_SIGN_URL)
+    // @ts-ignore
+    || (typeof process !== 'undefined' ? process.env?.VITE_CLOUDINARY_SIGN_URL : null);
+
+  if (!configured || typeof configured !== 'string') return null;
+  const trimmed = configured.trim();
+  return trimmed.length ? trimmed : null;
+};
+
+const getCloudinarySignatureEndpoints = (): string[] => {
+  const configured = getConfiguredCloudinarySignUrl();
+  const endpoints: string[] = [];
+
+  if (configured) {
+    endpoints.push(configured);
+  }
+
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    const { origin } = window.location;
+    for (const path of CLOUDINARY_SIGN_ENDPOINT_PATHS) {
+      endpoints.push(new URL(path, origin).toString());
+    }
+  }
+
+  for (const path of CLOUDINARY_SIGN_ENDPOINT_PATHS) {
+    endpoints.push(path);
+  }
+
+  return Array.from(new Set(endpoints));
+};
+
 const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
   let lastError: unknown = null;
+  const endpoints = getCloudinarySignatureEndpoints();
 
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
-    for (const endpoint of CLOUDINARY_SIGN_ENDPOINTS) {
+    for (const endpoint of endpoints) {
       try {
         console.debug('[cloudinary] signature fetch start', { endpoint, attempt });
 
