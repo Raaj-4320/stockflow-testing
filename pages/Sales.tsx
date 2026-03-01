@@ -148,6 +148,8 @@ export default function Sales() {
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
+  const [returnExcessMode, setReturnExcessMode] = useState<'store_credit' | 'cash_refund'>('store_credit');
+  const [useStoreCredit, setUseStoreCredit] = useState(false);
   const [cashReceived, setCashReceived] = useState('');
   const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   
@@ -290,7 +292,7 @@ export default function Sales() {
       e?.stopPropagation();
       if (cart.length === 0) return;
       setCheckoutError(null);
-      if (isReturnMode) setPaymentMethod('Cash');
+      if (isReturnMode) { setPaymentMethod('Cash'); setReturnExcessMode('store_credit'); setUseStoreCredit(false); }
       setIsCustomerModalOpen(true);
   };
 
@@ -358,10 +360,14 @@ export default function Sales() {
       const taxAmount = (taxableAmount * (selectedTax.value / 100));
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
 
+      const availableCredit = !isReturnMode && finalCustomer ? (finalCustomer.storeCreditBalance || 0) : 0;
+      const creditToUse = useStoreCredit ? Math.min(availableCredit, Math.max(0, total)) : 0;
+      const payableAfterCredit = Math.max(0, total - creditToUse);
+
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
           const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
+          if (!Number.isFinite(receivedAmount) || receivedAmount < payableAfterCredit) {
               setCheckoutError('Received amount is less than total bill.');
               return;
           }
@@ -374,7 +380,7 @@ export default function Sales() {
       const tx: Transaction = {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
           taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale',
-          customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod
+          customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod, returnExcessMode: isReturnMode ? returnExcessMode : undefined, useStoreCredit: !isReturnMode ? useStoreCredit : undefined
       };
 
       const newState = processTransaction(tx);
@@ -615,6 +621,19 @@ export default function Sales() {
                         </div>
                       )}
 
+
+                      {!isReturnMode && selectedCustomer && (selectedCustomer.storeCreditBalance || 0) > 0 && (
+                        <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[11px] font-bold uppercase text-blue-700">Store Credit Available</p>
+                            <span className="text-xs font-bold text-blue-700">₹{(selectedCustomer.storeCreditBalance || 0).toFixed(2)}</span>
+                          </div>
+                          <Button variant={useStoreCredit ? 'default' : 'outline'} className="w-full h-8 text-[11px]" onClick={() => setUseStoreCredit(v => !v)}>
+                            {useStoreCredit ? 'Using Store Credit' : 'Use Store Credit'}
+                          </Button>
+                        </div>
+                      )}
+
                       {!isReturnMode && paymentMethod === 'Cash' && (
                         <div className="space-y-1.5 mb-3">
                           <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Received</Label>
@@ -629,6 +648,25 @@ export default function Sales() {
                           {Number(cashReceived) >= grandTotal && grandTotal > 0 && (
                             <p className="text-xs font-bold text-green-700">₹{(Number(cashReceived) - grandTotal).toFixed(2)} change to be given</p>
                           )}
+                        </div>
+                      )}
+
+                      {isReturnMode && selectedCustomer && Math.abs(grandTotal) > (selectedCustomer.totalDue || 0) + 0.01 && (
+                        <div className="mb-3 rounded-lg border border-orange-200 bg-orange-50 p-3 space-y-2">
+                          <p className="text-[11px] font-bold uppercase text-orange-700">Excess Return Handling</p>
+                          <div className="flex gap-2">
+                            <Button
+                              variant={returnExcessMode === 'store_credit' ? 'default' : 'outline'}
+                              className="flex-1 h-8 text-[11px]"
+                              onClick={() => setReturnExcessMode('store_credit')}
+                            >Store Credit</Button>
+                            <Button
+                              variant={returnExcessMode === 'cash_refund' ? 'default' : 'outline'}
+                              className="flex-1 h-8 text-[11px]"
+                              onClick={() => setReturnExcessMode('cash_refund')}
+                            >Cash Refund</Button>
+                          </div>
+                          <p className="text-[11px] text-orange-700/80">Due: ₹{(selectedCustomer.totalDue || 0).toFixed(2)} · Return: ₹{Math.abs(grandTotal).toFixed(2)}</p>
                         </div>
                       )}
 
