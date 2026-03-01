@@ -40,17 +40,6 @@ export interface ReturnSettlement {
   excessMode: ReturnExcessMode;
 }
 
-export interface CreditLedgerEntry {
-  id: string;
-  customerId: string;
-  transactionId?: string;
-  date: string;
-  type: 'credit_issued' | 'credit_used';
-  amount: number;
-  balanceAfter: number;
-  note?: string;
-}
-
 export interface Transaction {
   id: string;
   items: CartItem[];
@@ -68,8 +57,6 @@ export interface Transaction {
   notes?: string;
   returnExcessMode?: ReturnExcessMode;
   returnSettlement?: ReturnSettlement;
-  useStoreCredit?: boolean;
-  creditApplied?: number;
 }
 
 export interface StoreProfile {
