@@ -3,7 +3,7 @@ import jsPDF from 'jspdf';
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { loadData, saveData, processTransaction } from '../services/storage';
 import { AppState, Customer, Transaction } from '../types';
-import { AlertCircle, ChevronDown, ChevronUp, DollarSign, Wallet, ReceiptIndianRupee, BarChart3 } from 'lucide-react';
+import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3 } from 'lucide-react';
 
 type CashSession = {
   id: string;
@@ -25,6 +25,8 @@ type Expense = {
   createdAt: string;
 };
 
+type FinanceTabKey = 'cash' | 'expense' | 'credit' | 'profit';
+
 const dateKeyFromDate = (date: Date) => {
   const yyyy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, '0');
@@ -40,9 +42,7 @@ const previousDayISO = () => {
   return dateKeyFromDate(date);
 };
 
-const isSameDay = (iso: string, dateKey: string) => {
-  return dateKeyFromDate(new Date(iso)) === dateKey;
-};
+const isSameDay = (iso: string, dateKey: string) => dateKeyFromDate(new Date(iso)) === dateKey;
 
 const monthKeyOf = (iso: string) => {
   const d = new Date(iso);
@@ -51,11 +51,27 @@ const monthKeyOf = (iso: string) => {
   return `${yyyy}-${mm}`;
 };
 
+const formatINR = (value: number) => `₹${value.toFixed(2)}`;
+
+function StatCard({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'neutral' | 'good' | 'bad' }) {
+  const toneClasses = tone === 'good'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+    : tone === 'bad'
+      ? 'border-red-200 bg-red-50 text-red-900'
+      : 'border-border bg-muted/30';
+
+  return (
+    <div className={`rounded-lg border p-3 ${toneClasses}`}>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-lg font-semibold">{value}</p>
+    </div>
+  );
+}
+
 export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
-
-  const [openSections, setOpenSections] = useState({ cash: true, expenses: true, credit: true, profit: true });
+  const [activeTab, setActiveTab] = useState<FinanceTabKey>('cash');
 
   const [openingBalance, setOpeningBalance] = useState('');
   const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
@@ -90,18 +106,14 @@ export default function Finance() {
   const openSession = cashSessions.find(s => s.status === 'open');
   const cashHistory = [...cashSessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
 
-  const isAdmin = true; // Placeholder for future role-based access integration.
+  const isAdmin = true;
   const todayKey = todayISO();
   const previousDayKey = previousDayISO();
   const todaySessionExists = cashSessions.some(session => isSameDay(session.startTime, todayKey));
   const isOpenSessionToday = !!openSession && isSameDay(openSession.startTime, todayKey);
 
   const previousDayClosedSession = useMemo(() => {
-    return cashHistory.find(session => (
-      session.status === 'closed'
-      && isSameDay(session.startTime, previousDayKey)
-      && Number.isFinite(session.closingBalance)
-    ));
+    return cashHistory.find(session => session.status === 'closed' && isSameDay(session.startTime, previousDayKey) && Number.isFinite(session.closingBalance));
   }, [cashHistory, previousDayKey]);
 
   useEffect(() => {
@@ -140,58 +152,29 @@ export default function Finance() {
     return { cashSales, cashRefunds, systemCashTotal: cashSales - cashRefunds };
   }, [data.transactions]);
 
-  const expensesForDate = useMemo(
-    () => expenses.filter(e => isSameDay(e.createdAt, expenseDateFilter)),
-    [expenses, expenseDateFilter]
-  );
+  const expensesForDate = useMemo(() => expenses.filter(e => isSameDay(e.createdAt, expenseDateFilter)), [expenses, expenseDateFilter]);
+  const expensesTotalForDate = useMemo(() => expensesForDate.reduce((sum, e) => sum + e.amount, 0), [expensesForDate]);
 
-  const expensesTotalForDate = useMemo(
-    () => expensesForDate.reduce((sum, e) => sum + e.amount, 0),
-    [expensesForDate]
-  );
-
-  const creditCustomers = useMemo(
-    () => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue),
-    [data.customers]
-  );
+  const creditCustomers = useMemo(() => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue), [data.customers]);
 
   const dailyProfit = useMemo(() => {
-    const sales = data.transactions
-      .filter(t => t.type === 'sale' && isSameDay(t.date, profitDate))
-      .reduce((sum, t) => sum + t.total, 0);
-
+    const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
     const cogs = data.transactions
       .filter(t => t.type === 'sale' && isSameDay(t.date, profitDate))
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-
     const expenseSum = expenses.filter(e => isSameDay(e.createdAt, profitDate)).reduce((sum, e) => sum + e.amount, 0);
 
-    return {
-      sales,
-      cogs,
-      expenses: expenseSum,
-      profit: sales - cogs - expenseSum
-    };
+    return { sales, cogs, expenses: expenseSum, profit: sales - cogs - expenseSum };
   }, [data.transactions, expenses, profitDate]);
 
   const monthlyProfit = useMemo(() => {
-    const sales = data.transactions
-      .filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth)
-      .reduce((sum, t) => sum + t.total, 0);
-
+    const sales = data.transactions.filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
     const cogs = data.transactions
       .filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth)
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+    const expenseSum = expenses.filter(e => monthKeyOf(e.createdAt) === profitMonth).reduce((sum, e) => sum + e.amount, 0);
 
-    const expenseSum = expenses
-      .filter(e => monthKeyOf(e.createdAt) === profitMonth)
-      .reduce((sum, e) => sum + e.amount, 0);
-
-    return {
-      sales,
-      expenses: expenseSum,
-      profit: sales - cogs - expenseSum
-    };
+    return { sales, expenses: expenseSum, profit: sales - cogs - expenseSum };
   }, [data.transactions, expenses, profitMonth]);
 
   const persistState = async (newState: AppState) => {
@@ -206,76 +189,39 @@ export default function Finance() {
   };
 
   const startShift = async () => {
-    if (!isAdmin) {
-      setErrors('Only admin can start or close shifts.');
-      return;
-    }
-
-    if (todaySessionExists) {
-      setErrors('Cash session for today already exists.');
-      return;
-    }
-
-    if (openSession) {
-      setErrors('An open cash session already exists.');
-      return;
-    }
+    if (!isAdmin) return setErrors('Only admin can start or close shifts.');
+    if (todaySessionExists) return setErrors('Cash session for today already exists.');
+    if (openSession) return setErrors('An open cash session already exists.');
 
     const autoCarryBalance = previousDayClosedSession?.closingBalance;
-    const value = openingBalance.trim()
-      ? Number(openingBalance)
-      : (autoCarryBalance !== undefined ? autoCarryBalance : Number.NaN);
+    const value = openingBalance.trim() ? Number(openingBalance) : (autoCarryBalance !== undefined ? autoCarryBalance : Number.NaN);
+    if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
-    if (!Number.isFinite(value) || value < 0) {
-      setErrors('Please enter a valid opening balance.');
-      return;
-    }
-
-    const session: CashSession = {
-      id: buildCashSessionId(cashSessions),
-      startTime: new Date().toISOString(),
-      openingBalance: value,
-      status: 'open'
-    };
-
+    const session: CashSession = { id: buildCashSessionId(cashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
     await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
 
   const closeShift = async () => {
-    if (!isAdmin) {
-      setErrors('Only admin can start or close shifts.');
-      return;
-    }
-
-    if (!openSession) {
-      setErrors('No open cash session found.');
-      return;
-    }
+    if (!isAdmin) return setErrors('Only admin can start or close shifts.');
+    if (!openSession) return setErrors('No open cash session found.');
 
     const counted = Number(closingBalance);
-    if (!Number.isFinite(counted) || counted < 0) {
-      setErrors('Please enter a valid closing cash value.');
-      return;
-    }
+    if (!Number.isFinite(counted) || counted < 0) return setErrors('Please enter a valid closing cash value.');
 
     const systemCashTotal = dailyCashTotals.systemCashTotal;
     const expectedClosing = openSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
 
-    const updated = (data.cashSessions || []).map(session =>
-      session.id === openSession.id
-        ? {
-            ...session,
-            endTime: new Date().toISOString(),
-            closingBalance: counted,
-            systemCashTotal,
-            difference,
-            status: 'closed' as const
-          }
-        : session
-    );
+    const updated = (data.cashSessions || []).map(session => session.id === openSession.id ? {
+      ...session,
+      endTime: new Date().toISOString(),
+      closingBalance: counted,
+      systemCashTotal,
+      difference,
+      status: 'closed' as const
+    } : session);
 
     await persistState({ ...data, cashSessions: updated });
     setClosingBalance('');
@@ -283,7 +229,6 @@ export default function Finance() {
 
   const startOpeningBalanceEdit = () => {
     if (!openSession || !isOpenSessionToday || !isAdmin) return;
-
     setOpeningBalanceEditValue(openSession.openingBalance.toFixed(2));
     setEditingOpeningBalance(true);
     setErrors(null);
@@ -295,26 +240,12 @@ export default function Finance() {
   };
 
   const saveOpeningBalanceEdit = async () => {
-    if (!openSession || !isOpenSessionToday || !isAdmin) {
-      setErrors('Only admin can start or close shifts.');
-      return;
-    }
+    if (!openSession || !isOpenSessionToday || !isAdmin) return setErrors('Only admin can start or close shifts.');
 
     const value = Number(openingBalanceEditValue);
-    if (!Number.isFinite(value) || value < 0) {
-      setErrors('Please enter a valid opening balance.');
-      return;
-    }
+    if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
-    const updated = (data.cashSessions || []).map(session =>
-      session.id === openSession.id
-        ? {
-            ...session,
-            openingBalance: value
-          }
-        : session
-    );
-
+    const updated = (data.cashSessions || []).map(session => session.id === openSession.id ? { ...session, openingBalance: value } : session);
     await persistState({ ...data, cashSessions: updated });
     setEditingOpeningBalance(false);
     setOpeningBalanceEditValue('');
@@ -322,10 +253,7 @@ export default function Finance() {
 
   const addExpense = async () => {
     const amount = Number(expenseAmount);
-    if (!expenseTitle.trim() || !expenseCategory.trim() || !Number.isFinite(amount) || amount <= 0) {
-      setErrors('Please enter valid expense details.');
-      return;
-    }
+    if (!expenseTitle.trim() || !expenseCategory.trim() || !Number.isFinite(amount) || amount <= 0) return setErrors('Please enter valid expense details.');
 
     const expense: Expense = {
       id: Date.now().toString(),
@@ -337,12 +265,7 @@ export default function Finance() {
     };
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
-
-    await persistState({
-      ...data,
-      expenses: [expense, ...(data.expenses || [])],
-      expenseCategories: categories
-    });
+    await persistState({ ...data, expenses: [expense, ...(data.expenses || [])], expenseCategories: categories });
 
     setExpenseTitle('');
     setExpenseAmount('');
@@ -360,15 +283,9 @@ export default function Finance() {
 
   const deleteExpenseCategory = async (name: string) => {
     const isUsed = (data.expenses || []).some(e => e.category === name);
-    if (isUsed) {
-      setErrors('Cannot delete category that is used by expenses.');
-      return;
-    }
+    if (isUsed) return setErrors('Cannot delete category that is used by expenses.');
 
-    await persistState({
-      ...data,
-      expenseCategories: (data.expenseCategories || []).filter(c => c !== name)
-    });
+    await persistState({ ...data, expenseCategories: (data.expenseCategories || []).filter(c => c !== name) });
   };
 
   const exportExpensePDF = () => {
@@ -403,10 +320,7 @@ export default function Finance() {
     if (!collectingCustomer) return;
 
     const amount = Number(paymentAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setErrors('Please enter a valid payment amount.');
-      return;
-    }
+    if (!Number.isFinite(amount) || amount <= 0) return setErrors('Please enter a valid payment amount.');
 
     const tx: Transaction = {
       id: Date.now().toString(),
@@ -434,139 +348,135 @@ export default function Finance() {
 
   const chartMax = Math.max(monthlyProfit.sales, monthlyProfit.expenses, 1);
 
+  const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
+    { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
+    { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
+    { key: 'credit', label: 'Credit Management', icon: <DollarSign className="w-4 h-4" /> },
+    { key: 'profit', label: 'Profit Summary', icon: <BarChart3 className="w-4 h-4" /> }
+  ];
+
   return (
-    <div className="space-y-6 max-w-6xl mx-auto">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Finance</h1>
-        <p className="text-muted-foreground">Manage cash sessions, expenses, customer credit, and profit summary.</p>
-      </div>
-
-      {errors && (
-        <div className="text-destructive text-sm bg-destructive/10 border border-destructive/20 p-3 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-4 h-4" />
-          {errors}
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
+          <p className="text-sm text-slate-600">Manage cash sessions, expenses, customer credit, and profit summary.</p>
         </div>
-      )}
 
-      <Card>
-        <CardHeader className="cursor-pointer" onClick={() => setOpenSections(v => ({ ...v, cash: !v.cash }))}>
-          <CardTitle className="flex items-center justify-between"><span className="flex items-center gap-2"><Wallet className="w-5 h-5" /> Cash Management</span>{openSections.cash ? <ChevronUp /> : <ChevronDown />}</CardTitle>
-        </CardHeader>
-        {openSections.cash && (
-          <CardContent className="space-y-4">
-            <div className="grid md:grid-cols-2 gap-4">
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-3">
-                  <Label>Opening Balance</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    value={openingBalance}
-                    onChange={e => {
-                      setOpeningBalance(e.target.value);
-                      setOpeningBalanceAutoFilled(false);
-                    }}
-                    placeholder="0.00"
-                  />
-                  {openingBalanceAutoFilled && (
-                    <p className="text-xs text-muted-foreground">Carried forward from previous closing balance</p>
-                  )}
-                  {todaySessionExists && (
-                    <p className="text-xs text-destructive">Cash session for today already exists.</p>
-                  )}
-                  <Button onClick={startShift} disabled={!isAdmin || !!openSession || todaySessionExists}>Start Shift</Button>
-                </CardContent>
-              </Card>
+        {errors && (
+          <div className="text-destructive text-sm bg-destructive/10 border border-destructive/20 p-3 rounded-lg flex items-center gap-2">
+            <AlertCircle className="w-4 h-4" />
+            {errors}
+          </div>
+        )}
 
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-2">
-                  <Label>Closing Cash Counted</Label>
-                  <Input type="number" min="0" value={closingBalance} onChange={e => setClosingBalance(e.target.value)} placeholder="0.00" />
-                  <p className="text-sm text-muted-foreground">System Cash Total (today): ₹{dailyCashTotals.systemCashTotal.toFixed(2)}</p>
-                  <Button onClick={closeShift} disabled={!isAdmin || !openSession}>Close Shift</Button>
-                </CardContent>
-              </Card>
-            </div>
+        <div className="flex gap-2 overflow-x-auto rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+          {tabs.map(tab => {
+            const isActive = activeTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveTab(tab.key)}
+                className={`inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-semibold transition ${isActive ? 'bg-slate-900 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+              >
+                {tab.icon}
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
 
-            {openSession && (
-              <div className="p-3 rounded border text-sm bg-blue-50/60 border-blue-200">
-                <div className="flex items-center justify-between gap-2">
-                  <span>Open Session Started: {new Date(openSession.startTime).toLocaleString()}</span>
-                  <div className="flex items-center gap-2">
-                    {isOpenSessionToday && <Badge variant="secondary">Today</Badge>}
-                    <Badge variant="secondary">open</Badge>
+        {activeTab === 'cash' && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+            <div className="lg:col-span-5">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2"><Wallet className="w-5 h-5" /> Cash Management</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <StatCard label="Opening Balance" value={formatINR(openSession?.openingBalance ?? Number(openingBalance || 0))} />
+                    <StatCard label="Closing Cash Counted" value={formatINR(Number(closingBalance || 0))} />
+                    <div className="col-span-2">
+                      <StatCard label="System Cash Total (today)" value={formatINR(dailyCashTotals.systemCashTotal)} />
+                    </div>
                   </div>
-                </div>
-                <div className="mt-2">
-                  {editingOpeningBalance ? (
-                    <div className="flex flex-col md:flex-row md:items-center gap-2">
-                      <Input
-                        type="number"
-                        min="0"
-                        value={openingBalanceEditValue}
-                        onChange={e => setOpeningBalanceEditValue(e.target.value)}
-                        placeholder="0.00"
-                      />
-                      <div className="flex gap-2">
-                        <Button size="sm" onClick={saveOpeningBalanceEdit}>Save Opening Balance</Button>
-                        <Button size="sm" variant="outline" onClick={cancelOpeningBalanceEdit}>Cancel</Button>
-                      </div>
+
+                  {todaySessionExists && !openSession && <p className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 p-2 text-sm">Cash session for today already exists.</p>}
+
+                  {!openSession ? (
+                    <div className="space-y-2">
+                      <Label>Opening Balance</Label>
+                      <Input type="number" min="0" value={openingBalance} onChange={e => { setOpeningBalance(e.target.value); if (openingBalanceAutoFilled) setOpeningBalanceAutoFilled(false); }} placeholder="Enter opening balance" />
+                      {openingBalanceAutoFilled && <p className="text-xs text-muted-foreground">Auto-filled from previous day closing cash.</p>}
+                      <Button onClick={startShift}>Start Shift</Button>
                     </div>
                   ) : (
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                      <p className="text-sm">Current Opening Balance: ₹{openSession.openingBalance.toFixed(2)}</p>
-                      {isOpenSessionToday && isAdmin && (
-                        <Button size="sm" variant="outline" onClick={startOpeningBalanceEdit}>Edit Opening Balance</Button>
+                    <div className="space-y-3">
+                      <div className="p-3 rounded border bg-muted/20">
+                        <p className="text-sm">Current shift started: <span className="font-semibold">{new Date(openSession.startTime).toLocaleString()}</span></p>
+                        <p className="text-sm">Opening balance: <span className="font-semibold">{formatINR(openSession.openingBalance)}</span></p>
+                        {isOpenSessionToday && isAdmin && !editingOpeningBalance && <Button className="mt-2" size="sm" variant="outline" onClick={startOpeningBalanceEdit}>Edit Opening Balance</Button>}
+                      </div>
+
+                      {editingOpeningBalance && (
+                        <div className="space-y-2 p-3 rounded border bg-muted/20">
+                          <Label>Edit Opening Balance</Label>
+                          <Input type="number" min="0" value={openingBalanceEditValue} onChange={e => setOpeningBalanceEditValue(e.target.value)} />
+                          <div className="flex gap-2">
+                            <Button size="sm" onClick={saveOpeningBalanceEdit}>Save</Button>
+                            <Button size="sm" variant="outline" onClick={cancelOpeningBalanceEdit}>Cancel</Button>
+                          </div>
+                        </div>
                       )}
+
+                      <Label>Closing Cash Counted</Label>
+                      <Input type="number" min="0" value={closingBalance} onChange={e => setClosingBalance(e.target.value)} placeholder="Enter counted closing cash" />
+                      <Button variant="outline" onClick={closeShift}>Close Shift</Button>
                     </div>
                   )}
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <h3 className="font-semibold">Cash History</h3>
-              <div className="space-y-2">
-                {cashHistory.map(session => (
-                  <div key={session.id} className={`p-3 border rounded flex flex-col md:flex-row md:items-center md:justify-between gap-2 ${isSameDay(session.startTime, todayKey) ? 'bg-blue-50/40 border-blue-200' : ''}`}>
-                    <div className="text-sm">
-                      <p>Start: {new Date(session.startTime).toLocaleString()}</p>
-                      {session.endTime && <p>End: {new Date(session.endTime).toLocaleString()}</p>}
-                    </div>
-                    <div className="text-sm">
-                      <p>Opening: ₹{session.openingBalance.toFixed(2)}</p>
-                      {session.closingBalance !== undefined && <p>Closing: ₹{session.closingBalance.toFixed(2)}</p>}
-                    </div>
-                    <div className="text-sm">
-                      {session.systemCashTotal !== undefined && <p>System: ₹{session.systemCashTotal.toFixed(2)}</p>}
-                      {session.difference !== undefined && (
-                        <p className={session.difference === 0 ? 'text-green-700 font-semibold' : 'text-red-700 font-semibold'}>
-                          Difference: ₹{session.difference.toFixed(2)}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {isSameDay(session.startTime, todayKey) && <Badge variant="secondary">Today</Badge>}
-                      <Badge variant={session.status === 'open' ? 'destructive' : 'secondary'}>{session.status}</Badge>
-                    </div>
-                  </div>
-                ))}
-                {!cashHistory.length && <p className="text-sm text-muted-foreground">No cash sessions yet.</p>}
-              </div>
+                </CardContent>
+              </Card>
             </div>
-          </CardContent>
-        )}
-      </Card>
 
-      <Card>
-        <CardHeader className="cursor-pointer" onClick={() => setOpenSections(v => ({ ...v, expenses: !v.expenses }))}>
-          <CardTitle className="flex items-center justify-between"><span className="flex items-center gap-2"><ReceiptIndianRupee className="w-5 h-5" /> Expense Management</span>{openSections.expenses ? <ChevronUp /> : <ChevronDown />}</CardTitle>
-        </CardHeader>
-        {openSections.expenses && (
-          <CardContent className="space-y-4">
-            <div className="grid md:grid-cols-2 gap-4">
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-2">
+            <div className="lg:col-span-7">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader><CardTitle>Cash History</CardTitle></CardHeader>
+                <CardContent className="space-y-2">
+                  {cashHistory.map(session => (
+                    <div key={session.id} className={`p-3 border rounded-lg flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${isSameDay(session.startTime, todayKey) ? 'bg-blue-50/40 border-blue-200' : ''}`}>
+                      <div className="text-sm">
+                        <p>Start: {new Date(session.startTime).toLocaleString()}</p>
+                        {session.endTime && <p>End: {new Date(session.endTime).toLocaleString()}</p>}
+                      </div>
+                      <div className="text-sm">
+                        <p>Opening: {formatINR(session.openingBalance)}</p>
+                        {session.closingBalance !== undefined && <p>Closing: {formatINR(session.closingBalance)}</p>}
+                      </div>
+                      <div className="text-sm">
+                        {session.systemCashTotal !== undefined && <p>System: {formatINR(session.systemCashTotal)}</p>}
+                        {session.difference !== undefined && <p className={session.difference === 0 ? 'text-emerald-700 font-semibold' : 'text-red-700 font-semibold'}>Difference: {formatINR(session.difference)}</p>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {isSameDay(session.startTime, todayKey) && <Badge variant="secondary">Today</Badge>}
+                        <Badge variant={session.status === 'open' ? 'destructive' : 'secondary'}>{session.status}</Badge>
+                      </div>
+                    </div>
+                  ))}
+                  {!cashHistory.length && <p className="text-sm text-muted-foreground">No cash sessions yet.</p>}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'expense' && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+            <div className="lg:col-span-5 space-y-4">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader><CardTitle>Expense Management</CardTitle></CardHeader>
+                <CardContent className="space-y-2">
                   <Label>Title</Label>
                   <Input value={expenseTitle} onChange={e => setExpenseTitle(e.target.value)} placeholder="Expense title" />
                   <Label>Amount</Label>
@@ -577,24 +487,25 @@ export default function Finance() {
                   </select>
                   <Label>Note (optional)</Label>
                   <Input value={expenseNote} onChange={e => setExpenseNote(e.target.value)} placeholder="Optional note" />
-                  <Button onClick={addExpense}>Add Expense</Button>
+                  <div className="flex gap-2 pt-2">
+                    <Button onClick={addExpense}>Add Expense</Button>
+                    <Button variant="outline" onClick={exportExpensePDF}>Export PDF</Button>
+                  </div>
                 </CardContent>
               </Card>
 
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-2">
-                  <Label>Add Category</Label>
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader><CardTitle>Categories</CardTitle></CardHeader>
+                <CardContent className="space-y-2">
                   <div className="flex gap-2">
                     <Input value={newCategory} onChange={e => setNewCategory(e.target.value)} placeholder="Category name" />
                     <Button onClick={addExpenseCategory}>Add</Button>
                   </div>
-                  <div className="space-y-2 mt-2">
+                  <div className="space-y-2">
                     {expenseCategories.map(c => (
                       <div key={c} className="flex items-center justify-between border rounded p-2">
                         <span className="text-sm">{c}</span>
-                        {c !== 'General' && (
-                          <Button variant="outline" size="sm" onClick={() => deleteExpenseCategory(c)}>Delete</Button>
-                        )}
+                        {c !== 'General' ? <Button variant="outline" size="sm" onClick={() => deleteExpenseCategory(c)}>Delete</Button> : <span className="text-xs text-muted-foreground">Default</span>}
                       </div>
                     ))}
                   </div>
@@ -602,120 +513,120 @@ export default function Finance() {
               </Card>
             </div>
 
-            <Card className="bg-muted/20">
-              <CardContent className="pt-4 space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Label>Daily Expense Report</Label>
-                  <Input type="date" className="w-auto" value={expenseDateFilter} onChange={e => setExpenseDateFilter(e.target.value)} />
-                  <Button variant="outline" onClick={exportExpensePDF}>Export PDF</Button>
-                </div>
-                <p className="font-semibold">Total: ₹{expensesTotalForDate.toFixed(2)}</p>
-                <div className="space-y-2">
+            <div className="lg:col-span-7">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
+                    <span>Daily Expense Report</span>
+                    <Input type="date" className="w-auto" value={expenseDateFilter} onChange={e => setExpenseDateFilter(e.target.value)} />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <StatCard label="Total" value={formatINR(expensesTotalForDate)} />
                   {expensesForDate.map(e => (
                     <div key={e.id} className="border rounded p-2 text-sm">
-                      <div className="flex justify-between"><span>{e.title}</span><span>₹{e.amount.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>{e.title}</span><span>{formatINR(e.amount)}</span></div>
                       <div className="text-muted-foreground">{e.category}{e.note ? ` • ${e.note}` : ''}</div>
                     </div>
                   ))}
                   {!expensesForDate.length && <p className="text-sm text-muted-foreground">No expenses for selected date.</p>}
-                </div>
-              </CardContent>
-            </Card>
-          </CardContent>
-        )}
-      </Card>
-
-      <Card>
-        <CardHeader className="cursor-pointer" onClick={() => setOpenSections(v => ({ ...v, credit: !v.credit }))}>
-          <CardTitle className="flex items-center justify-between"><span className="flex items-center gap-2"><DollarSign className="w-5 h-5" /> Credit Management</span>{openSections.credit ? <ChevronUp /> : <ChevronDown />}</CardTitle>
-        </CardHeader>
-        {openSections.credit && (
-          <CardContent className="space-y-3">
-            {creditCustomers.map(customer => (
-              <div key={customer.id} className="border rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                <div>
-                  <p className="font-semibold">{customer.name}</p>
-                  <p className="text-sm text-muted-foreground">Last Visit: {new Date(customer.lastVisit).toLocaleDateString()}</p>
-                </div>
-                <div className="text-right">
-                  <p className="font-bold text-red-700">Due: ₹{customer.totalDue.toFixed(2)}</p>
-                  <Button size="sm" onClick={() => { setCollectingCustomer(customer); setPaymentAmount(customer.totalDue.toFixed(2)); }}>
-                    Collect Payment
-                  </Button>
-                </div>
-              </div>
-            ))}
-            {!creditCustomers.length && <p className="text-sm text-muted-foreground">No customers with due balance.</p>}
-
-            {collectingCustomer && (
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-2">
-                  <p className="font-semibold">Collect from {collectingCustomer.name}</p>
-                  <Label>Amount</Label>
-                  <Input type="number" min="0" value={paymentAmount} onChange={e => setPaymentAmount(e.target.value)} />
-                  <Label>Method</Label>
-                  <div className="flex gap-2">
-                    <Button variant={paymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setPaymentMethod('Cash')}>Cash</Button>
-                    <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} onClick={() => setPaymentMethod('Online')}>UPI</Button>
-                  </div>
-                  <div className="flex gap-2 pt-2">
-                    <Button onClick={collectPayment}>Confirm Collection</Button>
-                    <Button variant="outline" onClick={() => setCollectingCustomer(null)}>Cancel</Button>
-                  </div>
                 </CardContent>
               </Card>
-            )}
-          </CardContent>
+            </div>
+          </div>
         )}
-      </Card>
 
-      <Card>
-        <CardHeader className="cursor-pointer" onClick={() => setOpenSections(v => ({ ...v, profit: !v.profit }))}>
-          <CardTitle className="flex items-center justify-between"><span className="flex items-center gap-2"><BarChart3 className="w-5 h-5" /> Profit Summary</span>{openSections.profit ? <ChevronUp /> : <ChevronDown />}</CardTitle>
-        </CardHeader>
-        {openSections.profit && (
-          <CardContent className="space-y-4">
-            <div className="grid md:grid-cols-2 gap-4">
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-2">
-                  <Label>Daily Profit Date</Label>
-                  <Input type="date" value={profitDate} onChange={e => setProfitDate(e.target.value)} />
-                  <p>Sales: ₹{dailyProfit.sales.toFixed(2)}</p>
-                  <p>COGS: ₹{dailyProfit.cogs.toFixed(2)}</p>
-                  <p>Expenses: ₹{dailyProfit.expenses.toFixed(2)}</p>
-                  <p className={dailyProfit.profit >= 0 ? 'font-bold text-green-700' : 'font-bold text-red-700'}>Profit: ₹{dailyProfit.profit.toFixed(2)}</p>
+        {activeTab === 'credit' && (
+          <Card className="border-slate-200 shadow-sm">
+            <CardHeader><CardTitle>Credit Management</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              {creditCustomers.map(customer => (
+                <div key={customer.id} className="border rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">{customer.name}</p>
+                    <p className="text-sm text-muted-foreground">Last Visit: {new Date(customer.lastVisit).toLocaleDateString()}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-bold text-red-700">Due: {formatINR(customer.totalDue)}</p>
+                    <Button size="sm" onClick={() => { setCollectingCustomer(customer); setPaymentAmount(customer.totalDue.toFixed(2)); }}>Collect Payment</Button>
+                  </div>
+                </div>
+              ))}
+              {!creditCustomers.length && <p className="text-sm text-muted-foreground">No customers with due balance.</p>}
+
+              {collectingCustomer && (
+                <Card className="bg-muted/30">
+                  <CardContent className="pt-4 space-y-2">
+                    <p className="font-semibold">Collect from {collectingCustomer.name}</p>
+                    <Label>Amount</Label>
+                    <Input type="number" min="0" value={paymentAmount} onChange={e => setPaymentAmount(e.target.value)} />
+                    <Label>Method</Label>
+                    <div className="flex gap-2">
+                      <Button variant={paymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setPaymentMethod('Cash')}>Cash</Button>
+                      <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} onClick={() => setPaymentMethod('Online')}>UPI</Button>
+                    </div>
+                    <div className="flex gap-2 pt-2">
+                      <Button onClick={collectPayment}>Confirm Collection</Button>
+                      <Button variant="outline" onClick={() => setCollectingCustomer(null)}>Cancel</Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {activeTab === 'profit' && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+            <div className="lg:col-span-5 space-y-4">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
+                    <span>Daily Profit</span>
+                    <Input type="date" className="w-auto" value={profitDate} onChange={e => setProfitDate(e.target.value)} />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid gap-3">
+                  <StatCard label="Sales" value={formatINR(dailyProfit.sales)} />
+                  <StatCard label="COGS" value={formatINR(dailyProfit.cogs)} />
+                  <StatCard label="Expenses" value={formatINR(dailyProfit.expenses)} />
+                  <StatCard label="Profit" value={formatINR(dailyProfit.profit)} tone={dailyProfit.profit >= 0 ? 'good' : 'bad'} />
                 </CardContent>
               </Card>
 
-              <Card className="bg-muted/30">
-                <CardContent className="pt-4 space-y-2">
-                  <Label>Monthly Profit</Label>
-                  <Input type="month" value={profitMonth} onChange={e => setProfitMonth(e.target.value)} />
-                  <p>Sales: ₹{monthlyProfit.sales.toFixed(2)}</p>
-                  <p>Expenses: ₹{monthlyProfit.expenses.toFixed(2)}</p>
-                  <p className={monthlyProfit.profit >= 0 ? 'font-bold text-green-700' : 'font-bold text-red-700'}>Profit: ₹{monthlyProfit.profit.toFixed(2)}</p>
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
+                    <span>Monthly Profit</span>
+                    <Input type="month" className="w-auto" value={profitMonth} onChange={e => setProfitMonth(e.target.value)} />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid gap-3">
+                  <StatCard label="Sales" value={formatINR(monthlyProfit.sales)} />
+                  <StatCard label="Expenses" value={formatINR(monthlyProfit.expenses)} />
+                  <StatCard label="Profit" value={formatINR(monthlyProfit.profit)} tone={monthlyProfit.profit >= 0 ? 'good' : 'bad'} />
                 </CardContent>
               </Card>
             </div>
 
-            <Card className="bg-muted/20">
-              <CardContent className="pt-4 space-y-3">
-                <p className="font-semibold">Sales vs Expense Chart</p>
-                <div className="space-y-2">
+            <div className="lg:col-span-7">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader><CardTitle>Sales vs Expense Chart</CardTitle></CardHeader>
+                <CardContent className="space-y-3">
                   <div>
-                    <div className="flex justify-between text-sm"><span>Sales</span><span>₹{monthlyProfit.sales.toFixed(2)}</span></div>
+                    <div className="flex justify-between text-sm"><span>Sales</span><span>{formatINR(monthlyProfit.sales)}</span></div>
                     <div className="h-3 bg-muted rounded"><div className="h-3 bg-green-500 rounded" style={{ width: `${(monthlyProfit.sales / chartMax) * 100}%` }} /></div>
                   </div>
                   <div>
-                    <div className="flex justify-between text-sm"><span>Expenses</span><span>₹{monthlyProfit.expenses.toFixed(2)}</span></div>
+                    <div className="flex justify-between text-sm"><span>Expenses</span><span>{formatINR(monthlyProfit.expenses)}</span></div>
                     <div className="h-3 bg-muted rounded"><div className="h-3 bg-red-500 rounded" style={{ width: `${(monthlyProfit.expenses / chartMax) * 100}%` }} /></div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-          </CardContent>
+                </CardContent>
+              </Card>
+            </div>
+          </div>
         )}
-      </Card>
+      </div>
     </div>
   );
 }
