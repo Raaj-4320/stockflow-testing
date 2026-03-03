@@ -286,9 +286,22 @@ export default function Sales() {
       }));
   };
 
+
+  const hasOpenShift = () => {
+      const sessions = loadData().cashSessions || [];
+      return sessions.some(session => session.status === 'open');
+  };
+
+  const validateOpenShiftForPos = () => {
+      if (hasOpenShift()) return true;
+      setCheckoutError('Shift is closed. Start a shift in Finance before making a transaction.');
+      return false;
+  };
+
   const initiateCheckout = (e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (cart.length === 0) return;
+      if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       if (isReturnMode) setPaymentMethod('Cash');
       setIsCustomerModalOpen(true);
@@ -296,6 +309,7 @@ export default function Sales() {
 
   const completeCheckout = () => {
       setCheckoutError(null);
+      if (!validateOpenShiftForPos()) return;
       let finalCustomer = selectedCustomer;
 
       if (customerTab === 'new') {
@@ -360,15 +374,18 @@ export default function Sales() {
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
-              setCheckoutError('Received amount is less than total bill.');
-              return;
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
+                  setCheckoutError('Received amount is less than total bill.');
+                  return;
+              }
+              currentCashDetails = {
+                  cashReceived: receivedAmount,
+                  changeReturned: receivedAmount - total
+              };
           }
-          currentCashDetails = {
-              cashReceived: receivedAmount,
-              changeReturned: receivedAmount - total
-          };
       }
 
       const tx: Transaction = {
