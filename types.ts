@@ -63,6 +63,7 @@ export interface StoreProfile {
   defaultTaxLabel?: string;
   signatureImage?: string; // Base64 encoded signature
   invoiceFormat?: 'standard' | 'thermal';
+  adminPin?: string;
 }
 
 export interface AdminUser {
@@ -97,6 +98,7 @@ export interface CashSession {
   closingBalance?: number;
   systemCashTotal?: number;
   difference?: number;
+  closingDenominationCounts?: Record<string, number>;
   status: 'open' | 'closed';
 }
 
@@ -106,6 +108,13 @@ export interface Expense {
   amount: number;
   category: string;
   note?: string;
+  createdAt: string;
+}
+
+export interface ExpenseActivity {
+  id: string;
+  action: 'add_expense' | 'delete_expense' | 'add_category' | 'delete_category';
+  message: string;
   createdAt: string;
 }
 
@@ -119,6 +128,7 @@ export interface AppState {
   cashSessions?: CashSession[];
   expenses?: Expense[];
   expenseCategories?: string[];
+  expenseActivities?: ExpenseActivity[];
 }
 
 export const TAX_OPTIONS = [
