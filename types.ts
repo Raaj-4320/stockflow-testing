@@ -97,6 +97,7 @@ export interface CashSession {
   closingBalance?: number;
   systemCashTotal?: number;
   difference?: number;
+  closingDenominationCounts?: Record<string, number>;
   status: 'open' | 'closed';
 }
 
