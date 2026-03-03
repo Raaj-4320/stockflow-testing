@@ -63,6 +63,7 @@ export interface StoreProfile {
   defaultTaxLabel?: string;
   signatureImage?: string; // Base64 encoded signature
   invoiceFormat?: 'standard' | 'thermal';
+  adminPin?: string;
 }
 
 export interface AdminUser {
@@ -97,6 +98,7 @@ export interface CashSession {
   closingBalance?: number;
   systemCashTotal?: number;
   difference?: number;
+  closingDenominationCounts?: Record<string, number>;
   status: 'open' | 'closed';
 }
 
