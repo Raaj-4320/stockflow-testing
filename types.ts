@@ -11,12 +11,21 @@ export interface Product {
   category: string;
   totalSold?: number;
   hsn?: string;
+  variants?: string[];
+  colors?: string[];
+  stockByVariantColor?: Array<{
+    variant: string;
+    color: string;
+    stock: number;
+  }>;
 }
 
 export interface CartItem extends Product {
   quantity: number;
   discountPercent?: number;
   discountAmount?: number;
+  selectedVariant?: string;
+  selectedColor?: string;
 }
 
 export interface Customer {
@@ -63,6 +72,7 @@ export interface StoreProfile {
   defaultTaxLabel?: string;
   signatureImage?: string; // Base64 encoded signature
   invoiceFormat?: 'standard' | 'thermal';
+  adminPin?: string;
 }
 
 export interface AdminUser {
@@ -96,7 +106,9 @@ export interface CashSession {
   openingBalance: number;
   closingBalance?: number;
   systemCashTotal?: number;
+  sessionExpenseTotal?: number;
   difference?: number;
+  closingDenominationCounts?: Record<string, number>;
   status: 'open' | 'closed';
 }
 
@@ -106,6 +118,69 @@ export interface Expense {
   amount: number;
   category: string;
   note?: string;
+  createdAt: string;
+}
+
+
+export type FreightInquiryStatus = 'draft' | 'saved' | 'confirmed' | 'converted';
+
+export interface FreightBroker {
+  id: string;
+  name: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FreightInquiry {
+  id: string;
+  status: FreightInquiryStatus;
+  source: 'inventory' | 'new';
+  inventoryProductId?: string;
+  productPhoto?: string;
+  productName: string;
+  variant?: string;
+  color?: string;
+  category?: string;
+  baseProductDetails?: string;
+  orderType: 'in_house' | 'customer_trade';
+  brokerId?: string;
+  brokerName?: string;
+  brokerType: 'broker' | 'owner';
+  totalPieces: number;
+  piecesPerCartoon: number;
+  numberOfCartoons: number;
+  rmbPricePerPiece: number;
+  totalRmb: number;
+  inrPricePerPiece: number;
+  totalInr: number;
+  exchangeRate: number;
+  freightPerCbm: number;
+  cbmPerCartoon: number;
+  totalCbm: number;
+  cbmRate: number;
+  cbmCost: number;
+  cbmPerPiece: number;
+  productCostPerPiece: number;
+  sellingPrice: number;
+  profitPerPiece: number;
+  profitPercent: number;
+  futureOrderId?: string;
+  convertedAt?: string;
+  convertedBy?: string;
+  isDeleted?: boolean;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+export interface ExpenseActivity {
+  id: string;
+  action: 'add_expense' | 'delete_expense' | 'add_category' | 'delete_category';
+  message: string;
   createdAt: string;
 }
 
@@ -119,6 +194,11 @@ export interface AppState {
   cashSessions?: CashSession[];
   expenses?: Expense[];
   expenseCategories?: string[];
+  expenseActivities?: ExpenseActivity[];
+  freightInquiries?: FreightInquiry[];
+  freightBrokers?: FreightBroker[];
+  variantsMaster?: string[];
+  colorsMaster?: string[];
 }
 
 export const TAX_OPTIONS = [

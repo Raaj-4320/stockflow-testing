@@ -4,6 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
+import { getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
@@ -206,20 +207,27 @@ export default function Sales() {
             return;
         }
         if (navigator.vibrate) navigator.vibrate(100);
-        addToCart(product, explicitQty);
+        const rows = getProductStockRows(product).filter(r => r.stock > 0);
+        if (productHasCombinationStock(product)) {
+            const selected = rows[0];
+            if (!selected) { setCartError('Out of stock!'); return; }
+            addToCart(product, explicitQty, selected.variant, selected.color);
+        } else {
+            addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
+        }
     }
   };
 
-  const addToCart = (product: Product, qty: number) => {
+  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
     setCart(prev => {
-        const existing = prev.find(item => item.id === product.id);
+        const existing = prev.find(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR));
         if (existing) {
             const newQty = existing.quantity + qty;
             if (newQty <= 0) return prev.filter(item => item.id !== product.id);
-            return prev.map(item => item.id === product.id ? { ...item, quantity: newQty } : item);
+            return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0 }];
+        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
     });
   };
 
@@ -286,9 +294,24 @@ export default function Sales() {
       }));
   };
 
+
+  const hasOpenShift = () => {
+      const sessions = loadData().cashSessions || [];
+      return sessions.some(session => session.status === 'open');
+  };
+
+  const validateOpenShiftForPos = () => {
+      if (hasOpenShift()) return true;
+      const message = 'Shift is closed. Start a shift in Finance before making a transaction.';
+      setCheckoutError(message);
+      setCartError(message);
+      return false;
+  };
+
   const initiateCheckout = (e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (cart.length === 0) return;
+      if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       if (isReturnMode) setPaymentMethod('Cash');
       setIsCustomerModalOpen(true);
@@ -296,6 +319,7 @@ export default function Sales() {
 
   const completeCheckout = () => {
       setCheckoutError(null);
+      if (!validateOpenShiftForPos()) return;
       let finalCustomer = selectedCustomer;
 
       if (customerTab === 'new') {
@@ -360,15 +384,18 @@ export default function Sales() {
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
-              setCheckoutError('Received amount is less than total bill.');
-              return;
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
+                  setCheckoutError('Received amount is less than total bill.');
+                  return;
+              }
+              currentCashDetails = {
+                  cashReceived: receivedAmount,
+                  changeReturned: receivedAmount - total
+              };
           }
-          currentCashDetails = {
-              cashReceived: receivedAmount,
-              changeReturned: receivedAmount - total
-          };
       }
 
       const tx: Transaction = {
@@ -414,7 +441,7 @@ export default function Sales() {
   const taxVal = (taxable * (selectedTax.value / 100));
   const grandTotal = isReturnMode ? -(taxable + taxVal) : (taxable + taxVal);
 
-  const filteredProducts = products.filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.barcode.toLowerCase().includes(productSearch.toLowerCase()));
+  const filteredProducts = products.filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.barcode.toLowerCase().includes(productSearch.toLowerCase()) || (p.variants || []).some(v => v.toLowerCase().includes(productSearch.toLowerCase())) || (p.colors || []).some(c => c.toLowerCase().includes(productSearch.toLowerCase())));
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
 
   return (
@@ -468,13 +495,14 @@ export default function Sales() {
                   {cart.length === 0 ? (
                       <div className="h-full flex flex-col items-center justify-center text-muted-foreground/40 space-y-2"><ShoppingCart className="w-12 h-12" /><p className="text-sm font-medium">Cart is empty</p></div>
                   ) : cart.map(item => (
-                      <div key={item.id} className="flex flex-col gap-3 p-3 rounded-xl border bg-card shadow-sm hover:border-primary/20 transition-all">
+                      <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="flex flex-col gap-3 p-3 rounded-xl border bg-card shadow-sm hover:border-primary/20 transition-all">
                           <div className="flex gap-3">
                               <div className="h-12 w-12 shrink-0 bg-muted rounded-lg border overflow-hidden">
                                 {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
                               </div>
                               <div className="flex-1 min-w-0">
                                   <p className="font-bold text-sm truncate leading-tight mb-1">{item.name}</p>
+                                  <p className="text-[10px] text-muted-foreground mb-1">{item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
                                   <p className="text-[10px] text-muted-foreground mb-1">Buy: ₹{item.buyPrice}</p>
                                   <div className="flex items-center gap-1">
                                       <span className="text-xs text-muted-foreground">₹</span>

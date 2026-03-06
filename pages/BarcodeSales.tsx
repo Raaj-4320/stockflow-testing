@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
+import { getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
@@ -129,22 +130,29 @@ export default function BarcodeSales() {
                 setTimeout(() => setScanMessage(null), 1500);
             }
         } else {
-            addToCart(product, explicitQty);
+            const rows = getProductStockRows(product).filter(r => r.stock > 0);
+        if (productHasCombinationStock(product)) {
+            const selected = rows[0];
+            if (!selected) { setCartError('Out of stock!'); return; }
+            addToCart(product, explicitQty, selected.variant, selected.color);
+        } else {
+            addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
+        }
             if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'success', text: `${product.name} Added` }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 1500); }
         }
     } else if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'error', text: "Unknown Product" }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 2000); }
   };
 
-  const addToCart = (product: Product, qty: number) => {
+  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
     setCart(prev => {
-        const existing = prev.find(item => item.id === product.id);
+        const existing = prev.find(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR));
         if (existing) {
             const newQty = existing.quantity + qty;
             if (newQty <= 0) return prev.filter(item => item.id !== product.id);
-            return prev.map(item => item.id === product.id ? { ...item, quantity: newQty } : item);
+            return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0 }];
+        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
     });
   };
 
@@ -207,9 +215,24 @@ export default function BarcodeSales() {
       }));
   };
 
+
+  const hasOpenShift = () => {
+      const sessions = loadData().cashSessions || [];
+      return sessions.some(session => session.status === 'open');
+  };
+
+  const validateOpenShiftForPos = () => {
+      if (hasOpenShift()) return true;
+      const message = 'Shift is closed. Start a shift in Finance before making a transaction.';
+      setCheckoutError(message);
+      setCartError(message);
+      return false;
+  };
+
   const initiateCheckout = (e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (cart.length === 0) return;
+      if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       if (isReturnMode) setPaymentMethod('Cash');
       setIsCustomerModalOpen(true);
@@ -217,6 +240,7 @@ export default function BarcodeSales() {
 
   const completeCheckout = () => {
       setCheckoutError(null);
+      if (!validateOpenShiftForPos()) return;
       let finalCustomer = selectedCustomer;
       if (customerTab === 'new') {
           const nameTrimmed = newCustomerName.trim();
@@ -245,9 +269,12 @@ export default function BarcodeSales() {
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
-          currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
+              currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          }
       }
       const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
       const newState = processTransaction(tx);
