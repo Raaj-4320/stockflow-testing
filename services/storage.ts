@@ -1,4 +1,4 @@
-import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
+import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder, FreightBroker, FreightInquiry } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -16,7 +16,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  adminPin: '1234'
 };
 
 const initialData: AppState = {
@@ -28,7 +29,12 @@ const initialData: AppState = {
   upfrontOrders: [],
   cashSessions: [],
   expenses: [],
-  expenseCategories: ['General']
+  expenseCategories: ['General'],
+  expenseActivities: [],
+  freightInquiries: [],
+  freightBrokers: [],
+  variantsMaster: [],
+  colorsMaster: []
 };
 
 let memoryState: AppState = { ...initialData };
@@ -80,6 +86,11 @@ const syncFromCloud = async () => {
                     cashSessions: cloudData.cashSessions || [],
                     expenses: cloudData.expenses || [],
                     expenseCategories: cloudData.expenseCategories || ['General'],
+                    expenseActivities: cloudData.expenseActivities || [],
+                    freightInquiries: cloudData.freightInquiries || [],
+                    freightBrokers: cloudData.freightBrokers || [],
+                    variantsMaster: cloudData.variantsMaster || [],
+                    colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {
@@ -129,6 +140,81 @@ const sanitizeData = (obj: any): any => {
 
 const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
+};
+
+
+
+const normalizeLabel = (value?: string) => (value || '').trim();
+const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(variant) || 'No Variant'}__${normalizeLabel(color) || 'No Color'}`;
+
+const sanitizeVariantColorStock = (product: Product): Product => {
+  const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
+  const dedup = new Map<string, { variant: string; color: string; stock: number }>();
+
+  entries.forEach(entry => {
+    const variant = normalizeLabel(entry.variant) || 'No Variant';
+    const color = normalizeLabel(entry.color) || 'No Color';
+    const stock = Number.isFinite(entry.stock) && entry.stock > 0 ? entry.stock : 0;
+    const key = toStockKey(variant, color);
+    const existing = dedup.get(key);
+    if (existing) existing.stock += stock;
+    else dedup.set(key, { variant, color, stock });
+  });
+
+  const stockByVariantColor = Array.from(dedup.values()).filter(entry => entry.stock >= 0);
+  const hasComboStock = stockByVariantColor.length > 0 && stockByVariantColor.some(entry => entry.variant !== 'No Variant' || entry.color !== 'No Color');
+
+  if (!hasComboStock) {
+    return {
+      ...product,
+      variants: [],
+      colors: [],
+      stockByVariantColor: [],
+      stock: Number.isFinite(product.stock) ? Math.max(0, product.stock) : 0,
+    };
+  }
+
+  const variants = Array.from(new Set(stockByVariantColor.map(entry => entry.variant).filter(v => v !== 'No Variant')));
+  const colors = Array.from(new Set(stockByVariantColor.map(entry => entry.color).filter(c => c !== 'No Color')));
+  const totalStock = stockByVariantColor.reduce((sum, entry) => sum + entry.stock, 0);
+
+  return {
+    ...product,
+    variants,
+    colors,
+    stockByVariantColor,
+    stock: totalStock,
+  };
+};
+
+const getAvailableStockForItem = (product: Product, variant?: string, color?: string) => {
+  const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
+  if (!entries.length) return Math.max(0, product.stock || 0);
+
+  const targetVariant = normalizeLabel(variant) || 'No Variant';
+  const targetColor = normalizeLabel(color) || 'No Color';
+  const found = entries.find(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
+  return found ? Math.max(0, found.stock) : 0;
+};
+
+const applyStockDeltaToProduct = (product: Product, delta: number, variant?: string, color?: string): Product => {
+  const entries = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
+  if (!entries.length) {
+    return { ...product, stock: Math.max(0, (product.stock || 0) + delta) };
+  }
+
+  const targetVariant = normalizeLabel(variant) || 'No Variant';
+  const targetColor = normalizeLabel(color) || 'No Color';
+  const index = entries.findIndex(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
+
+  if (index >= 0) {
+    entries[index] = { ...entries[index], stock: Math.max(0, (entries[index].stock || 0) + delta) };
+  } else if (delta > 0) {
+    entries.push({ variant: targetVariant, color: targetColor, stock: delta });
+  }
+
+  const totalStock = entries.reduce((sum, entry) => sum + Math.max(0, entry.stock || 0), 0);
+  return { ...product, stockByVariantColor: entries, stock: totalStock };
 };
 
 const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
@@ -514,17 +600,29 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 });
+  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: 0 });
+  const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = [...data.products, preparedProduct];
-  await saveData({ ...data, products: newProducts }, { throwOnError: true });
+
+  const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...(preparedProduct.variants || [])]));
+  const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...(preparedProduct.colors || [])]));
+
+  await saveData({ ...data, products: newProducts, variantsMaster, colorsMaster }, { throwOnError: true });
   return newProducts;
 };
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const preparedProduct = await uploadProductImageIfNeeded(product);
+  const sanitized = sanitizeVariantColorStock(product);
+  const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
-  await saveData({ ...data, products: newProducts }, { throwOnError: true });
+
+  const allVariants = newProducts.flatMap(p => p.variants || []);
+  const allColors = newProducts.flatMap(p => p.colors || []);
+  const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...allVariants]));
+  const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...allColors]));
+
+  await saveData({ ...data, products: newProducts, variantsMaster, colorsMaster }, { throwOnError: true });
   return newProducts;
 };
 
@@ -535,6 +633,29 @@ export const deleteProduct = async (id: string): Promise<Product[]> => {
   return newProducts;
 };
 
+
+
+export const addVariantMaster = (value: string): string[] => {
+  const label = value.trim();
+  if (!label) return loadData().variantsMaster || [];
+  const data = loadData();
+  const exists = (data.variantsMaster || []).some(v => v.toLowerCase() === label.toLowerCase());
+  if (exists) return data.variantsMaster || [];
+  const variantsMaster = [...(data.variantsMaster || []), label];
+  void saveData({ ...data, variantsMaster });
+  return variantsMaster;
+};
+
+export const addColorMaster = (value: string): string[] => {
+  const label = value.trim();
+  if (!label) return loadData().colorsMaster || [];
+  const data = loadData();
+  const exists = (data.colorsMaster || []).some(v => v.toLowerCase() === label.toLowerCase());
+  if (exists) return data.colorsMaster || [];
+  const colorsMaster = [...(data.colorsMaster || []), label];
+  void saveData({ ...data, colorsMaster });
+  return colorsMaster;
+};
 export const addCategory = (category: string): string[] => {
   const data = loadData();
   if (data.categories.some(c => c.toLowerCase() === category.toLowerCase())) {
@@ -747,11 +868,12 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
       failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found.', { itemId: item.id });
     }
 
-    if (transaction.type === 'sale' && item.quantity > product.stock) {
+    const availableStock = getAvailableStockForItem(product, item.selectedVariant, item.selectedColor);
+    if (transaction.type === 'sale' && item.quantity > availableStock) {
       failValidation('OVERSALE_STOCK', 'Insufficient stock for product.', {
         itemId: item.id,
         requestedQuantity: item.quantity,
-        availableStock: product.stock
+        availableStock
       });
     }
 
@@ -863,6 +985,59 @@ export const deleteCustomer = (id: string): Customer[] => {
     return newCustomers;
 }
 
+
+
+export const getFreightInquiries = (): FreightInquiry[] => {
+  const data = loadData();
+  return (data.freightInquiries || []).filter(i => !i.isDeleted);
+};
+
+export const getFreightInquiryById = (id: string): FreightInquiry | undefined => {
+  return getFreightInquiries().find(i => i.id === id);
+};
+
+export const createFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
+  const data = loadData();
+  const next = [inquiry, ...(data.freightInquiries || [])];
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+  return inquiry;
+};
+
+export const updateFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
+  const data = loadData();
+  const next = (data.freightInquiries || []).map(item => item.id === inquiry.id ? inquiry : item);
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+  return inquiry;
+};
+
+export const softDeleteFreightInquiry = async (id: string): Promise<void> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const next = (data.freightInquiries || []).map(item => item.id === id ? { ...item, isDeleted: true, updatedAt: now } : item);
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+};
+
+export const getFreightBrokers = (): FreightBroker[] => {
+  const data = loadData();
+  return data.freightBrokers || [];
+};
+
+export const createFreightBroker = async (payload: Omit<FreightBroker, 'id' | 'createdAt' | 'updatedAt'>): Promise<FreightBroker> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const broker: FreightBroker = {
+    id: `broker-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    name: payload.name.trim(),
+    phone: payload.phone?.trim() || undefined,
+    email: payload.email?.trim() || undefined,
+    notes: payload.notes?.trim() || undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const next = [broker, ...(data.freightBrokers || [])];
+  await saveData({ ...data, freightBrokers: next }, { throwOnError: true });
+  return broker;
+};
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
 
@@ -885,11 +1060,12 @@ export const processTransaction = (transaction: Transaction): AppState => {
         const itemInCart = transaction.items.find(i => i.id === p.id);
         if (itemInCart) {
           const qty = itemInCart.quantity;
+          const delta = transaction.type === 'sale' ? -qty : qty;
+          const withStock = applyStockDeltaToProduct(p, delta, itemInCart.selectedVariant, itemInCart.selectedColor);
           if (transaction.type === 'sale') {
-            return { ...p, stock: p.stock - qty, totalSold: (p.totalSold || 0) + qty };
-          } else {
-            return { ...p, stock: p.stock + qty, totalSold: Math.max(0, (p.totalSold || 0) - qty) };
+            return { ...withStock, totalSold: (p.totalSold || 0) + qty };
           }
+          return { ...withStock, totalSold: Math.max(0, (p.totalSold || 0) - qty) };
         }
         return p;
       });
