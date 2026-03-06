@@ -1,4 +1,4 @@
-import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
+import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder, FreightBroker, FreightInquiry } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -16,7 +16,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  adminPin: '1234'
 };
 
 const initialData: AppState = {
@@ -28,7 +29,10 @@ const initialData: AppState = {
   upfrontOrders: [],
   cashSessions: [],
   expenses: [],
-  expenseCategories: ['General']
+  expenseCategories: ['General'],
+  expenseActivities: [],
+  freightInquiries: [],
+  freightBrokers: []
 };
 
 let memoryState: AppState = { ...initialData };
@@ -80,6 +84,9 @@ const syncFromCloud = async () => {
                     cashSessions: cloudData.cashSessions || [],
                     expenses: cloudData.expenses || [],
                     expenseCategories: cloudData.expenseCategories || ['General'],
+                    expenseActivities: cloudData.expenseActivities || [],
+                    freightInquiries: cloudData.freightInquiries || [],
+                    freightBrokers: cloudData.freightBrokers || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {
@@ -863,6 +870,59 @@ export const deleteCustomer = (id: string): Customer[] => {
     return newCustomers;
 }
 
+
+
+export const getFreightInquiries = (): FreightInquiry[] => {
+  const data = loadData();
+  return (data.freightInquiries || []).filter(i => !i.isDeleted);
+};
+
+export const getFreightInquiryById = (id: string): FreightInquiry | undefined => {
+  return getFreightInquiries().find(i => i.id === id);
+};
+
+export const createFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
+  const data = loadData();
+  const next = [inquiry, ...(data.freightInquiries || [])];
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+  return inquiry;
+};
+
+export const updateFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
+  const data = loadData();
+  const next = (data.freightInquiries || []).map(item => item.id === inquiry.id ? inquiry : item);
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+  return inquiry;
+};
+
+export const softDeleteFreightInquiry = async (id: string): Promise<void> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const next = (data.freightInquiries || []).map(item => item.id === id ? { ...item, isDeleted: true, updatedAt: now } : item);
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+};
+
+export const getFreightBrokers = (): FreightBroker[] => {
+  const data = loadData();
+  return data.freightBrokers || [];
+};
+
+export const createFreightBroker = async (payload: Omit<FreightBroker, 'id' | 'createdAt' | 'updatedAt'>): Promise<FreightBroker> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const broker: FreightBroker = {
+    id: `broker-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    name: payload.name.trim(),
+    phone: payload.phone?.trim() || undefined,
+    email: payload.email?.trim() || undefined,
+    notes: payload.notes?.trim() || undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const next = [broker, ...(data.freightBrokers || [])];
+  await saveData({ ...data, freightBrokers: next }, { throwOnError: true });
+  return broker;
+};
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
 

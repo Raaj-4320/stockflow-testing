@@ -207,9 +207,24 @@ export default function BarcodeSales() {
       }));
   };
 
+
+  const hasOpenShift = () => {
+      const sessions = loadData().cashSessions || [];
+      return sessions.some(session => session.status === 'open');
+  };
+
+  const validateOpenShiftForPos = () => {
+      if (hasOpenShift()) return true;
+      const message = 'Shift is closed. Start a shift in Finance before making a transaction.';
+      setCheckoutError(message);
+      setCartError(message);
+      return false;
+  };
+
   const initiateCheckout = (e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (cart.length === 0) return;
+      if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       if (isReturnMode) setPaymentMethod('Cash');
       setIsCustomerModalOpen(true);
@@ -217,6 +232,7 @@ export default function BarcodeSales() {
 
   const completeCheckout = () => {
       setCheckoutError(null);
+      if (!validateOpenShiftForPos()) return;
       let finalCustomer = selectedCustomer;
       if (customerTab === 'new') {
           const nameTrimmed = newCustomerName.trim();
@@ -245,9 +261,12 @@ export default function BarcodeSales() {
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
-          currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
+              currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          }
       }
       const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
       const newState = processTransaction(tx);
