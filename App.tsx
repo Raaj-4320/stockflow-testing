@@ -8,13 +8,14 @@ import Transactions from './pages/Transactions';
 import Customers from './pages/Customers';
 import Settings from './pages/Settings';
 import Finance from './pages/Finance';
+import FreightBooking from './pages/FreightBooking';
 import Auth from './pages/Auth';
 import VerificationRequired from './pages/VerificationRequired';
 import { getCurrentUser, logout } from './services/auth';
 import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, ScanQrCode, RotateCcw, Layers, Menu, X, Settings as SettingsIcon, LogOut, Landmark } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, ScanQrCode, RotateCcw, Layers, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
 
 // --- Components ---
@@ -147,6 +148,7 @@ export default function App() {
             <NavItem to="/pdf" icon={FileText} label="Reports" />
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
+            <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
 
             <div className="pt-6">
                 <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Quick Actions</p>
@@ -221,6 +223,12 @@ export default function App() {
                               </div>
                               <span className="font-medium text-sm">Finance</span>
                          </Link>
+                         <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                              <div className="p-3 bg-orange-100 text-orange-600 rounded-full mb-2">
+                                  <Truck className="w-6 h-6" />
+                              </div>
+                              <span className="font-medium text-sm">Freight Booking</span>
+                         </Link>
                          <Link to="/settings" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-gray-100 text-gray-600 rounded-full mb-2">
                                   <SettingsIcon className="w-6 h-6" />
@@ -248,6 +256,7 @@ export default function App() {
               <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
               <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
               <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
+              <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
               
               {/* Unprotected Route (POS) */}
               <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />
