@@ -1,4 +1,17 @@
-import { Product, Transaction, AppState, Customer, StoreProfile, UpfrontOrder } from '../types';
+import {
+  Product,
+  Transaction,
+  AppState,
+  Customer,
+  StoreProfile,
+  UpfrontOrder,
+  FreightBroker,
+  FreightInquiry,
+  FreightConfirmedOrder,
+  FreightPurchase,
+  PurchaseReceiptPosting,
+  ProcurementLineSnapshot,
+} from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -16,7 +29,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  adminPin: '1234'
 };
 
 const initialData: AppState = {
@@ -28,7 +42,15 @@ const initialData: AppState = {
   upfrontOrders: [],
   cashSessions: [],
   expenses: [],
-  expenseCategories: ['General']
+  expenseCategories: ['General'],
+  expenseActivities: [],
+  freightInquiries: [],
+  freightConfirmedOrders: [],
+  freightPurchases: [],
+  purchaseReceiptPostings: [],
+  freightBrokers: [],
+  variantsMaster: [],
+  colorsMaster: []
 };
 
 let memoryState: AppState = { ...initialData };
@@ -80,6 +102,14 @@ const syncFromCloud = async () => {
                     cashSessions: cloudData.cashSessions || [],
                     expenses: cloudData.expenses || [],
                     expenseCategories: cloudData.expenseCategories || ['General'],
+                    expenseActivities: cloudData.expenseActivities || [],
+                    freightInquiries: cloudData.freightInquiries || [],
+                    freightConfirmedOrders: cloudData.freightConfirmedOrders || [],
+                    freightPurchases: cloudData.freightPurchases || [],
+                    purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
+                    freightBrokers: cloudData.freightBrokers || [],
+                    variantsMaster: cloudData.variantsMaster || [],
+                    colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {
@@ -129,6 +159,81 @@ const sanitizeData = (obj: any): any => {
 
 const isDataUrlImage = (value: string | undefined): boolean => {
   return !!value && value.startsWith('data:image');
+};
+
+
+
+const normalizeLabel = (value?: string) => (value || '').trim();
+const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(variant) || 'No Variant'}__${normalizeLabel(color) || 'No Color'}`;
+
+const sanitizeVariantColorStock = (product: Product): Product => {
+  const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
+  const dedup = new Map<string, { variant: string; color: string; stock: number }>();
+
+  entries.forEach(entry => {
+    const variant = normalizeLabel(entry.variant) || 'No Variant';
+    const color = normalizeLabel(entry.color) || 'No Color';
+    const stock = Number.isFinite(entry.stock) && entry.stock > 0 ? entry.stock : 0;
+    const key = toStockKey(variant, color);
+    const existing = dedup.get(key);
+    if (existing) existing.stock += stock;
+    else dedup.set(key, { variant, color, stock });
+  });
+
+  const stockByVariantColor = Array.from(dedup.values()).filter(entry => entry.stock >= 0);
+  const hasComboStock = stockByVariantColor.length > 0 && stockByVariantColor.some(entry => entry.variant !== 'No Variant' || entry.color !== 'No Color');
+
+  if (!hasComboStock) {
+    return {
+      ...product,
+      variants: [],
+      colors: [],
+      stockByVariantColor: [],
+      stock: Number.isFinite(product.stock) ? Math.max(0, product.stock) : 0,
+    };
+  }
+
+  const variants = Array.from(new Set(stockByVariantColor.map(entry => entry.variant).filter(v => v !== 'No Variant')));
+  const colors = Array.from(new Set(stockByVariantColor.map(entry => entry.color).filter(c => c !== 'No Color')));
+  const totalStock = stockByVariantColor.reduce((sum, entry) => sum + entry.stock, 0);
+
+  return {
+    ...product,
+    variants,
+    colors,
+    stockByVariantColor,
+    stock: totalStock,
+  };
+};
+
+const getAvailableStockForItem = (product: Product, variant?: string, color?: string) => {
+  const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
+  if (!entries.length) return Math.max(0, product.stock || 0);
+
+  const targetVariant = normalizeLabel(variant) || 'No Variant';
+  const targetColor = normalizeLabel(color) || 'No Color';
+  const found = entries.find(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
+  return found ? Math.max(0, found.stock) : 0;
+};
+
+const applyStockDeltaToProduct = (product: Product, delta: number, variant?: string, color?: string): Product => {
+  const entries = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
+  if (!entries.length) {
+    return { ...product, stock: Math.max(0, (product.stock || 0) + delta) };
+  }
+
+  const targetVariant = normalizeLabel(variant) || 'No Variant';
+  const targetColor = normalizeLabel(color) || 'No Color';
+  const index = entries.findIndex(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
+
+  if (index >= 0) {
+    entries[index] = { ...entries[index], stock: Math.max(0, (entries[index].stock || 0) + delta) };
+  } else if (delta > 0) {
+    entries.push({ variant: targetVariant, color: targetColor, stock: delta });
+  }
+
+  const totalStock = entries.reduce((sum, entry) => sum + Math.max(0, entry.stock || 0), 0);
+  return { ...product, stockByVariantColor: entries, stock: totalStock };
 };
 
 const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
@@ -514,17 +619,29 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const preparedProduct = await uploadProductImageIfNeeded({ ...product, totalSold: 0 });
+  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: 0 });
+  const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = [...data.products, preparedProduct];
-  await saveData({ ...data, products: newProducts }, { throwOnError: true });
+
+  const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...(preparedProduct.variants || [])]));
+  const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...(preparedProduct.colors || [])]));
+
+  await saveData({ ...data, products: newProducts, variantsMaster, colorsMaster }, { throwOnError: true });
   return newProducts;
 };
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const preparedProduct = await uploadProductImageIfNeeded(product);
+  const sanitized = sanitizeVariantColorStock(product);
+  const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
-  await saveData({ ...data, products: newProducts }, { throwOnError: true });
+
+  const allVariants = newProducts.flatMap(p => p.variants || []);
+  const allColors = newProducts.flatMap(p => p.colors || []);
+  const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...allVariants]));
+  const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...allColors]));
+
+  await saveData({ ...data, products: newProducts, variantsMaster, colorsMaster }, { throwOnError: true });
   return newProducts;
 };
 
@@ -535,6 +652,29 @@ export const deleteProduct = async (id: string): Promise<Product[]> => {
   return newProducts;
 };
 
+
+
+export const addVariantMaster = (value: string): string[] => {
+  const label = value.trim();
+  if (!label) return loadData().variantsMaster || [];
+  const data = loadData();
+  const exists = (data.variantsMaster || []).some(v => v.toLowerCase() === label.toLowerCase());
+  if (exists) return data.variantsMaster || [];
+  const variantsMaster = [...(data.variantsMaster || []), label];
+  void saveData({ ...data, variantsMaster });
+  return variantsMaster;
+};
+
+export const addColorMaster = (value: string): string[] => {
+  const label = value.trim();
+  if (!label) return loadData().colorsMaster || [];
+  const data = loadData();
+  const exists = (data.colorsMaster || []).some(v => v.toLowerCase() === label.toLowerCase());
+  if (exists) return data.colorsMaster || [];
+  const colorsMaster = [...(data.colorsMaster || []), label];
+  void saveData({ ...data, colorsMaster });
+  return colorsMaster;
+};
 export const addCategory = (category: string): string[] => {
   const data = loadData();
   if (data.categories.some(c => c.toLowerCase() === category.toLowerCase())) {
@@ -747,11 +887,12 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
       failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found.', { itemId: item.id });
     }
 
-    if (transaction.type === 'sale' && item.quantity > product.stock) {
+    const availableStock = getAvailableStockForItem(product, item.selectedVariant, item.selectedColor);
+    if (transaction.type === 'sale' && item.quantity > availableStock) {
       failValidation('OVERSALE_STOCK', 'Insufficient stock for product.', {
         itemId: item.id,
         requestedQuantity: item.quantity,
-        availableStock: product.stock
+        availableStock
       });
     }
 
@@ -863,6 +1004,321 @@ export const deleteCustomer = (id: string): Customer[] => {
     return newCustomers;
 }
 
+
+
+export const getFreightInquiries = (): FreightInquiry[] => {
+  const data = loadData();
+  return (data.freightInquiries || []).filter(i => !i.isDeleted);
+};
+
+export const getFreightInquiryById = (id: string): FreightInquiry | undefined => {
+  return getFreightInquiries().find(i => i.id === id);
+};
+
+const buildFallbackInquiryLine = (inquiry: FreightInquiry): ProcurementLineSnapshot => {
+  const quantity = Number.isFinite(inquiry.totalPieces) ? Math.max(0, inquiry.totalPieces) : 0;
+  return {
+    id: `line-${inquiry.id}`,
+    sourceType: inquiry.source,
+    sourceProductId: inquiry.sourceProductId || inquiry.inventoryProductId,
+    productPhoto: inquiry.productPhoto,
+    productName: inquiry.productName,
+    variant: inquiry.variant,
+    color: inquiry.color,
+    category: inquiry.category,
+    baseProductDetails: inquiry.baseProductDetails,
+    quantity,
+    piecesPerCartoon: inquiry.piecesPerCartoon,
+    numberOfCartoons: inquiry.numberOfCartoons,
+    rmbPricePerPiece: inquiry.rmbPricePerPiece,
+    inrPricePerPiece: inquiry.inrPricePerPiece,
+    exchangeRate: inquiry.exchangeRate,
+    cbmPerCartoon: inquiry.cbmPerCartoon,
+    cbmRate: inquiry.cbmRate,
+    cbmCost: inquiry.cbmCost,
+    cbmPerPiece: inquiry.cbmPerPiece,
+    productCostPerPiece: inquiry.productCostPerPiece,
+    sellingPrice: inquiry.sellingPrice,
+    profitPerPiece: inquiry.profitPerPiece,
+    profitPercent: inquiry.profitPercent,
+  };
+};
+
+const normalizeProcurementLine = (line: ProcurementLineSnapshot, fallbackSourceType: 'inventory' | 'new'): ProcurementLineSnapshot => ({
+  ...line,
+  id: line.id || `line-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+  sourceType: line.sourceType || fallbackSourceType,
+  productName: (line.productName || '').trim(),
+  quantity: Number.isFinite(line.quantity) ? Math.max(0, line.quantity) : 0,
+  variant: line.variant?.trim() || undefined,
+  color: line.color?.trim() || undefined,
+  category: line.category?.trim() || undefined,
+  notes: line.notes?.trim() || undefined,
+});
+
+const getInquirySnapshotLines = (inquiry: FreightInquiry): ProcurementLineSnapshot[] => {
+  const rawLines = Array.isArray(inquiry.lines) && inquiry.lines.length ? inquiry.lines : [buildFallbackInquiryLine(inquiry)];
+  return rawLines.map(line => normalizeProcurementLine(line, inquiry.source));
+};
+
+const hasLinkedConfirmedOrder = (inquiryId: string) => {
+  const data = loadData();
+  return (data.freightConfirmedOrders || []).some(order => order.sourceInquiryId === inquiryId && !order.isDeleted);
+};
+
+const hasLinkedPurchase = (confirmedOrderId: string) => {
+  const data = loadData();
+  return (data.freightPurchases || []).some(purchase => purchase.sourceConfirmedOrderId === confirmedOrderId && !purchase.isDeleted);
+};
+
+export const createFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
+  const data = loadData();
+  const next = [inquiry, ...(data.freightInquiries || [])];
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+  return inquiry;
+};
+
+export const updateFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
+  const data = loadData();
+  const next = (data.freightInquiries || []).map(item => item.id === inquiry.id ? inquiry : item);
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+  return inquiry;
+};
+
+export const getFreightConfirmedOrders = (): FreightConfirmedOrder[] => {
+  const data = loadData();
+  return (data.freightConfirmedOrders || []).filter(order => !order.isDeleted);
+};
+
+export const getFreightConfirmedOrderById = (id: string): FreightConfirmedOrder | undefined => {
+  return getFreightConfirmedOrders().find(order => order.id === id);
+};
+
+export const createFreightConfirmedOrder = async (order: FreightConfirmedOrder): Promise<FreightConfirmedOrder> => {
+  const data = loadData();
+  const next = [order, ...(data.freightConfirmedOrders || [])];
+  await saveData({ ...data, freightConfirmedOrders: next }, { throwOnError: true });
+  return order;
+};
+
+export const updateFreightConfirmedOrder = async (order: FreightConfirmedOrder): Promise<FreightConfirmedOrder> => {
+  const data = loadData();
+  const next = (data.freightConfirmedOrders || []).map(item => item.id === order.id ? order : item);
+  await saveData({ ...data, freightConfirmedOrders: next }, { throwOnError: true });
+  return order;
+};
+
+export const convertInquiryToConfirmedOrder = async (
+  inquiryId: string,
+  payload?: Partial<FreightConfirmedOrder> & { allowDuplicate?: boolean }
+): Promise<FreightConfirmedOrder> => {
+  const data = loadData();
+  const inquiry = (data.freightInquiries || []).find(item => item.id === inquiryId && !item.isDeleted);
+  if (!inquiry) {
+    failValidation('FREIGHT_INQUIRY_NOT_FOUND', 'Freight inquiry not found.', { inquiryId });
+  }
+
+  if (!payload?.allowDuplicate && hasLinkedConfirmedOrder(inquiryId)) {
+    failValidation('FREIGHT_INQUIRY_ALREADY_CONVERTED', 'Freight inquiry already has a linked confirmed order.', { inquiryId });
+  }
+
+  const now = new Date().toISOString();
+  const lines = getInquirySnapshotLines(inquiry);
+
+  const baseOrder: FreightConfirmedOrder = {
+    id: `fco-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    status: 'confirmed',
+    sourceInquiryId: inquiry.id,
+    sourceProductId: inquiry.sourceProductId || inquiry.inventoryProductId,
+    source: inquiry.source,
+    inventoryProductId: inquiry.inventoryProductId,
+    productPhoto: inquiry.productPhoto,
+    productName: inquiry.productName,
+    variant: inquiry.variant,
+    color: inquiry.color,
+    category: inquiry.category,
+    orderType: inquiry.orderType,
+    brokerId: inquiry.brokerId,
+    brokerName: inquiry.brokerName,
+    brokerType: inquiry.brokerType,
+    totalPieces: inquiry.totalPieces,
+    piecesPerCartoon: inquiry.piecesPerCartoon,
+    numberOfCartoons: inquiry.numberOfCartoons,
+    rmbPricePerPiece: inquiry.rmbPricePerPiece,
+    totalRmb: inquiry.totalRmb,
+    inrPricePerPiece: inquiry.inrPricePerPiece,
+    totalInr: inquiry.totalInr,
+    exchangeRate: inquiry.exchangeRate,
+    freightPerCbm: inquiry.freightPerCbm,
+    cbmPerCartoon: inquiry.cbmPerCartoon,
+    totalCbm: inquiry.totalCbm,
+    cbmRate: inquiry.cbmRate,
+    cbmCost: inquiry.cbmCost,
+    cbmPerPiece: inquiry.cbmPerPiece,
+    productCostPerPiece: inquiry.productCostPerPiece,
+    sellingPrice: inquiry.sellingPrice,
+    profitPerPiece: inquiry.profitPerPiece,
+    profitPercent: inquiry.profitPercent,
+    purchaseId: undefined,
+    isDeleted: false,
+    createdAt: now,
+    createdBy: inquiry.updatedBy || inquiry.createdBy,
+    updatedAt: now,
+    updatedBy: inquiry.updatedBy || inquiry.createdBy,
+    lines,
+  };
+
+  const order: FreightConfirmedOrder = {
+    ...baseOrder,
+    ...payload,
+    sourceInquiryId: inquiry.id,
+    source: inquiry.source,
+    sourceProductId: payload?.sourceProductId || baseOrder.sourceProductId,
+    lines: (payload?.lines || lines).map(line => normalizeProcurementLine(line, inquiry.source)),
+  };
+
+  const nextOrders = [order, ...(data.freightConfirmedOrders || [])];
+  await saveData({ ...data, freightConfirmedOrders: nextOrders }, { throwOnError: true });
+  return order;
+};
+
+export const getFreightPurchases = (): FreightPurchase[] => {
+  const data = loadData();
+  return (data.freightPurchases || []).filter(purchase => !purchase.isDeleted);
+};
+
+export const getFreightPurchaseById = (id: string): FreightPurchase | undefined => {
+  return getFreightPurchases().find(purchase => purchase.id === id);
+};
+
+export const createFreightPurchase = async (purchase: FreightPurchase): Promise<FreightPurchase> => {
+  const data = loadData();
+  const next = [purchase, ...(data.freightPurchases || [])];
+  await saveData({ ...data, freightPurchases: next }, { throwOnError: true });
+  return purchase;
+};
+
+export const updateFreightPurchase = async (purchase: FreightPurchase): Promise<FreightPurchase> => {
+  const data = loadData();
+  const next = (data.freightPurchases || []).map(item => item.id === purchase.id ? purchase : item);
+  await saveData({ ...data, freightPurchases: next }, { throwOnError: true });
+  return purchase;
+};
+
+export const convertConfirmedOrderToPurchase = async (
+  orderId: string,
+  payload?: Partial<FreightPurchase> & { allowDuplicate?: boolean }
+): Promise<FreightPurchase> => {
+  const data = loadData();
+  const order = (data.freightConfirmedOrders || []).find(item => item.id === orderId && !item.isDeleted);
+  if (!order) {
+    failValidation('FREIGHT_CONFIRMED_ORDER_NOT_FOUND', 'Freight confirmed order not found.', { orderId });
+  }
+
+  if (!payload?.allowDuplicate && hasLinkedPurchase(orderId)) {
+    failValidation('FREIGHT_ORDER_ALREADY_CONVERTED_TO_PURCHASE', 'Confirmed order already has a linked purchase.', { orderId });
+  }
+
+  const now = new Date().toISOString();
+  const lines = (order.lines || []).map(line => normalizeProcurementLine(line, order.source));
+  const basePurchase: FreightPurchase = {
+    id: `fp-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    status: 'approved',
+    sourceConfirmedOrderId: order.id,
+    sourceInquiryId: order.sourceInquiryId,
+    sourceProductId: order.sourceProductId || order.inventoryProductId,
+    source: order.source,
+    inventoryProductId: order.inventoryProductId,
+    productPhoto: order.productPhoto,
+    productName: order.productName,
+    variant: order.variant,
+    color: order.color,
+    category: order.category,
+    orderType: order.orderType,
+    brokerId: order.brokerId,
+    brokerName: order.brokerName,
+    brokerType: order.brokerType,
+    totalPieces: order.totalPieces,
+    piecesPerCartoon: order.piecesPerCartoon,
+    numberOfCartoons: order.numberOfCartoons,
+    rmbPricePerPiece: order.rmbPricePerPiece,
+    totalRmb: order.totalRmb,
+    inrPricePerPiece: order.inrPricePerPiece,
+    totalInr: order.totalInr,
+    exchangeRate: order.exchangeRate,
+    freightPerCbm: order.freightPerCbm,
+    cbmPerCartoon: order.cbmPerCartoon,
+    totalCbm: order.totalCbm,
+    cbmRate: order.cbmRate,
+    cbmCost: order.cbmCost,
+    cbmPerPiece: order.cbmPerPiece,
+    productCostPerPiece: order.productCostPerPiece,
+    sellingPrice: order.sellingPrice,
+    profitPerPiece: order.profitPerPiece,
+    profitPercent: order.profitPercent,
+    isDeleted: false,
+    createdAt: now,
+    createdBy: order.updatedBy || order.createdBy,
+    updatedAt: now,
+    updatedBy: order.updatedBy || order.createdBy,
+    lines,
+  };
+
+  const purchase: FreightPurchase = {
+    ...basePurchase,
+    ...payload,
+    sourceConfirmedOrderId: order.id,
+    sourceInquiryId: order.sourceInquiryId,
+    source: order.source,
+    sourceProductId: payload?.sourceProductId || basePurchase.sourceProductId,
+    lines: (payload?.lines || lines).map(line => normalizeProcurementLine(line, order.source)),
+  };
+
+  const nextPurchases = [purchase, ...(data.freightPurchases || [])];
+  await saveData({ ...data, freightPurchases: nextPurchases }, { throwOnError: true });
+  return purchase;
+};
+
+export const getPurchaseReceiptPostings = (): PurchaseReceiptPosting[] => {
+  const data = loadData();
+  return data.purchaseReceiptPostings || [];
+};
+
+export const createPurchaseReceiptPosting = async (posting: PurchaseReceiptPosting): Promise<PurchaseReceiptPosting> => {
+  const data = loadData();
+  const next = [posting, ...(data.purchaseReceiptPostings || [])];
+  await saveData({ ...data, purchaseReceiptPostings: next }, { throwOnError: true });
+  return posting;
+};
+
+export const softDeleteFreightInquiry = async (id: string): Promise<void> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const next = (data.freightInquiries || []).map(item => item.id === id ? { ...item, isDeleted: true, updatedAt: now } : item);
+  await saveData({ ...data, freightInquiries: next }, { throwOnError: true });
+};
+
+export const getFreightBrokers = (): FreightBroker[] => {
+  const data = loadData();
+  return data.freightBrokers || [];
+};
+
+export const createFreightBroker = async (payload: Omit<FreightBroker, 'id' | 'createdAt' | 'updatedAt'>): Promise<FreightBroker> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const broker: FreightBroker = {
+    id: `broker-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    name: payload.name.trim(),
+    phone: payload.phone?.trim() || undefined,
+    email: payload.email?.trim() || undefined,
+    notes: payload.notes?.trim() || undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const next = [broker, ...(data.freightBrokers || [])];
+  await saveData({ ...data, freightBrokers: next }, { throwOnError: true });
+  return broker;
+};
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
 
@@ -885,11 +1341,12 @@ export const processTransaction = (transaction: Transaction): AppState => {
         const itemInCart = transaction.items.find(i => i.id === p.id);
         if (itemInCart) {
           const qty = itemInCart.quantity;
+          const delta = transaction.type === 'sale' ? -qty : qty;
+          const withStock = applyStockDeltaToProduct(p, delta, itemInCart.selectedVariant, itemInCart.selectedColor);
           if (transaction.type === 'sale') {
-            return { ...p, stock: p.stock - qty, totalSold: (p.totalSold || 0) + qty };
-          } else {
-            return { ...p, stock: p.stock + qty, totalSold: Math.max(0, (p.totalSold || 0) - qty) };
+            return { ...withStock, totalSold: (p.totalSold || 0) + qty };
           }
+          return { ...withStock, totalSold: Math.max(0, (p.totalSold || 0) - qty) };
         }
         return p;
       });

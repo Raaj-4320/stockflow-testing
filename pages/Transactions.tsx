@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
+import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { loadData } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
@@ -668,7 +669,7 @@ export default function Transactions() {
                                               <p className="font-medium text-sm">₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}</p>
                                           </div>
                                           <div className="flex justify-between items-center mt-1">
-                                              <p className="text-xs text-muted-foreground">SKU: {item.barcode}</p>
+                                              <p className="text-xs text-muted-foreground">SKU: {item.barcode} • {item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
                                               <div className="flex flex-col items-end">
                                                   <Badge variant="secondary" className="text-[10px] h-4 px-1.5 font-normal">
                                                       {item.quantity} x ₹{item.sellPrice}
