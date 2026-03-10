@@ -116,6 +116,10 @@ const assertCloudWriteReady = async (reason: string) => {
   if (!db || !auth) throw new Error('Firestore not configured.');
   const user = auth.currentUser;
   if (!user) throw new Error('User not authenticated.');
+  if (!user.emailVerified) {
+    await writeAuditEvent('BLOCKED_WRITE', { reason: `${reason}_email_unverified_blocked` });
+    throw new Error('Email verification required before cloud writes.');
+  }
   if (!navigator.onLine) {
     emitCloudSyncStatus('offline', 'Internet connection required for writes.');
     await writeAuditEvent('BLOCKED_WRITE', { reason: `${reason}_offline_blocked` });
@@ -510,6 +514,9 @@ const syncFromCloud = async () => {
     if (!db || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    if (!user.emailVerified) {
+      throw new Error('Email verification required before cloud access.');
+    }
     if (!navigator.onLine) {
       emitCloudSyncStatus('offline', 'Internet connection required to load live business data.');
       return;
@@ -1080,6 +1087,9 @@ const syncToCloud = async (data: AppState) => {
     if (!db || !isCloudSynced || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    if (!user.emailVerified) {
+      throw new Error('Email verification required before cloud writes.');
+    }
     if (!navigator.onLine) {
       emitCloudSyncStatus('offline', 'Internet connection required for writes.');
       throw new Error('Offline mode: business data writes are blocked.');
