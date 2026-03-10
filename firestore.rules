@@ -1,0 +1,52 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerified() && request.auth.uid == uid;
+    }
+
+    function isOwnUserDoc(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // User profile: only owner can read/update their own document.
+    // Create allowed for signed-in user so registration bootstrap can create profile before verification.
+    match /users/{uid} {
+      allow read: if isOwnUserDoc(uid);
+      allow create: if isOwnUserDoc(uid)
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email is string
+        && request.resource.data.createdAt is string
+        && (!('role' in request.resource.data) || request.resource.data.role == 'owner');
+      allow update: if isOwnUserDoc(uid)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt
+        && (!('role' in request.resource.data) || !('role' in resource.data) || request.resource.data.role == resource.data.role);
+      allow delete: if false;
+    }
+
+    // Store root document per-user.
+    match /stores/{uid} {
+      allow read, write: if isOwner(uid);
+
+      // Any data subcollection remains owner-only (verified email required).
+      match /{subcollection}/{docId} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
