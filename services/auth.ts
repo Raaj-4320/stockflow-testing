@@ -47,8 +47,7 @@ export const login = async (email: string, password: string): Promise<{ success:
           uid: user.uid,
           email: user.email,
           name: user.displayName || email.split('@')[0],
-          createdAt: new Date().toISOString(),
-          role: 'admin'
+          createdAt: new Date().toISOString()
         });
       }
     }
@@ -72,8 +71,7 @@ export const register = async (email: string, password: string, name: string): P
         uid: user.uid,
         name,
         email,
-        createdAt: new Date().toISOString(),
-        role: 'admin'
+        createdAt: new Date().toISOString()
       });
     }
 

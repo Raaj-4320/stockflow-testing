@@ -11,6 +11,9 @@ import {
   FreightPurchase,
   PurchaseReceiptPosting,
   ProcurementLineSnapshot,
+  PurchaseOrder,
+  PurchaseOrderLine,
+  PurchaseParty,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
@@ -73,6 +76,8 @@ const getEntityCounts = (state: AppState) => ({
   freightConfirmedOrders: state.freightConfirmedOrders.length,
   freightPurchases: state.freightPurchases.length,
   purchaseReceiptPostings: state.purchaseReceiptPostings.length,
+  purchaseParties: (state.purchaseParties || []).length,
+  purchaseOrders: (state.purchaseOrders || []).length,
 });
 
 const isSuspiciousDrop = (previous: AppState, next: AppState) => {
@@ -116,6 +121,10 @@ const assertCloudWriteReady = async (reason: string) => {
   if (!db || !auth) throw new Error('Firestore not configured.');
   const user = auth.currentUser;
   if (!user) throw new Error('User not authenticated.');
+  if (!user.emailVerified) {
+    await writeAuditEvent('BLOCKED_WRITE', { reason: `${reason}_email_unverified_blocked` });
+    throw new Error('Email verification required before cloud writes.');
+  }
   if (!navigator.onLine) {
     emitCloudSyncStatus('offline', 'Internet connection required for writes.');
     await writeAuditEvent('BLOCKED_WRITE', { reason: `${reason}_offline_blocked` });
@@ -446,6 +455,8 @@ const initialData: AppState = {
   freightPurchases: [],
   purchaseReceiptPostings: [],
   freightBrokers: [],
+  purchaseParties: [],
+  purchaseOrders: [],
   variantsMaster: [],
   colorsMaster: []
 };
@@ -510,6 +521,9 @@ const syncFromCloud = async () => {
     if (!db || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    if (!user.emailVerified) {
+      throw new Error('Email verification required before cloud access.');
+    }
     if (!navigator.onLine) {
       emitCloudSyncStatus('offline', 'Internet connection required to load live business data.');
       return;
@@ -628,6 +642,8 @@ const syncFromCloud = async () => {
                     freightPurchases: cloudData.freightPurchases || [],
                     purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
                     freightBrokers: cloudData.freightBrokers || [],
+                    purchaseParties: cloudData.purchaseParties || [],
+                    purchaseOrders: cloudData.purchaseOrders || [],
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
@@ -1080,6 +1096,9 @@ const syncToCloud = async (data: AppState) => {
     if (!db || !isCloudSynced || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    if (!user.emailVerified) {
+      throw new Error('Email verification required before cloud writes.');
+    }
     if (!navigator.onLine) {
       emitCloudSyncStatus('offline', 'Internet connection required for writes.');
       throw new Error('Offline mode: business data writes are blocked.');
@@ -2090,6 +2109,128 @@ export const createFreightBroker = async (payload: Omit<FreightBroker, 'id' | 'c
   await saveData({ ...data, freightBrokers: next }, { throwOnError: true, reason: 'createFreightBroker', auditOperation: 'CREATE' });
   return broker;
 };
+
+export const getPurchaseParties = (): PurchaseParty[] => {
+  const data = loadData();
+  return data.purchaseParties || [];
+};
+
+export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'createdAt' | 'updatedAt'>): Promise<PurchaseParty> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const party: PurchaseParty = {
+    id: `party-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    name: payload.name.trim(),
+    phone: payload.phone?.trim() || undefined,
+    gst: payload.gst?.trim() || undefined,
+    location: payload.location?.trim() || undefined,
+    contactPerson: payload.contactPerson?.trim() || undefined,
+    notes: payload.notes?.trim() || undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const next = [party, ...(data.purchaseParties || [])];
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'createPurchaseParty', auditOperation: 'CREATE' });
+  return party;
+};
+
+export const updatePurchaseParty = async (party: PurchaseParty): Promise<PurchaseParty> => {
+  const data = loadData();
+  const next = (data.purchaseParties || []).map(item => item.id === party.id ? { ...party, updatedAt: new Date().toISOString() } : item);
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty', auditOperation: 'UPDATE' });
+  return party;
+};
+
+export const getPurchaseOrders = (): PurchaseOrder[] => {
+  const data = loadData();
+  return data.purchaseOrders || [];
+};
+
+export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const next = [order, ...(data.purchaseOrders || [])];
+  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder', auditOperation: 'CREATE' });
+  return order;
+};
+
+export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? order : item);
+  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder', auditOperation: 'UPDATE' });
+  return order;
+};
+
+const applyPurchaseLineToProduct = async (line: PurchaseOrderLine): Promise<void> => {
+  const data = loadData();
+  if (line.sourceType === 'inventory' && line.productId) {
+    const product = data.products.find(p => p.id === line.productId);
+    if (!product) return;
+    const nextProduct: Product = {
+      ...product,
+      buyPrice: line.unitCost > 0 ? line.unitCost : product.buyPrice,
+    };
+
+    if (line.variant || line.color) {
+      const entries = Array.isArray(nextProduct.stockByVariantColor) ? [...nextProduct.stockByVariantColor] : [];
+      const variant = (line.variant || 'No Variant').trim() || 'No Variant';
+      const color = (line.color || 'No Color').trim() || 'No Color';
+      const idx = entries.findIndex(e => (e.variant || 'No Variant') === variant && (e.color || 'No Color') === color);
+      if (idx >= 0) entries[idx] = { ...entries[idx], stock: Math.max(0, (entries[idx].stock || 0) + line.quantity) };
+      else entries.push({ variant, color, stock: line.quantity });
+      nextProduct.stockByVariantColor = entries;
+      nextProduct.stock = entries.reduce((s, e) => s + Math.max(0, e.stock || 0), 0);
+      nextProduct.variants = Array.from(new Set(entries.map(e => e.variant).filter(v => v && v !== 'No Variant')));
+      nextProduct.colors = Array.from(new Set(entries.map(e => e.color).filter(c => c && c !== 'No Color')));
+    } else {
+      nextProduct.stock = Math.max(0, (nextProduct.stock || 0) + line.quantity);
+    }
+
+    await updateProduct(nextProduct);
+    return;
+  }
+
+  const newProduct: Product = {
+    id: `purchase-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    barcode: `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
+    name: line.productName.trim(),
+    description: '',
+    buyPrice: line.unitCost,
+    sellPrice: Math.max(line.unitCost, line.unitCost * 1.2),
+    stock: line.quantity,
+    image: line.image || '',
+    category: line.category || 'Uncategorized',
+    variants: line.variant ? [line.variant] : [],
+    colors: line.color ? [line.color] : [],
+    stockByVariantColor: line.variant || line.color
+      ? [{ variant: line.variant || 'No Variant', color: line.color || 'No Color', stock: line.quantity }]
+      : [],
+    totalSold: 0,
+  };
+  await addProduct(newProduct);
+};
+
+export const receivePurchaseOrder = async (orderId: string): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const order = (data.purchaseOrders || []).find(o => o.id === orderId);
+  if (!order) {
+    failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
+  }
+
+  for (const line of order.lines) {
+    await applyPurchaseLineToProduct(line);
+  }
+
+  const updatedOrder: PurchaseOrder = {
+    ...order,
+    status: 'received',
+    receivedQuantity: order.totalQuantity,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await updatePurchaseOrder(updatedOrder);
+  return updatedOrder;
+};
+
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
 
