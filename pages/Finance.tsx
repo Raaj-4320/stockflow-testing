@@ -229,7 +229,6 @@ export default function Finance() {
 
   const isAdmin = true;
   const todayKey = todayISO();
-  const todaySessionExists = cashSessions.some(session => isSameDay(session.startTime, todayKey));
   const isOpenSessionToday = !!openSession && isSameDay(openSession.startTime, todayKey);
   const cashierName = getCurrentUser() || 'Cashier';
   const shiftDurationLabel = useMemo(() => {
@@ -246,7 +245,7 @@ export default function Finance() {
   }, [cashHistory]);
 
   useEffect(() => {
-    if (openSession || todaySessionExists || openingBalance.trim() || editingOpeningBalance) return;
+    if (openSession || openingBalance.trim() || editingOpeningBalance) return;
 
     if (latestClosedSession?.closingBalance !== undefined) {
       setOpeningBalance(latestClosedSession.closingBalance.toFixed(2));
@@ -255,7 +254,7 @@ export default function Finance() {
     }
 
     setOpeningBalanceAutoFilled(false);
-  }, [openSession, openingBalance, latestClosedSession, todaySessionExists, editingOpeningBalance]);
+  }, [openSession, openingBalance, latestClosedSession, editingOpeningBalance]);
 
   const buildCashSessionId = (sessions: CashSession[]) => {
     const existingIds = new Set(sessions.map(session => session.id));
@@ -358,7 +357,6 @@ export default function Finance() {
 
   const startShift = async () => {
     if (!isAdmin) return setErrors('Only admin can start or close shifts.');
-    if (todaySessionExists) return setErrors('Cash session for today already exists.');
     if (openSession) return setErrors('An open cash session already exists.');
 
     const autoCarryBalance = latestClosedSession?.closingBalance;

@@ -179,17 +179,19 @@ export default function Settings() {
 
         <Card>
            <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Security</CardTitle></CardHeader>
-           <CardContent className="space-y-2">
-              <Label>Manager Unlock PIN (for opening balance edit)</Label>
-              <Input
-                type="password"
-                inputMode="numeric"
-                maxLength={6}
-                value={profile.adminPin || ''}
-                onChange={e => setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) })}
-                placeholder="Enter PIN (e.g. 1234)"
-              />
-              <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
+           <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Manager Unlock PIN (for opening balance edit)</Label>
+                <Input
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={profile.adminPin || ''}
+                  onChange={e => setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) })}
+                  placeholder="Enter PIN (e.g. 1234)"
+                />
+                <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
+              </div>
            </CardContent>
         </Card>
 
