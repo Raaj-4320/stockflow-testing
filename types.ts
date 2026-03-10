@@ -329,6 +329,52 @@ export interface PurchaseReceiptPosting {
   deltas: PurchaseReceiptInventoryDelta[];
 }
 
+export interface PurchaseParty {
+  id: string;
+  name: string;
+  phone?: string;
+  gst?: string;
+  location?: string;
+  contactPerson?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PurchaseOrderLine {
+  id: string;
+  sourceType: 'inventory' | 'new';
+  productId?: string;
+  productName: string;
+  category?: string;
+  image?: string;
+  variant?: string;
+  color?: string;
+  quantity: number;
+  unitCost: number;
+  totalCost: number;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  partyId: string;
+  partyName: string;
+  partyPhone?: string;
+  partyGst?: string;
+  partyLocation?: string;
+  status: 'draft' | 'ordered' | 'partially_received' | 'received' | 'cancelled';
+  orderDate: string;
+  notes?: string;
+  lines: PurchaseOrderLine[];
+  totalQuantity: number;
+  totalAmount: number;
+  receivedQuantity?: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  updatedBy?: string;
+}
+
 export interface ExpenseActivity {
   id: string;
   action: 'add_expense' | 'delete_expense' | 'add_category' | 'delete_category';
@@ -364,6 +410,8 @@ export interface AppState {
   freightPurchases?: FreightPurchase[];
   purchaseReceiptPostings?: PurchaseReceiptPosting[];
   freightBrokers?: FreightBroker[];
+  purchaseParties?: PurchaseParty[];
+  purchaseOrders?: PurchaseOrder[];
   variantsMaster?: string[];
   colorsMaster?: string[];
   migrationMarkers?: MigrationMarkers;
