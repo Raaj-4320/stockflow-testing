@@ -155,6 +155,7 @@ export default function Sales() {
   
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [transactionSyncStatus, setTransactionSyncStatus] = useState<{ phase: 'idle' | 'pending' | 'committing' | 'success' | 'error'; message: string }>({ phase: 'idle', message: '' });
 
   const refreshData = () => {
       const data = loadData();
@@ -186,6 +187,27 @@ export default function Sales() {
 
   useEffect(() => { cartRef.current = cart; }, [cart]);
   useEffect(() => { if (cartError) { const t = setTimeout(() => setCartError(null), 3000); return () => clearTimeout(t); } }, [cartError]);
+  useEffect(() => {
+    const handleDataOpStatus = (event: Event) => {
+      const detail = (event as CustomEvent<{ phase?: 'start' | 'success' | 'error'; op?: string; message?: string; error?: string }>).detail;
+      if (!detail || detail.op !== 'processTransaction') return;
+      if (detail.phase === 'start') {
+        setTransactionSyncStatus({ phase: 'committing', message: detail.message || 'Committing transaction to cloud…' });
+        return;
+      }
+      if (detail.phase === 'success') {
+        setTransactionSyncStatus({ phase: 'success', message: detail.message || 'Transaction synced.' });
+        window.setTimeout(() => setTransactionSyncStatus(prev => prev.phase === 'success' ? { phase: 'idle', message: '' } : prev), 2500);
+        return;
+      }
+      if (detail.phase === 'error') {
+        setTransactionSyncStatus({ phase: 'error', message: detail.error || detail.message || 'Transaction sync failed. Data was rolled back.' });
+      }
+    };
+
+    window.addEventListener('data-op-status', handleDataOpStatus as EventListener);
+    return () => window.removeEventListener('data-op-status', handleDataOpStatus as EventListener);
+  }, []);
 
   const handleProductSelect = (scanValue: string, explicitQty: number = 1) => {
     let targetCode = scanValue;
@@ -416,6 +438,7 @@ export default function Sales() {
           customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod
       };
 
+      setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
       const newState = processTransaction(tx);
       setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
       
@@ -599,6 +622,12 @@ export default function Sales() {
 
               <div className={`p-5 bg-muted/20 border-t shrink-0 ${!isCartExpanded ? 'hidden md:block' : 'block'}`}>
                   {cartError && <div className="mb-3 text-xs bg-destructive/10 text-destructive p-2 rounded flex items-center gap-2"><AlertCircle className="w-3 h-3" /> {cartError}</div>}
+                  {transactionSyncStatus.phase !== 'idle' && (
+                    <div className={`mb-3 text-xs p-2 rounded flex items-center gap-2 border ${transactionSyncStatus.phase === 'error' ? 'bg-destructive/10 text-destructive border-destructive/30' : transactionSyncStatus.phase === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
+                      <AlertCircle className="w-3 h-3" />
+                      {transactionSyncStatus.phase === 'pending' ? 'Pending:' : transactionSyncStatus.phase === 'committing' ? 'Committing:' : transactionSyncStatus.phase === 'success' ? 'Committed:' : 'Commit failed:'} {transactionSyncStatus.message}
+                    </div>
+                  )}
                   
                   <div className="space-y-2.5 mb-5">
                       <div className="flex justify-between text-sm text-muted-foreground">
@@ -792,7 +821,9 @@ export default function Sales() {
                       
                       {/* Only show main pay button if not showing the search error helper buttons */}
                       {!(customerSearch && !selectedCustomer && filteredCustomers.length === 0 && customerTab === 'search') && (
-                          <Button className="w-full h-12 text-lg font-bold shadow-lg mt-2" onClick={completeCheckout}>Confirm & Pay</Button>
+                          <Button className="w-full h-12 text-lg font-bold shadow-lg mt-2" onClick={completeCheckout} disabled={transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing'}>
+                            {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processing…' : 'Confirm & Pay'}
+                          </Button>
                       )}
                   </CardContent>
               </Card>

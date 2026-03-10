@@ -11,6 +11,9 @@ import {
   FreightPurchase,
   PurchaseReceiptPosting,
   ProcurementLineSnapshot,
+  PurchaseOrder,
+  PurchaseOrderLine,
+  PurchaseParty,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
@@ -19,21 +22,65 @@ import { onAuthStateChanged } from 'firebase/auth';
 let isCloudSynced = false;
 let storeDocumentExists = false;
 let hasCompletedInitialCloudLoad = false;
-let cloudSyncStatus: 'idle' | 'loading' | 'ready' | 'missing_store' | 'offline' | 'error' = 'idle';
+
+// Centralized status/event/operation registries to keep write-flow signalling simple.
+const CLOUD_SYNC_STATUSES = {
+  IDLE: 'idle',
+  LOADING: 'loading',
+  READY: 'ready',
+  MISSING_STORE: 'missing_store',
+  OFFLINE: 'offline',
+  ERROR: 'error',
+} as const;
+
+const DATA_OP_PHASES = {
+  START: 'start',
+  SUCCESS: 'success',
+  ERROR: 'error',
+} as const;
+
+const APP_EVENTS = {
+  DATA_OP_STATUS: 'data-op-status',
+  CLOUD_SYNC_STATUS: 'cloud-sync-status',
+  LOCAL_STORAGE_UPDATE: 'local-storage-update',
+} as const;
+
+const AUDIT_OPERATIONS = {
+  CREATE: 'CREATE',
+  UPDATE: 'UPDATE',
+  DELETE: 'DELETE',
+  BLOCKED_WRITE: 'BLOCKED_WRITE',
+  SECURITY_EVENT: 'SECURITY_EVENT',
+} as const;
+
+const OPERATION_COMMIT_STATUS = {
+  COMMITTED: 'committed',
+} as const;
+
+const OPERATION_TYPES = {
+  PROCESS_TRANSACTION: 'processTransaction',
+} as const;
+
+let cloudSyncStatus: (typeof CLOUD_SYNC_STATUSES)[keyof typeof CLOUD_SYNC_STATUSES] = CLOUD_SYNC_STATUSES.IDLE;
 
 // Phase 1 migration: products moved to stores/{uid}/products/{productId}
 // TODO(phase1-cleanup): remove root-array fallback reads once migration verification completes.
-const PRODUCTS_MIGRATION_PHASE = 'phase1_products_subcollection';
-const CUSTOMERS_MIGRATION_PHASE = 'phase1_customers_subcollection';
-const TRANSACTIONS_MIGRATION_PHASE = 'phase1_transactions_subcollection';
+const MIGRATION_PHASES = {
+  PRODUCTS: 'phase1_products_subcollection',
+  CUSTOMERS: 'phase1_customers_subcollection',
+  TRANSACTIONS: 'phase1_transactions_subcollection',
+} as const;
+const PRODUCTS_MIGRATION_PHASE = MIGRATION_PHASES.PRODUCTS;
+const CUSTOMERS_MIGRATION_PHASE = MIGRATION_PHASES.CUSTOMERS;
+const TRANSACTIONS_MIGRATION_PHASE = MIGRATION_PHASES.TRANSACTIONS;
 const CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION = 'v1';
 const ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL = String((import.meta as any).env?.VITE_ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL || '').toLowerCase() === 'true';
 
 let isCustomerProductStatsBackfillComplete = false;
 
 
-type AuditOperation = 'CREATE' | 'UPDATE' | 'DELETE' | 'BLOCKED_WRITE' | 'SECURITY_EVENT';
-type DataOpPhase = 'start' | 'success' | 'error';
+type AuditOperation = (typeof AUDIT_OPERATIONS)[keyof typeof AUDIT_OPERATIONS];
+type DataOpPhase = (typeof DATA_OP_PHASES)[keyof typeof DATA_OP_PHASES];
 
 const emitDataOpStatus = (detail: {
   phase: DataOpPhase;
@@ -42,13 +89,27 @@ const emitDataOpStatus = (detail: {
   message?: string;
   error?: string;
 }) => {
-  window.dispatchEvent(new CustomEvent('data-op-status', { detail }));
+  window.dispatchEvent(new CustomEvent(APP_EVENTS.DATA_OP_STATUS, { detail }));
 };
 
 const emitCloudSyncStatus = (status: typeof cloudSyncStatus, message?: string) => {
   cloudSyncStatus = status;
-  window.dispatchEvent(new CustomEvent('cloud-sync-status', { detail: { status, message } }));
+  window.dispatchEvent(new CustomEvent(APP_EVENTS.CLOUD_SYNC_STATUS, { detail: { status, message } }));
 };
+
+const emitLocalStorageUpdate = () => {
+  window.dispatchEvent(new Event(APP_EVENTS.LOCAL_STORAGE_UPDATE));
+};
+
+export const STORAGE_FLOW_REGISTRY = Object.freeze({
+  events: APP_EVENTS,
+  cloudSyncStatuses: CLOUD_SYNC_STATUSES,
+  dataOpPhases: DATA_OP_PHASES,
+  auditOperations: AUDIT_OPERATIONS,
+  operationTypes: OPERATION_TYPES,
+  operationCommitStatus: OPERATION_COMMIT_STATUS,
+  migrationPhases: MIGRATION_PHASES,
+});
 
 
 const mergeById = <T extends { id: string }>(primary: T[], fallback: T[]): T[] => {
@@ -73,6 +134,8 @@ const getEntityCounts = (state: AppState) => ({
   freightConfirmedOrders: state.freightConfirmedOrders.length,
   freightPurchases: state.freightPurchases.length,
   purchaseReceiptPostings: state.purchaseReceiptPostings.length,
+  purchaseParties: (state.purchaseParties || []).length,
+  purchaseOrders: (state.purchaseOrders || []).length,
 });
 
 const isSuspiciousDrop = (previous: AppState, next: AppState) => {
@@ -116,8 +179,12 @@ const assertCloudWriteReady = async (reason: string) => {
   if (!db || !auth) throw new Error('Firestore not configured.');
   const user = auth.currentUser;
   if (!user) throw new Error('User not authenticated.');
+  if (!user.emailVerified) {
+    await writeAuditEvent('BLOCKED_WRITE', { reason: `${reason}_email_unverified_blocked` });
+    throw new Error('Email verification required before cloud writes.');
+  }
   if (!navigator.onLine) {
-    emitCloudSyncStatus('offline', 'Internet connection required for writes.');
+    emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required for writes.');
     await writeAuditEvent('BLOCKED_WRITE', { reason: `${reason}_offline_blocked` });
     throw new Error('Offline mode: business data writes are blocked.');
   }
@@ -398,10 +465,10 @@ const commitProcessTransactionAtomically = async ({
 
     const operationCommitRef = doc(getOperationCommitsCollectionRef(user.uid), `processTransaction_${transaction.id}`);
     firestoreTx.set(operationCommitRef, {
-      operationType: 'processTransaction',
+      operationType: OPERATION_TYPES.PROCESS_TRANSACTION,
       operationId: transaction.id,
       migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-      status: 'committed',
+      status: OPERATION_COMMIT_STATUS.COMMITTED,
       committedAt: serverTimestamp(),
       transactionId: transaction.id,
       transactionType: transaction.type,
@@ -446,6 +513,8 @@ const initialData: AppState = {
   freightPurchases: [],
   purchaseReceiptPostings: [],
   freightBrokers: [],
+  purchaseParties: [],
+  purchaseOrders: [],
   variantsMaster: [],
   colorsMaster: []
 };
@@ -462,7 +531,7 @@ if (auth) {
     onAuthStateChanged(auth, (user) => {
         if (user) {
             hasInitialSynced = true;
-            emitCloudSyncStatus('loading');
+            emitCloudSyncStatus(CLOUD_SYNC_STATUSES.LOADING);
             syncFromCloud();
         } else {
             // Clear state on logout
@@ -472,7 +541,7 @@ if (auth) {
             hasCompletedInitialCloudLoad = false;
             storeDocumentExists = false;
             isCustomerProductStatsBackfillComplete = false;
-            emitCloudSyncStatus('idle');
+            emitCloudSyncStatus(CLOUD_SYNC_STATUSES.IDLE);
             if (unsubscribeSnapshot) {
                 unsubscribeSnapshot();
                 unsubscribeSnapshot = null;
@@ -489,7 +558,7 @@ if (auth) {
                 unsubscribeTransactionsSnapshot();
                 unsubscribeTransactionsSnapshot = null;
             }
-            window.dispatchEvent(new Event('local-storage-update'));
+            emitLocalStorageUpdate();
         }
     });
 }
@@ -497,12 +566,12 @@ if (auth) {
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
     if (auth?.currentUser) {
-      emitCloudSyncStatus('loading', 'Reconnecting to live cloud data...');
+      emitCloudSyncStatus(CLOUD_SYNC_STATUSES.LOADING, 'Reconnecting to live cloud data...');
       void syncFromCloud();
     }
   });
   window.addEventListener('offline', () => {
-    emitCloudSyncStatus('offline', 'Internet connection required to load live business data.');
+    emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
   });
 }
 
@@ -510,8 +579,11 @@ const syncFromCloud = async () => {
     if (!db || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    if (!user.emailVerified) {
+      throw new Error('Email verification required before cloud access.');
+    }
     if (!navigator.onLine) {
-      emitCloudSyncStatus('offline', 'Internet connection required to load live business data.');
+      emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
       return;
     }
     
@@ -542,7 +614,7 @@ const syncFromCloud = async () => {
             if (mergedProducts.length > 0 || products.length > 0) {
               memoryState = { ...memoryState, products: mergedProducts };
               console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length, mergedCount: mergedProducts.length });
-              window.dispatchEvent(new Event('local-storage-update'));
+              emitLocalStorageUpdate();
             }
         }, (error) => {
             console.error('Error listening to product subcollection:', error);
@@ -558,7 +630,7 @@ const syncFromCloud = async () => {
             if (mergedCustomers.length > 0 || customers.length > 0) {
               memoryState = { ...memoryState, customers: mergedCustomers };
               console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length, mergedCount: mergedCustomers.length });
-              window.dispatchEvent(new Event('local-storage-update'));
+              emitLocalStorageUpdate();
             }
         }, (error) => {
             console.error('Error listening to customer subcollection:', error);
@@ -574,7 +646,7 @@ const syncFromCloud = async () => {
             if (mergedTransactions.length > 0 || transactions.length > 0) {
               memoryState = { ...memoryState, transactions: mergedTransactions };
               console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: transactions.length, mergedCount: mergedTransactions.length });
-              window.dispatchEvent(new Event('local-storage-update'));
+              emitLocalStorageUpdate();
             }
         }, (error) => {
             console.error('Error listening to transaction subcollection:', error);
@@ -628,6 +700,8 @@ const syncFromCloud = async () => {
                     freightPurchases: cloudData.freightPurchases || [],
                     purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
                     freightBrokers: cloudData.freightBrokers || [],
+                    purchaseParties: cloudData.purchaseParties || [],
+                    purchaseOrders: cloudData.purchaseOrders || [],
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
@@ -641,7 +715,7 @@ const syncFromCloud = async () => {
                 }
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
-                emitCloudSyncStatus('ready');
+                emitCloudSyncStatus(CLOUD_SYNC_STATUSES.READY);
                 if (subcollectionProducts.length > 0) {
                   void writeAuditEvent('SECURITY_EVENT', {
                     reason: 'products_read_from_subcollection',
@@ -663,13 +737,13 @@ const syncFromCloud = async () => {
                     transactionsCount: subcollectionTransactions.length,
                   });
                 }
-                window.dispatchEvent(new Event('local-storage-update'));
+                emitLocalStorageUpdate();
             } else {
                 isCloudSynced = true;
                 storeDocumentExists = false;
                 isCustomerProductStatsBackfillComplete = false;
                 hasCompletedInitialCloudLoad = true;
-                emitCloudSyncStatus('missing_store', 'Store is not initialized. Contact admin to provision store data.');
+                emitCloudSyncStatus(CLOUD_SYNC_STATUSES.MISSING_STORE, 'Store is not initialized. Contact admin to provision store data.');
                 void writeAuditEvent('SECURITY_EVENT', {
                   reason: 'missing_store_document',
                   attemptedPath: `stores/${user.uid}`,
@@ -678,7 +752,7 @@ const syncFromCloud = async () => {
             }
         }, (error) => {
             console.error("Error listening to cloud data:", error);
-            emitCloudSyncStatus('error', 'Unable to read cloud data.');
+            emitCloudSyncStatus(CLOUD_SYNC_STATUSES.ERROR, 'Unable to read cloud data.');
         });
         
     } catch (e) { 
@@ -1080,8 +1154,11 @@ const syncToCloud = async (data: AppState) => {
     if (!db || !isCloudSynced || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    if (!user.emailVerified) {
+      throw new Error('Email verification required before cloud writes.');
+    }
     if (!navigator.onLine) {
-      emitCloudSyncStatus('offline', 'Internet connection required for writes.');
+      emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required for writes.');
       throw new Error('Offline mode: business data writes are blocked.');
     }
     if (!hasCompletedInitialCloudLoad) {
@@ -1117,11 +1194,11 @@ const syncToCloud = async (data: AppState) => {
 export const loadData = (): AppState => {
   if (db && !hasInitialSynced && navigator.onLine) {
       hasInitialSynced = true;
-      emitCloudSyncStatus('loading');
+      emitCloudSyncStatus(CLOUD_SYNC_STATUSES.LOADING);
       syncFromCloud();
   }
   if (db && !navigator.onLine) {
-    emitCloudSyncStatus('offline', 'Internet connection required to load live business data.');
+    emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
     // strict online-first guard: until we have hydrated once from cloud, do not treat local memory defaults as authoritative
     if (!hasCompletedInitialCloudLoad) {
       return { ...initialData };
@@ -1157,13 +1234,13 @@ export const getNextBarcode = (category: string): string => {
 export const saveData = async (data: AppState, options?: { throwOnError?: boolean; allowDestructive?: boolean; reason?: string; auditOperation?: AuditOperation }) => {
   if (!data || typeof data !== 'object') {
     const err = new Error('Invalid save payload: expected state object.');
-    emitDataOpStatus({ phase: 'error', op: options?.reason || 'saveData', entity: 'state', error: err.message });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.ERROR, op: options?.reason || 'saveData', entity: 'state', error: err.message });
     if (options?.throwOnError) throw err;
     console.error('[firestore] invalid saveData payload');
     return;
   }
 
-  emitDataOpStatus({ phase: 'start', op: options?.reason || 'saveData', entity: 'state', message: 'Saving changes…' });
+  emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: options?.reason || 'saveData', entity: 'state', message: 'Saving changes…' });
   const previousState = memoryState;
   const suspicious = isSuspiciousDrop(previousState, data);
   if (suspicious.suspicious && !options?.allowDestructive) {
@@ -1175,7 +1252,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
       routeContext: options?.reason || 'saveData',
     });
     const err = new Error('Blocked suspicious destructive write. Explicit privileged flow required.');
-    emitDataOpStatus({ phase: 'error', op: options?.reason || 'saveData', entity: 'state', error: err.message });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.ERROR, op: options?.reason || 'saveData', entity: 'state', error: err.message });
     if (options?.throwOnError) throw err;
     console.error('[firestore] blocked suspicious write', err);
     return;
@@ -1183,27 +1260,27 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
 
   if (!db) {
     memoryState = data;
-    window.dispatchEvent(new Event('local-storage-update'));
-    emitDataOpStatus({ phase: 'success', op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
+    emitLocalStorageUpdate();
+    emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
     return;
   }
 
   try {
     await syncToCloud(data);
     memoryState = data;
-    window.dispatchEvent(new Event('local-storage-update'));
+    emitLocalStorageUpdate();
     await writeAuditEvent(options?.auditOperation || 'UPDATE', {
       routeContext: options?.reason || 'saveData',
       previousCounts: getEntityCounts(previousState),
       counts: getEntityCounts(data),
     });
-    emitDataOpStatus({ phase: 'success', op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
   } catch (error) {
     memoryState = previousState;
-    window.dispatchEvent(new Event('local-storage-update'));
+    emitLocalStorageUpdate();
     if (options?.throwOnError) {
       emitDataOpStatus({
-        phase: 'error',
+        phase: DATA_OP_PHASES.ERROR,
         op: options?.reason || 'saveData',
         entity: 'state',
         error: error instanceof Error ? error.message : 'Save failed.',
@@ -1211,7 +1288,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
       throw error;
     }
     emitDataOpStatus({
-      phase: 'error',
+      phase: DATA_OP_PHASES.ERROR,
       op: options?.reason || 'saveData',
       entity: 'state',
       error: error instanceof Error ? error.message : 'Save failed.',
@@ -1248,13 +1325,11 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = [...data.products.filter(p => p.id !== preparedProduct.id), preparedProduct];
 
-  if (!db) {
-    await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'addProduct_local_fallback', auditOperation: 'CREATE' });
-    return newProducts;
-  }
-
   if (db) {
     await upsertProductInSubcollection(preparedProduct, 'addProduct');
+  } else {
+    await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'addProduct_local_fallback', auditOperation: 'CREATE' });
+    return newProducts;
   }
 
   const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...(preparedProduct.variants || [])]));
@@ -1262,7 +1337,7 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
 
   await saveData({ ...data, variantsMaster, colorsMaster }, { throwOnError: true, reason: 'addProduct_metadata', auditOperation: 'UPDATE' });
   memoryState = { ...memoryState, products: newProducts, variantsMaster, colorsMaster };
-  window.dispatchEvent(new Event('local-storage-update'));
+  emitLocalStorageUpdate();
   await writeAuditEvent('CREATE', {
     reason: 'addProduct_subcollection',
     migrationPhase: PRODUCTS_MIGRATION_PHASE,
@@ -1276,17 +1351,14 @@ export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
   const sanitized = sanitizeVariantColorStock(product);
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
-
-  if (!db) {
-    await saveData({ ...data, products: data.products.map(p => p.id === product.id ? preparedProduct : p) }, { throwOnError: true, reason: 'updateProduct_local_fallback', auditOperation: 'UPDATE' });
-    return data.products.map(p => p.id === product.id ? preparedProduct : p);
-  }
+  const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
 
   if (db) {
     await upsertProductInSubcollection(preparedProduct, 'updateProduct');
+  } else {
+    await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'updateProduct_local_fallback', auditOperation: 'UPDATE' });
+    return newProducts;
   }
-
-  const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
 
   const allVariants = newProducts.flatMap(p => p.variants || []);
   const allColors = newProducts.flatMap(p => p.colors || []);
@@ -1295,7 +1367,7 @@ export const updateProduct = async (product: Product): Promise<Product[]> => {
 
   await saveData({ ...data, variantsMaster, colorsMaster }, { throwOnError: true, reason: 'updateProduct_metadata', auditOperation: 'UPDATE' });
   memoryState = { ...memoryState, products: newProducts, variantsMaster, colorsMaster };
-  window.dispatchEvent(new Event('local-storage-update'));
+  emitLocalStorageUpdate();
   await writeAuditEvent('UPDATE', {
     reason: 'updateProduct_subcollection',
     migrationPhase: PRODUCTS_MIGRATION_PHASE,
@@ -1307,21 +1379,17 @@ export const updateProduct = async (product: Product): Promise<Product[]> => {
 
 export const deleteProduct = async (id: string): Promise<Product[]> => {
   const data = loadData();
-
-  if (!db) {
-    const newProductsFallback = data.products.filter(p => p.id !== id);
-    await saveData({ ...data, products: newProductsFallback }, { throwOnError: true, reason: 'deleteProduct_local_fallback', auditOperation: 'DELETE' });
-    return newProductsFallback;
-  }
+  const newProducts = data.products.filter(p => p.id !== id);
 
   if (db) {
     await deleteProductInSubcollection(id, 'deleteProduct');
+  } else {
+    await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'deleteProduct_local_fallback', auditOperation: 'DELETE' });
+    return newProducts;
   }
-
-  const newProducts = data.products.filter(p => p.id !== id);
   await syncToCloud({ ...data });
   memoryState = { ...memoryState, products: newProducts };
-  window.dispatchEvent(new Event('local-storage-update'));
+  emitLocalStorageUpdate();
   await writeAuditEvent('DELETE', {
     reason: 'deleteProduct_subcollection',
     migrationPhase: PRODUCTS_MIGRATION_PHASE,
@@ -1392,7 +1460,7 @@ export const deleteCategory = (category: string): AppState => {
   const newState = { ...data, categories: newCategories };
   void saveData(newState, { reason: 'deleteCategory', auditOperation: 'DELETE' });
   memoryState = { ...memoryState, categories: newCategories, products: newProducts };
-  window.dispatchEvent(new Event('local-storage-update'));
+  emitLocalStorageUpdate();
   return { ...newState, products: newProducts };
 };
 
@@ -1415,7 +1483,7 @@ export const renameCategory = (oldName: string, newName: string): AppState => {
     const newState = { ...data, categories: newCategories };
     void saveData(newState, { reason: 'renameCategory', auditOperation: 'UPDATE' });
     memoryState = { ...memoryState, categories: newCategories, products: newProducts };
-    window.dispatchEvent(new Event('local-storage-update'));
+    emitLocalStorageUpdate();
     return { ...newState, products: newProducts };
 };
 
@@ -1643,7 +1711,7 @@ export const addCustomer = (customer: Customer): Customer[] => {
     }
 
     memoryState = { ...memoryState, customers: newCustomers };
-    window.dispatchEvent(new Event('local-storage-update'));
+    emitLocalStorageUpdate();
 
     void upsertCustomerInSubcollection(newCustomer, 'addCustomer')
       .then(() => syncToCloud({ ...data }))
@@ -1657,7 +1725,7 @@ export const addCustomer = (customer: Customer): Customer[] => {
         console.error('[phase1-customers] add customer failed', error);
         // Roll back only if the customer doc upsert likely failed.
         memoryState = { ...memoryState, customers: data.customers };
-        window.dispatchEvent(new Event('local-storage-update'));
+        emitLocalStorageUpdate();
       });
 
     return newCustomers;
@@ -1683,7 +1751,7 @@ export const updateCustomer = (customer: Customer): Customer[] => {
       }))
       .then(() => {
         memoryState = { ...memoryState, customers: newCustomers };
-        window.dispatchEvent(new Event('local-storage-update'));
+        emitLocalStorageUpdate();
       })
       .catch(error => console.error('[phase1-customers] update customer failed', error));
 
@@ -1768,7 +1836,7 @@ export const deleteCustomer = (id: string): Customer[] => {
       }))
       .then(() => {
         memoryState = { ...memoryState, customers: newCustomers };
-        window.dispatchEvent(new Event('local-storage-update'));
+        emitLocalStorageUpdate();
       })
       .catch(error => console.error('[phase1-customers] delete customer failed', error));
 
@@ -2090,6 +2158,185 @@ export const createFreightBroker = async (payload: Omit<FreightBroker, 'id' | 'c
   await saveData({ ...data, freightBrokers: next }, { throwOnError: true, reason: 'createFreightBroker', auditOperation: 'CREATE' });
   return broker;
 };
+
+export const getPurchaseParties = (): PurchaseParty[] => {
+  const data = loadData();
+  return data.purchaseParties || [];
+};
+
+export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'createdAt' | 'updatedAt'>): Promise<PurchaseParty> => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const party: PurchaseParty = {
+    id: `party-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    name: payload.name.trim(),
+    phone: payload.phone?.trim() || undefined,
+    gst: payload.gst?.trim() || undefined,
+    location: payload.location?.trim() || undefined,
+    contactPerson: payload.contactPerson?.trim() || undefined,
+    notes: payload.notes?.trim() || undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const next = [party, ...(data.purchaseParties || [])];
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'createPurchaseParty', auditOperation: 'CREATE' });
+  return party;
+};
+
+export const updatePurchaseParty = async (party: PurchaseParty): Promise<PurchaseParty> => {
+  const data = loadData();
+  const next = (data.purchaseParties || []).map(item => item.id === party.id ? { ...party, updatedAt: new Date().toISOString() } : item);
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty', auditOperation: 'UPDATE' });
+  return party;
+};
+
+export const getPurchaseOrders = (): PurchaseOrder[] => {
+  const data = loadData();
+  return data.purchaseOrders || [];
+};
+
+export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const next = [order, ...(data.purchaseOrders || [])];
+  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder', auditOperation: 'CREATE' });
+  return order;
+};
+
+export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? order : item);
+  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder', auditOperation: 'UPDATE' });
+  return order;
+};
+
+
+type PurchasePriceUpdateMethod = 'avg_method_1' | 'avg_method_2' | 'no_change' | 'latest_purchase';
+
+const getVariantExistingStock = (product: Product, variant?: string, color?: string): number => {
+  if (!variant && !color) return Math.max(0, product.stock || 0);
+  const v = (variant || 'No Variant').trim() || 'No Variant';
+  const c = (color || 'No Color').trim() || 'No Color';
+  const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
+  const match = entries.find(e => (e.variant || 'No Variant') === v && (e.color || 'No Color') === c);
+  return Math.max(0, match?.stock || 0);
+};
+
+const resolveNextBuyPrice = ({
+  currentBuyPrice,
+  lineUnitCost,
+  lineQuantity,
+  existingQtyForMethod1,
+  existingQtyForMethod2,
+  method,
+}: {
+  currentBuyPrice: number;
+  lineUnitCost: number;
+  lineQuantity: number;
+  existingQtyForMethod1: number;
+  existingQtyForMethod2: number;
+  method: PurchasePriceUpdateMethod;
+}) => {
+  const curr = Math.max(0, currentBuyPrice || 0);
+  const incoming = Math.max(0, lineUnitCost || 0);
+  const qty = Math.max(0, lineQuantity || 0);
+  if (method === 'no_change') return curr;
+  if (method === 'latest_purchase') return incoming > 0 ? incoming : curr;
+  if (method === 'avg_method_2') {
+    const oldQty = Math.max(0, existingQtyForMethod2 || 0);
+    const denominator = oldQty + qty;
+    if (denominator <= 0) return curr;
+    const weighted = ((curr * oldQty) + (incoming * qty)) / denominator;
+    return Number(weighted.toFixed(2));
+  }
+
+  // avg_method_1: weighted average by quantity (variant-level for variant line, else product-level).
+  const oldQty = Math.max(0, existingQtyForMethod1 || 0);
+  const denominator = oldQty + qty;
+  if (denominator <= 0) return curr;
+  const weighted = ((curr * oldQty) + (incoming * qty)) / denominator;
+  return Number(weighted.toFixed(2));
+};
+
+const applyPurchaseLineToProduct = async (line: PurchaseOrderLine, method: PurchasePriceUpdateMethod): Promise<void> => {
+  const data = loadData();
+  if (line.sourceType === 'inventory' && line.productId) {
+    const product = data.products.find(p => p.id === line.productId);
+    if (!product) return;
+    const existingVariantQty = getVariantExistingStock(product, line.variant, line.color);
+    const existingProductQty = Math.max(0, product.stock || 0);
+    const nextProduct: Product = {
+      ...product,
+      buyPrice: resolveNextBuyPrice({
+        currentBuyPrice: product.buyPrice,
+        lineUnitCost: line.unitCost,
+        lineQuantity: line.quantity,
+        existingQtyForMethod1: existingVariantQty,
+        existingQtyForMethod2: existingProductQty,
+        method,
+      }),
+    };
+
+    if (line.variant || line.color) {
+      const entries = Array.isArray(nextProduct.stockByVariantColor) ? [...nextProduct.stockByVariantColor] : [];
+      const variant = (line.variant || 'No Variant').trim() || 'No Variant';
+      const color = (line.color || 'No Color').trim() || 'No Color';
+      const idx = entries.findIndex(e => (e.variant || 'No Variant') === variant && (e.color || 'No Color') === color);
+      if (idx >= 0) entries[idx] = { ...entries[idx], stock: Math.max(0, (entries[idx].stock || 0) + line.quantity) };
+      else entries.push({ variant, color, stock: line.quantity });
+      nextProduct.stockByVariantColor = entries;
+      nextProduct.stock = entries.reduce((s, e) => s + Math.max(0, e.stock || 0), 0);
+      nextProduct.variants = Array.from(new Set(entries.map(e => e.variant).filter(v => v && v !== 'No Variant')));
+      nextProduct.colors = Array.from(new Set(entries.map(e => e.color).filter(c => c && c !== 'No Color')));
+    } else {
+      nextProduct.stock = Math.max(0, (nextProduct.stock || 0) + line.quantity);
+    }
+
+    await updateProduct(nextProduct);
+    return;
+  }
+
+  const newProduct: Product = {
+    id: `purchase-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    barcode: `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
+    name: line.productName.trim(),
+    description: '',
+    buyPrice: line.unitCost,
+    sellPrice: Math.max(line.unitCost, line.unitCost * 1.2),
+    stock: line.quantity,
+    image: line.image || '',
+    category: line.category || 'Uncategorized',
+    variants: line.variant ? [line.variant] : [],
+    colors: line.color ? [line.color] : [],
+    stockByVariantColor: line.variant || line.color
+      ? [{ variant: line.variant || 'No Variant', color: line.color || 'No Color', stock: line.quantity }]
+      : [],
+    totalSold: 0,
+  };
+  await addProduct(newProduct);
+};
+
+export const receivePurchaseOrder = async (orderId: string, method: PurchasePriceUpdateMethod = 'no_change'): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const order = (data.purchaseOrders || []).find(o => o.id === orderId);
+  if (!order) {
+    failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
+  }
+
+  for (const line of order.lines) {
+    await applyPurchaseLineToProduct(line, method);
+  }
+
+  const updatedOrder: PurchaseOrder = {
+    ...order,
+    status: 'received',
+    receivedQuantity: order.totalQuantity,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await updatePurchaseOrder(updatedOrder);
+  return updatedOrder;
+};
+
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
 
@@ -2191,7 +2438,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   }
 
   if (db) {
-    emitDataOpStatus({ phase: 'start', op: 'processTransaction', entity: 'transaction', message: 'Saving transaction…' });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…' });
     const fallbackProductsById = Object.fromEntries(data.products.map(p => [p.id, p]));
     const fallbackCustomersById = Object.fromEntries(data.customers.map(c => [c.id, c]));
 
@@ -2210,7 +2457,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
           committedCustomer: committedCustomer?.id || null,
         });
         if (!created) {
-          emitDataOpStatus({ phase: 'success', op: 'processTransaction', entity: 'transaction', message: 'Transaction already applied.' });
+          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.' });
           void writeAuditEvent('BLOCKED_WRITE', {
             reason: 'processTransaction_idempotent_duplicate_skip',
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
@@ -2232,8 +2479,8 @@ export const processTransaction = (transaction: Transaction): AppState => {
           customers: Array.from(customerMap.values()),
           transactions: nextTransactions,
         };
-        window.dispatchEvent(new Event('local-storage-update'));
-        emitDataOpStatus({ phase: 'success', op: 'processTransaction', entity: 'transaction', message: 'Transaction saved.' });
+        emitLocalStorageUpdate();
+        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.' });
 
         void Promise.all([
           touchedProductIds.length > 0
@@ -2268,10 +2515,10 @@ syncToCloud({ ...data }),
           error,
         });
         memoryState = { ...memoryState, products: data.products, transactions: data.transactions, customers: data.customers };
-        window.dispatchEvent(new Event('local-storage-update'));
+        emitLocalStorageUpdate();
         emitDataOpStatus({
-          phase: 'error',
-          op: 'processTransaction',
+          phase: DATA_OP_PHASES.ERROR,
+          op: OPERATION_TYPES.PROCESS_TRANSACTION,
           entity: 'transaction',
           error: error instanceof Error ? error.message : 'Transaction save failed.',
         });
@@ -2279,7 +2526,7 @@ syncToCloud({ ...data }),
 
     const newState = { ...data };
     memoryState = { ...memoryState, products: newProducts, transactions: newTransactions, customers: newCustomers };
-    window.dispatchEvent(new Event('local-storage-update'));
+    emitLocalStorageUpdate();
     return { ...newState, products: newProducts, transactions: newTransactions, customers: newCustomers };
   }
 
@@ -2307,7 +2554,7 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
     }))
     .then(() => {
       memoryState = { ...memoryState, transactions: next };
-      window.dispatchEvent(new Event('local-storage-update'));
+      emitLocalStorageUpdate();
     })
     .catch(error => console.error('[phase1-transactions] failed to delete transaction', error));
 
