@@ -63,8 +63,7 @@ const OPERATION_TYPES = {
 
 let cloudSyncStatus: (typeof CLOUD_SYNC_STATUSES)[keyof typeof CLOUD_SYNC_STATUSES] = CLOUD_SYNC_STATUSES.IDLE;
 
-// Phase 1 migration: products moved to stores/{uid}/products/{productId}
-// TODO(phase1-cleanup): remove root-array fallback reads once migration verification completes.
+// Phase 1 complete: products/customers/transactions are sourced from per-entity subcollections.
 const MIGRATION_PHASES = {
   PRODUCTS: 'phase1_products_subcollection',
   CUSTOMERS: 'phase1_customers_subcollection',
@@ -118,13 +117,6 @@ export const STORAGE_FLOW_REGISTRY = Object.freeze({
   migrationPhases: MIGRATION_PHASES,
 });
 
-
-const mergeById = <T extends { id: string }>(primary: T[], fallback: T[]): T[] => {
-  const merged = new Map<string, T>();
-  fallback.forEach(item => merged.set(item.id, item));
-  primary.forEach(item => merged.set(item.id, item));
-  return Array.from(merged.values());
-};
 
 const sortTransactionsDesc = (transactions: Transaction[]) =>
   [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -269,14 +261,10 @@ const commitProcessTransactionAtomically = async ({
   transaction,
   legacyCustomerProductStatsSeed,
   allowLegacySeed,
-  fallbackProductsById,
-  fallbackCustomersById,
 }: {
   transaction: Transaction;
   legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }>;
   allowLegacySeed: boolean;
-  fallbackProductsById: Record<string, Product>;
-  fallbackCustomersById: Record<string, Customer>;
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
 
@@ -333,14 +321,11 @@ const commitProcessTransactionAtomically = async ({
     for (const [productId, delta] of productDeltas.entries()) {
       const productRef = doc(db!, 'stores', user.uid, 'products', productId);
       const productSnap = productSnapshots.get(productId)!;
-      const fallbackProduct = fallbackProductsById[productId];
-      if (!productSnap.exists() && !fallbackProduct) {
+      if (!productSnap.exists()) {
         failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found in cloud state.', { itemId: productId });
       }
 
-      const currentProduct = productSnap.exists()
-        ? ({ ...(productSnap.data() as Product), id: productSnap.id })
-        : ({ ...fallbackProduct, id: productId });
+      const currentProduct = { ...(productSnap.data() as Product), id: productSnap.id };
       const availableStock = getAvailableStockForItem(currentProduct, delta.variant, delta.color);
       if (transaction.type === 'sale' && Math.abs(delta.quantityDelta) > availableStock) {
         failValidation('OVERSALE_STOCK', 'Insufficient stock for product in cloud state.', {
@@ -374,14 +359,11 @@ const commitProcessTransactionAtomically = async ({
     if (transaction.customerId) {
       const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
       const currentCustomerSnap = customerSnap;
-      const fallbackCustomer = fallbackCustomersById[transaction.customerId];
-      if (!currentCustomerSnap?.exists() && !fallbackCustomer) {
+      if (!currentCustomerSnap?.exists()) {
         failValidation('CUSTOMER_NOT_FOUND', 'Transaction customer not found in cloud state.', { customerId: transaction.customerId });
       }
 
-      const currentCustomer = currentCustomerSnap?.exists()
-        ? ({ ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id })
-        : ({ ...fallbackCustomer, id: transaction.customerId });
+      const currentCustomer = { ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id };
       const amount = Math.abs(transaction.total);
       let newTotalSpend = currentCustomer.totalSpend;
       let newTotalDue = currentCustomer.totalDue;
@@ -616,14 +598,9 @@ const syncFromCloud = async () => {
               .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
               .filter(p => !((p as any).isDeleted));
 
-            const fallbackProducts = (memoryState.products || []).filter(p => !deletedProductIdsMarker.has(p.id));
-            const mergedProducts = mergeById(products, fallbackProducts);
-            // Keep fallback-root entities while phased migration is incomplete.
-            if (mergedProducts.length > 0 || products.length > 0) {
-              memoryState = { ...memoryState, products: mergedProducts };
-              console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length, mergedCount: mergedProducts.length, deletedProductMarkerCount: deletedProductIdsMarker.size });
-              emitLocalStorageUpdate();
-            }
+            memoryState = { ...memoryState, products };
+            console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length, deletedProductMarkerCount: deletedProductIdsMarker.size });
+            emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to product subcollection:', error);
         });
@@ -633,14 +610,9 @@ const syncFromCloud = async () => {
               .map(docItem => ({ ...(docItem.data() as Customer), id: docItem.id }))
               .filter(c => !((c as any).isDeleted));
 
-            const fallbackCustomers = (memoryState.customers || []).filter(c => !deletedCustomerIdsMarker.has(c.id));
-            const mergedCustomers = mergeById(customers, fallbackCustomers);
-            // Keep fallback-root entities while phased migration is incomplete.
-            if (mergedCustomers.length > 0 || customers.length > 0) {
-              memoryState = { ...memoryState, customers: mergedCustomers };
-              console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length, mergedCount: mergedCustomers.length });
-              emitLocalStorageUpdate();
-            }
+            memoryState = { ...memoryState, customers };
+            console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length });
+            emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to customer subcollection:', error);
         });
@@ -650,14 +622,10 @@ const syncFromCloud = async () => {
               .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
               .filter(t => !((t as any).isDeleted));
 
-            const fallbackTransactions = (memoryState.transactions || []).filter(t => !deletedTransactionIdsMarker.has(t.id));
-            const mergedTransactions = sortTransactionsDesc(mergeById(transactions, fallbackTransactions));
-            // Keep fallback-root entities while phased migration is incomplete.
-            if (mergedTransactions.length > 0 || transactions.length > 0) {
-              memoryState = { ...memoryState, transactions: mergedTransactions };
-              console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: transactions.length, mergedCount: mergedTransactions.length });
-              emitLocalStorageUpdate();
-            }
+            const sortedTransactions = sortTransactionsDesc(transactions);
+            memoryState = { ...memoryState, transactions: sortedTransactions };
+            console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: sortedTransactions.length });
+            emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to transaction subcollection:', error);
         });
@@ -688,13 +656,9 @@ const syncFromCloud = async () => {
                 const subcollectionProducts = await readProductsFromSubcollection(user.uid);
                 const subcollectionCustomers = await readCustomersFromSubcollection(user.uid);
                 const subcollectionTransactions = await readTransactionsFromSubcollection(user.uid);
-                const fallbackProducts = mergeById(cloudData.products || [], memoryState.products || []).filter(p => !deletedProductIdsMarker.has(p.id));
-                const fallbackCustomers = mergeById(cloudData.customers || [], memoryState.customers || []).filter(c => !deletedCustomerIdsMarker.has(c.id));
-                const fallbackTransactions = sortTransactionsDesc(mergeById(cloudData.transactions || [], memoryState.transactions || []).filter(t => !deletedTransactionIdsMarker.has(t.id)));
-
-                const hydratedProducts = mergeById(subcollectionProducts, fallbackProducts);
-                const hydratedCustomers = mergeById(subcollectionCustomers, fallbackCustomers);
-                const hydratedTransactions = sortTransactionsDesc(mergeById(subcollectionTransactions, fallbackTransactions));
+                const hydratedProducts = subcollectionProducts;
+                const hydratedCustomers = subcollectionCustomers;
+                const hydratedTransactions = subcollectionTransactions;
                 console.debug('[migration-trace] root hydration merge', {
                   rootProducts: (cloudData.products || []).length,
                   rootCustomers: (cloudData.customers || []).length,
@@ -2482,15 +2446,11 @@ export const processTransaction = (transaction: Transaction): AppState => {
 
   if (db) {
     emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…' });
-    const fallbackProductsById = Object.fromEntries(data.products.map(p => [p.id, p]));
-    const fallbackCustomersById = Object.fromEntries(data.customers.map(c => [c.id, c]));
 
     void commitProcessTransactionAtomically({
       transaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
-      fallbackProductsById,
-      fallbackCustomersById,
     })
       .then(({ created, committedProducts, committedCustomer }) => {
         console.debug('[migration-trace] processTransaction commit result', {
