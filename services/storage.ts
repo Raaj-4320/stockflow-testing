@@ -833,6 +833,7 @@ type CloudinarySignResponse = {
   signature: string;
   apiKey: string;
   cloudName: string;
+  uploadFolder: string;
 };
 
 type CloudinaryStage = 'signature' | 'upload';
@@ -957,7 +958,7 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
         }
 
         const body = await response.json() as CloudinarySignResponse;
-        if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp) {
+        if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp || !body?.uploadFolder) {
           const error = new CloudinaryUploadError({
             message: 'Cloudinary signature response missing required fields',
             stage: 'signature',
@@ -1011,6 +1012,7 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
       formData.append('timestamp', String(signedParams.timestamp));
       formData.append('signature', signedParams.signature);
       formData.append('api_key', signedParams.apiKey);
+      formData.append('folder', signedParams.uploadFolder);
 
       const uploadResponse = await withTimeout(
         fetch(uploadEndpoint, {
