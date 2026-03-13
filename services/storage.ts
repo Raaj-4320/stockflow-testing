@@ -755,7 +755,7 @@ const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(varia
 
 const sanitizeVariantColorStock = (product: Product): Product => {
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
-  const dedup = new Map<string, { variant: string; color: string; stock: number }>();
+  const dedup = new Map<string, { variant: string; color: string; stock: number; buyPrice?: number; sellPrice?: number }>();
 
   entries.forEach(entry => {
     const variant = normalizeLabel(entry.variant) || 'No Variant';
@@ -763,8 +763,15 @@ const sanitizeVariantColorStock = (product: Product): Product => {
     const stock = Number.isFinite(entry.stock) && entry.stock > 0 ? entry.stock : 0;
     const key = toStockKey(variant, color);
     const existing = dedup.get(key);
-    if (existing) existing.stock += stock;
-    else dedup.set(key, { variant, color, stock });
+    const buyPrice = Number.isFinite(entry.buyPrice) && Number(entry.buyPrice) >= 0 ? Number(entry.buyPrice) : undefined;
+    const sellPrice = Number.isFinite(entry.sellPrice) && Number(entry.sellPrice) >= 0 ? Number(entry.sellPrice) : undefined;
+    if (existing) {
+      existing.stock += stock;
+      if (existing.buyPrice === undefined && buyPrice !== undefined) existing.buyPrice = buyPrice;
+      if (existing.sellPrice === undefined && sellPrice !== undefined) existing.sellPrice = sellPrice;
+    } else {
+      dedup.set(key, { variant, color, stock, buyPrice, sellPrice });
+    }
   });
 
   const stockByVariantColor = Array.from(dedup.values()).filter(entry => entry.stock >= 0);
@@ -1668,7 +1675,13 @@ export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers);
 
-    const newCustomer = { ...customer, totalDue: 0 };
+    const newCustomer = {
+      ...customer,
+      totalSpend: Number.isFinite(customer.totalSpend) ? Math.max(0, customer.totalSpend) : 0,
+      totalDue: Number.isFinite(customer.totalDue) ? Math.max(0, customer.totalDue) : 0,
+      visitCount: Number.isFinite(customer.visitCount) ? Math.max(0, Math.floor(customer.visitCount)) : 0,
+      lastVisit: customer.lastVisit || new Date().toISOString(),
+    };
     const newCustomers = [...data.customers, newCustomer];
     if (!db) {
       void saveData({ ...data, customers: newCustomers }, { reason: 'addCustomer_local_fallback', auditOperation: 'CREATE' });
