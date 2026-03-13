@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
-import { FreightBroker, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
+import { addCategory, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
+import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 
@@ -27,7 +27,16 @@ type CartonCbmDraft = { cartons: number; cbmPerCarton: number | ''; cbmRate: num
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const to2 = (n: number) => Number.isFinite(n) ? Number(n.toFixed(2)) : 0;
 const toNum = (v: number | '') => (v === '' ? 0 : Number(v));
-const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const toNumberInputValue = (value: unknown) => {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value === 'string' && value.trim().toLowerCase() === 'undefined') return '';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : '';
+};
+const formatNumber = (value: number, digits = 2) => {
+  const safe = Number.isFinite(value) ? value : 0;
+  return safe.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+};
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
@@ -58,6 +67,7 @@ export default function FreightBooking() {
   const [activeTab, setActiveTab] = useState<FreightTab>('inquiries');
   const [products, setProducts] = useState<Product[]>([]);
   const [inquiries, setInquiries] = useState<FreightInquiry[]>([]);
+  const [confirmedOrders, setConfirmedOrders] = useState<FreightConfirmedOrder[]>([]);
   const [brokers, setBrokers] = useState<FreightBroker[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
 
@@ -76,6 +86,7 @@ export default function FreightBooking() {
 
   const [newProductName, setNewProductName] = useState('');
   const [newProductCategory, setNewProductCategory] = useState('');
+  const [newCategoryError, setNewCategoryError] = useState('');
   const [newProductImage, setNewProductImage] = useState('');
   const [newProductDetails, setNewProductDetails] = useState('');
 
@@ -94,13 +105,28 @@ export default function FreightBooking() {
   const [cbmMode, setCbmMode] = useState<CbmMode>('undecided');
   const [cartonCbmDrafts, setCartonCbmDrafts] = useState<Record<string, CartonCbmDraft>>({});
   const [showConfirmSave, setShowConfirmSave] = useState(false);
+  const [convertingInquiryId, setConvertingInquiryId] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
     setProducts(data.products || []);
     setCategories(data.categories || []);
     setInquiries(getFreightInquiries());
+    setConfirmedOrders(getFreightConfirmedOrders());
     setBrokers(getFreightBrokers());
+  };
+
+  const convertToConfirmedOrder = async (inquiry: FreightInquiry) => {
+    if (convertingInquiryId) return;
+    setConvertingInquiryId(inquiry.id);
+    try {
+      await convertInquiryToConfirmedOrder(inquiry.id);
+      refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Unable to convert inquiry to confirmed order.');
+    } finally {
+      setConvertingInquiryId(null);
+    }
   };
 
   useEffect(() => {
@@ -232,6 +258,7 @@ export default function FreightBooking() {
     setSelectedVariantKeys([]);
     setNewProductName('');
     setNewProductCategory('');
+    setNewCategoryError('');
     setNewProductImage('');
     setNewProductDetails('');
     setOrderType('in_house');
@@ -327,7 +354,10 @@ export default function FreightBooking() {
 
   const updatePricingEntry = (key: string, field: 'pcs' | 'rmbPerPcs', value: string) => {
     const parsed = value === '' ? '' : Number(value);
-    setPricingEntries(prev => ({ ...prev, [key]: { ...prev[key], [field]: Number.isNaN(parsed) ? '' : parsed } }));
+    setPricingEntries(prev => {
+      const current = prev[key] || { key, label: 'Selected Variant', stock: 0, pcs: '', rmbPerPcs: '' };
+      return { ...prev, [key]: { ...current, [field]: Number.isNaN(parsed) ? '' : parsed } };
+    });
   };
 
   const updateAssignment = (lineKey: string, field: 'cartonId' | 'qty', value: string) => {
@@ -390,6 +420,40 @@ export default function FreightBooking() {
     setBrokerId(broker.id);
     setNewBrokerName('');
     refresh();
+  };
+
+  const createBrokerQuick = async () => {
+    const name = window.prompt('Enter broker name')?.trim();
+    if (!name) return;
+    const broker = await createFreightBroker({ name });
+    setBrokerId(broker.id);
+    refresh();
+  };
+
+  const addCategoryQuick = async () => {
+    const name = newProductCategory.trim();
+    if (!name) return;
+    const exists = categories.some(c => c.toLowerCase() === name.toLowerCase());
+    if (exists) {
+      setNewCategoryError('Category already exists.');
+      alert('Category already exists.');
+      return;
+    }
+    await addCategory(name);
+    setNewProductCategory(name);
+    setNewCategoryError('');
+    refresh();
+  };
+
+  const handleNewProductImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      setNewProductImage(result);
+    };
+    reader.readAsDataURL(file);
   };
 
   const ensureCategory = async (name: string) => {
@@ -521,7 +585,43 @@ export default function FreightBooking() {
       </div>
 
       {activeTab === 'orders' && (
-        <Card><CardContent className="pt-6 text-sm text-muted-foreground">Orders tab is reserved for future confirmed order flow.</CardContent></Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Confirmed Orders</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Ready to confirm from inquiries</div>
+              {inquiries.filter(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)).slice(0, 8).map(inquiry => (
+                <div key={inquiry.id} className="flex flex-col gap-2 rounded-xl border p-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-medium text-slate-900">{inquiry.productName}</div>
+                    <div className="text-xs text-muted-foreground">{inquiry.category || '—'} · {formatNumber(inquiry.totalPieces || 0, 0)} pcs · ₹{formatNumber(inquiry.totalInr || 0)}</div>
+                  </div>
+                  <Button size="sm" onClick={() => convertToConfirmedOrder(inquiry)} disabled={!!convertingInquiryId}>
+                    {convertingInquiryId === inquiry.id ? 'Converting...' : 'Confirm Order'}
+                  </Button>
+                </div>
+              ))}
+              {!inquiries.some(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)) && (
+                <div className="text-sm text-muted-foreground">All inquiries are already converted.</div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Existing confirmed orders</div>
+              {confirmedOrders.map(order => (
+                <div key={order.id} className="rounded-xl border p-3">
+                  <div className="font-medium text-slate-900">{order.productName}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
+                  </div>
+                </div>
+              ))}
+              {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {activeTab === 'brokers' && (
@@ -621,8 +721,24 @@ export default function FreightBooking() {
             <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
             <div className="grid gap-4 md:grid-cols-2">
               <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
-              <div><Label>Category</Label><Input value={newProductCategory} onChange={e => setNewProductCategory(e.target.value)} placeholder="Enter category" /></div>
-              <div><Label>Product Image URL / data URL</Label><Input value={newProductImage} onChange={e => setNewProductImage(e.target.value)} placeholder="https://..." /></div>
+              <div>
+                <Label>Category</Label>
+                <div className="mt-1 flex gap-2">
+                  <Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select or create category" />
+                  <Button type="button" variant="outline" onClick={addCategoryQuick} title="Add category"><Plus className="h-4 w-4" /></Button>
+                </div>
+                <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
+                {newCategoryError && <p className="mt-1 text-xs text-rose-600">{newCategoryError}</p>}
+              </div>
+              <div>
+                <Label>Product Image</Label>
+                <div className="mt-1 flex items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3">
+                  <div className="h-14 w-14 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                    {newProductImage ? <img src={newProductImage} alt="Product preview" className="h-full w-full object-cover" /> : null}
+                  </div>
+                  <Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" />
+                </div>
+              </div>
               <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>
               <div className="md:col-span-2"><Label>Additional Product Details</Label><textarea value={newProductDetails} onChange={e => setNewProductDetails(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={4} /></div>
             </div>
@@ -640,8 +756,78 @@ export default function FreightBooking() {
         {wizardStep === 'pricing' && (
           <div>
             <button onClick={() => setWizardStep(sourceMode === 'new' ? 'newInquiry' : 'variants')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="mb-5 grid gap-4 lg:grid-cols-2"><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900"><IndianRupee className="h-4 w-4" /> Pricing Setup</div><div className="grid gap-4 md:grid-cols-2"><div><Label>Exchange Rate</Label><Input type="number" value={exchangeRate} onChange={e => setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div><div><Label>Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div><div><Label>Selling Price (per pcs)</Label><Input type="number" value={sellingPrice} onChange={e => setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div><div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>{orderType !== 'customer_trade' && <div className="md:col-span-2 grid md:grid-cols-2 gap-2"><div><Label>Broker</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select broker</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div><div><Label>Create Broker</Label><div className="flex gap-2"><Input value={newBrokerName} onChange={e => setNewBrokerName(e.target.value)} /><Button type="button" variant="outline" onClick={createBroker}><Plus className="w-4 h-4" /></Button></div></div></div>}</div></div><div className="rounded-3xl border border-slate-200 bg-white p-4"><div className="mb-3 text-sm font-semibold text-slate-900">Entered Totals</div><div className="grid grid-cols-2 gap-3"><SummaryCard label="Entered Pcs" value={formatNumber(activeLines.reduce((s, l) => s + toNum(l.pcs), 0), 0)} /><SummaryCard label="Entered RMB" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.pcs) * toNum(l.rmbPerPcs)), 0))} /><SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} /><SummaryCard label="Exchange" value={`${exchangeRate || 0}`} /></div></div></div>
-            <div className="space-y-4">{activeLines.map(line => { const pcs = toNum(line.pcs); const totalRmb = pcs * toNum(line.rmbPerPcs); const totalInr = totalRmb * toNum(exchangeRate); const ratePerPcs = pcs > 0 ? totalInr / pcs : 0; return <div key={line.key} className="rounded-3xl border border-slate-200 p-4"><div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between"><div><h4 className="text-base font-semibold text-slate-900">{line.label}</h4><p className="text-sm text-slate-500">Stock: {line.stock}</p></div><div className="grid grid-cols-2 gap-2 md:grid-cols-4"><SummaryCard label="Tot. RMB" value={formatNumber(totalRmb)} /><SummaryCard label="INR" value={`₹${formatNumber(totalInr)}`} /><SummaryCard label="Rate/Pcs" value={`₹${formatNumber(ratePerPcs)}`} /><SummaryCard label="Entered Pcs" value={formatNumber(pcs, 0)} /></div></div><div className="grid gap-4 md:grid-cols-2"><div><Label>Total Pcs for this variant</Label><Input type="number" value={line.pcs} onChange={e => updatePricingEntry(line.key, 'pcs', e.target.value)} /></div><div><Label>RMB/Pcs</Label><Input type="number" value={line.rmbPerPcs} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} /></div></div></div>; })}</div>
+            <div className="space-y-4">
+              {activeLines.map(line => {
+                const pcs = toNum(line.pcs);
+                const rmbPerPcs = toNum(line.rmbPerPcs);
+                const totalRmb = pcs * rmbPerPcs;
+                const totalInr = totalRmb * toNum(exchangeRate);
+                const ratePerPcs = pcs > 0 ? totalInr / pcs : 0;
+                const selectedVariantLabel = sourceMode === 'new'
+                  ? `${newProductName || 'New Product'} · ${line.label}`
+                  : `${selectedProduct?.name || 'Product'} · ${line.label}`;
+                return (
+                  <div key={line.key} className="rounded-3xl border border-slate-200 p-4">
+                    <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <h4 className="text-base font-semibold text-slate-900">Selected Variant</h4>
+                        <p className="text-sm text-slate-600">{selectedVariantLabel}</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                        <SummaryCard label="Stock" value={formatNumber(line.stock, 0)} />
+                        <SummaryCard label="Tot. RMB" value={formatNumber(totalRmb)} />
+                        <SummaryCard label="INR" value={`₹${formatNumber(totalInr)}`} />
+                        <SummaryCard label="Rate/Pcs" value={`₹${formatNumber(ratePerPcs)}`} />
+                        <SummaryCard label="Entered Pcs" value={formatNumber(pcs, 0)} />
+                        <SummaryCard label="Total Pcs for this variant" value={formatNumber(pcs, 0)} />
+                        <SummaryCard label="RMB/Pcs" value={formatNumber(rmbPerPcs)} />
+                      </div>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <Label>Total Pcs for this variant</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={toNumberInputValue(line.pcs)}
+                          onChange={e => updatePricingEntry(line.key, 'pcs', e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <Label>RMB/Pcs</Label>
+                        <Input type="number" min="0" value={toNumberInputValue(line.rmbPerPcs)} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900"><IndianRupee className="h-4 w-4" /> Pricing Setup</div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div><Label>Exchange Rate</Label><Input type="number" min="0" value={exchangeRate} onChange={e => setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+                  <div><Label>Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
+                  <div><Label>Selling Price (per pcs)</Label><Input type="number" min="0" value={sellingPrice} onChange={e => setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+                  {sourceMode !== 'new' && <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>}
+                  {orderType !== 'customer_trade' && (
+                    <div className="md:col-span-2 grid md:grid-cols-[1fr_auto] gap-2">
+                      <div><Label>Broker</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select broker</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                      <div className="self-end"><Button type="button" variant="outline" onClick={createBrokerQuick} title="Create broker"><Plus className="w-4 h-4" /></Button></div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">Entered Totals</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <SummaryCard label="Entered Pcs" value={formatNumber(activeLines.reduce((s, l) => s + toNum(l.pcs), 0), 0)} />
+                  <SummaryCard label="Entered RMB" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.pcs) * toNum(l.rmbPerPcs)), 0))} />
+                  <SummaryCard label="Selected Variants" value={formatNumber(activeLines.length, 0)} />
+                  <SummaryCard label="Exchange" value={formatNumber(toNum(exchangeRate))} />
+                </div>
+              </div>
+            </div>
             <div className="mt-6 flex justify-end"><button onClick={() => setWizardStep('cartons')} disabled={!canGoCartonsNext} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next <ArrowRight className="h-4 w-4" /></button></div>
           </div>
         )}
