@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
-import { FreightBroker, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
+import { addCategory, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
+import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 
@@ -18,6 +18,12 @@ type DraftLine = {
   stock: number;
   pcs: number | '';
   rmbPerPcs: number | '';
+  piecesPerCarton?: number | '';
+  totalCartons?: number | '';
+  conversionRate?: number | '';
+  cbmPerCarton?: number | '';
+  cbmRate?: number | '';
+  sellingPrice?: number | '';
 };
 
 type LineCartonAssignment = { cartonId: string; qty: number | '' };
@@ -27,7 +33,16 @@ type CartonCbmDraft = { cartons: number; cbmPerCarton: number | ''; cbmRate: num
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const to2 = (n: number) => Number.isFinite(n) ? Number(n.toFixed(2)) : 0;
 const toNum = (v: number | '') => (v === '' ? 0 : Number(v));
-const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const toNumberInputValue = (value: unknown) => {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value === 'string' && value.trim().toLowerCase() === 'undefined') return '';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : '';
+};
+const formatNumber = (value: number, digits = 2) => {
+  const safe = Number.isFinite(value) ? value : 0;
+  return safe.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+};
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
@@ -58,6 +73,7 @@ export default function FreightBooking() {
   const [activeTab, setActiveTab] = useState<FreightTab>('inquiries');
   const [products, setProducts] = useState<Product[]>([]);
   const [inquiries, setInquiries] = useState<FreightInquiry[]>([]);
+  const [confirmedOrders, setConfirmedOrders] = useState<FreightConfirmedOrder[]>([]);
   const [brokers, setBrokers] = useState<FreightBroker[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
 
@@ -76,6 +92,7 @@ export default function FreightBooking() {
 
   const [newProductName, setNewProductName] = useState('');
   const [newProductCategory, setNewProductCategory] = useState('');
+  const [newCategoryError, setNewCategoryError] = useState('');
   const [newProductImage, setNewProductImage] = useState('');
   const [newProductDetails, setNewProductDetails] = useState('');
 
@@ -94,13 +111,28 @@ export default function FreightBooking() {
   const [cbmMode, setCbmMode] = useState<CbmMode>('undecided');
   const [cartonCbmDrafts, setCartonCbmDrafts] = useState<Record<string, CartonCbmDraft>>({});
   const [showConfirmSave, setShowConfirmSave] = useState(false);
+  const [convertingInquiryId, setConvertingInquiryId] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
     setProducts(data.products || []);
     setCategories(data.categories || []);
     setInquiries(getFreightInquiries());
+    setConfirmedOrders(getFreightConfirmedOrders());
     setBrokers(getFreightBrokers());
+  };
+
+  const convertToConfirmedOrder = async (inquiry: FreightInquiry) => {
+    if (convertingInquiryId) return;
+    setConvertingInquiryId(inquiry.id);
+    try {
+      await convertInquiryToConfirmedOrder(inquiry.id);
+      refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Unable to convert inquiry to confirmed order.');
+    } finally {
+      setConvertingInquiryId(null);
+    }
   };
 
   useEffect(() => {
@@ -156,9 +188,20 @@ export default function FreightBooking() {
 
   const activeLines = useMemo(() => {
     if (sourceMode === 'new') {
-      const key = 'new-product-default';
-      const base = pricingEntries[key] || { key, label: 'Default', stock: 0, pcs: '', rmbPerPcs: '' };
-      return [base];
+      const rows = Object.values(pricingEntries || {}) as DraftLine[];
+      const baseRows = rows.length ? rows : [{ key: 'new-product-default', label: 'Variant 1', stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice } as DraftLine];
+      return baseRows.map(row => {
+        const piecesPerCarton = toNum(row.piecesPerCarton ?? '');
+        const totalCartons = toNum(row.totalCartons ?? '');
+        const pcs = piecesPerCarton > 0 && totalCartons > 0 ? piecesPerCarton * totalCartons : '';
+        return {
+          ...row,
+          stock: 0,
+          pcs,
+          conversionRate: row.conversionRate ?? exchangeRate,
+          sellingPrice: row.sellingPrice ?? sellingPrice,
+        };
+      });
     }
     return selectedVariants.map(variant => pricingEntries[variant.key] || {
       key: variant.key,
@@ -169,17 +212,26 @@ export default function FreightBooking() {
       variant: variant.variant,
       color: variant.color,
     });
-  }, [sourceMode, selectedVariants, pricingEntries]);
+  }, [sourceMode, selectedVariants, pricingEntries, exchangeRate, sellingPrice]);
 
   const distributedLines = useMemo(() => activeLines.flatMap(line => {
     const assignment = lineAssignments[line.key];
     if (!assignment || !assignment.cartonId || toNum(assignment.qty) <= 0) return [];
     const qty = toNum(assignment.qty);
     const rmbPerPcs = toNum(line.rmbPerPcs);
-    const inrRate = toNum(exchangeRate);
+    const inrRate = sourceMode === 'new' ? toNum(line.conversionRate ?? '') : toNum(exchangeRate);
     const totalRmb = qty * rmbPerPcs;
     const totalInr = totalRmb * inrRate;
     const ratePerPcs = qty > 0 ? totalInr / qty : 0;
+    const cbmPerCarton = toNum(line.cbmPerCarton ?? '');
+    const totalCartons = toNum(line.totalCartons ?? '');
+    const totalCbm = cbmPerCarton * totalCartons;
+    const cbmRate = toNum(line.cbmRate ?? '');
+    const totalCbmCost = totalCbm * cbmRate;
+    const cbmPerPiece = qty > 0 ? totalCbmCost / qty : 0;
+    const productCost = ratePerPcs + cbmPerPiece;
+    const lineSellingPrice = toNum(line.sellingPrice ?? '');
+    const profitPercent = lineSellingPrice > 0 ? ((lineSellingPrice - productCost) / lineSellingPrice) * 100 : 0;
     const cartonLabel = draftCartons.find(c => c.id === assignment.cartonId)?.label || assignment.cartonId;
     return [{
       ...line,
@@ -190,10 +242,15 @@ export default function FreightBooking() {
       totalInr,
       inrRate,
       ratePerPcs,
-      productCost: ratePerPcs,
+      totalCbm,
+      totalCbmCost,
+      cbmPerPiece,
+      productCost,
+      lineSellingPrice,
+      profitPercent,
       partyRate: ratePerPcs,
     }];
-  }), [activeLines, lineAssignments, exchangeRate, draftCartons]);
+  }), [activeLines, lineAssignments, exchangeRate, draftCartons, sourceMode]);
 
   const draftTotals = useMemo(() => distributedLines.reduce((acc, l) => ({ totalPcs: acc.totalPcs + l.qty, totalRmb: acc.totalRmb + l.totalRmb, totalInr: acc.totalInr + l.totalInr }), { totalPcs: 0, totalRmb: 0, totalInr: 0 }), [distributedLines]);
 
@@ -232,6 +289,7 @@ export default function FreightBooking() {
     setSelectedVariantKeys([]);
     setNewProductName('');
     setNewProductCategory('');
+    setNewCategoryError('');
     setNewProductImage('');
     setNewProductDetails('');
     setOrderType('in_house');
@@ -312,7 +370,7 @@ export default function FreightBooking() {
     const seed: Record<string, DraftLine> = {};
     const assignmentSeed: Record<string, LineCartonAssignment> = {};
     if (sourceMode === 'new') {
-      seed['new-product-default'] = pricingEntries['new-product-default'] || { key: 'new-product-default', label: 'Default', stock: 0, pcs: '', rmbPerPcs: '' };
+      seed['new-product-default'] = pricingEntries['new-product-default'] || { key: 'new-product-default', label: 'Variant 1', stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice };
       assignmentSeed['new-product-default'] = lineAssignments['new-product-default'] || { cartonId: selectedCartonIds[0], qty: '' };
     } else {
       selectedVariants.forEach(v => {
@@ -325,9 +383,27 @@ export default function FreightBooking() {
     setWizardStep('pricing');
   };
 
-  const updatePricingEntry = (key: string, field: 'pcs' | 'rmbPerPcs', value: string) => {
+  const updatePricingEntry = (key: string, field: 'label' | 'pcs' | 'piecesPerCarton' | 'totalCartons' | 'rmbPerPcs' | 'conversionRate' | 'cbmPerCarton' | 'cbmRate' | 'sellingPrice', value: string) => {
+    if (field === 'label') {
+      setPricingEntries(prev => {
+        const current = prev[key] || { key, label: 'Selected Variant', stock: 0, pcs: '', rmbPerPcs: '' };
+        return { ...prev, [key]: { ...current, label: value } };
+      });
+      return;
+    }
     const parsed = value === '' ? '' : Number(value);
-    setPricingEntries(prev => ({ ...prev, [key]: { ...prev[key], [field]: Number.isNaN(parsed) ? '' : parsed } }));
+    setPricingEntries(prev => {
+      const current = prev[key] || { key, label: 'Selected Variant', stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice: '' };
+      return { ...prev, [key]: { ...current, [field]: Number.isNaN(parsed) ? '' : parsed } };
+    });
+  };
+
+  const addNewVariantPricingLine = () => {
+    const key = `new-variant-${uid()}`;
+    setPricingEntries(prev => ({
+      ...prev,
+      [key]: { key, label: `Variant ${(Object.keys(prev).length || 0) + 1}`, stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice: sellingPrice === '' ? '' : sellingPrice }
+    }));
   };
 
   const updateAssignment = (lineKey: string, field: 'cartonId' | 'qty', value: string) => {
@@ -392,6 +468,40 @@ export default function FreightBooking() {
     refresh();
   };
 
+  const createBrokerQuick = async () => {
+    const name = window.prompt('Enter broker name')?.trim();
+    if (!name) return;
+    const broker = await createFreightBroker({ name });
+    setBrokerId(broker.id);
+    refresh();
+  };
+
+  const addCategoryQuick = async () => {
+    const name = newProductCategory.trim();
+    if (!name) return;
+    const exists = categories.some(c => c.toLowerCase() === name.toLowerCase());
+    if (exists) {
+      setNewCategoryError('Category already exists.');
+      alert('Category already exists.');
+      return;
+    }
+    await addCategory(name);
+    setNewProductCategory(name);
+    setNewCategoryError('');
+    refresh();
+  };
+
+  const handleNewProductImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      setNewProductImage(result);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const ensureCategory = async (name: string) => {
     const c = name.trim();
     if (!c) return;
@@ -407,11 +517,20 @@ export default function FreightBooking() {
       const qty = line.qty;
       const cbmTarget = cbmMode === 'wholeOrder' ? 'whole-order' : line.cartonId;
       const cbm = cartonCbmDrafts[cbmTarget];
-      const perLineCbmCost = cbmMode === 'wholeOrder'
-        ? (draftTotals.totalPcs > 0 ? (toNum(cbm?.totalCbmCost || 0) * (qty / draftTotals.totalPcs)) : 0)
-        : toNum(cbm?.totalCbmCost || 0);
+      const perLineCbmCost = sourceMode === 'new'
+        ? toNum((line as any).totalCbmCost || 0)
+        : cbmMode === 'wholeOrder'
+          ? (draftTotals.totalPcs > 0 ? (toNum(cbm?.totalCbmCost || 0) * (qty / draftTotals.totalPcs)) : 0)
+          : toNum(cbm?.totalCbmCost || 0);
       const cbmPerPiece = qty > 0 ? perLineCbmCost / qty : 0;
-      const productCostPerPiece = qty > 0 ? (totalInr / qty) + cbmPerPiece : 0;
+      const productCostPerPiece = sourceMode === 'new' ? toNum((line as any).productCost || 0) : (qty > 0 ? (totalInr / qty) + cbmPerPiece : 0);
+      const lineConversionRate = sourceMode === 'new' ? toNum((line as any).conversionRate ?? '') : toNum(exchangeRate);
+      const lineSellingPrice = sourceMode === 'new' ? toNum((line as any).lineSellingPrice || (line as any).sellingPrice || 0) : toNum(sellingPrice);
+      const lineTotalCartons = sourceMode === 'new' ? toNum((line as any).totalCartons || 0) : 0;
+      const linePcsPerCarton = sourceMode === 'new' ? toNum((line as any).piecesPerCarton || 0) : 0;
+      const lineCbmPerCarton = sourceMode === 'new' ? toNum((line as any).cbmPerCarton || 0) : toNum(cbm?.cbmPerCarton || 0);
+      const lineCbmRate = sourceMode === 'new' ? toNum((line as any).cbmRate || 0) : toNum(cbm?.cbmRate || 0);
+      const lineProfitPercent = lineSellingPrice > 0 ? to2(((lineSellingPrice - productCostPerPiece) / lineSellingPrice) * 100) : 0;
       return {
         id: `${line.key}-${idx}-${uid()}`,
         sourceType: sourceMode,
@@ -423,17 +542,19 @@ export default function FreightBooking() {
         category: sourceMode === 'inventory' ? selectedProduct?.category : newProductCategory,
         baseProductDetails: sourceMode === 'new' ? newProductDetails : selectedProduct?.description,
         quantity: qty,
+        piecesPerCartoon: linePcsPerCarton,
+        numberOfCartoons: lineTotalCartons,
         rmbPricePerPiece: toNum(line.rmbPerPcs),
         inrPricePerPiece: qty > 0 ? totalInr / qty : 0,
-        exchangeRate: toNum(exchangeRate),
-        cbmPerCartoon: toNum(cbm?.cbmPerCarton || 0),
-        cbmRate: toNum(cbm?.cbmRate || 0),
+        exchangeRate: lineConversionRate,
+        cbmPerCartoon: lineCbmPerCarton,
+        cbmRate: lineCbmRate,
         cbmCost: to2(perLineCbmCost),
         cbmPerPiece: to2(cbmPerPiece),
         productCostPerPiece: to2(productCostPerPiece),
-        sellingPrice: toNum(sellingPrice),
-        profitPerPiece: to2(toNum(sellingPrice) - productCostPerPiece),
-        profitPercent: productCostPerPiece > 0 ? to2(((toNum(sellingPrice) - productCostPerPiece) / productCostPerPiece) * 100) : 0,
+        sellingPrice: lineSellingPrice,
+        profitPerPiece: to2(lineSellingPrice - productCostPerPiece),
+        profitPercent: lineProfitPercent,
         notes: cartonMap.get(line.cartonId),
       };
     });
@@ -521,7 +642,43 @@ export default function FreightBooking() {
       </div>
 
       {activeTab === 'orders' && (
-        <Card><CardContent className="pt-6 text-sm text-muted-foreground">Orders tab is reserved for future confirmed order flow.</CardContent></Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Confirmed Orders</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Ready to confirm from inquiries</div>
+              {inquiries.filter(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)).slice(0, 8).map(inquiry => (
+                <div key={inquiry.id} className="flex flex-col gap-2 rounded-xl border p-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-medium text-slate-900">{inquiry.productName}</div>
+                    <div className="text-xs text-muted-foreground">{inquiry.category || '—'} · {formatNumber(inquiry.totalPieces || 0, 0)} pcs · ₹{formatNumber(inquiry.totalInr || 0)}</div>
+                  </div>
+                  <Button size="sm" onClick={() => convertToConfirmedOrder(inquiry)} disabled={!!convertingInquiryId}>
+                    {convertingInquiryId === inquiry.id ? 'Converting...' : 'Confirm Order'}
+                  </Button>
+                </div>
+              ))}
+              {!inquiries.some(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)) && (
+                <div className="text-sm text-muted-foreground">All inquiries are already converted.</div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Existing confirmed orders</div>
+              {confirmedOrders.map(order => (
+                <div key={order.id} className="rounded-xl border p-3">
+                  <div className="font-medium text-slate-900">{order.productName}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
+                  </div>
+                </div>
+              ))}
+              {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {activeTab === 'brokers' && (
@@ -621,8 +778,24 @@ export default function FreightBooking() {
             <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
             <div className="grid gap-4 md:grid-cols-2">
               <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
-              <div><Label>Category</Label><Input value={newProductCategory} onChange={e => setNewProductCategory(e.target.value)} placeholder="Enter category" /></div>
-              <div><Label>Product Image URL / data URL</Label><Input value={newProductImage} onChange={e => setNewProductImage(e.target.value)} placeholder="https://..." /></div>
+              <div>
+                <Label>Category</Label>
+                <div className="mt-1 flex gap-2">
+                  <Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select or create category" />
+                  <Button type="button" variant="outline" onClick={addCategoryQuick} title="Add category"><Plus className="h-4 w-4" /></Button>
+                </div>
+                <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
+                {newCategoryError && <p className="mt-1 text-xs text-rose-600">{newCategoryError}</p>}
+              </div>
+              <div>
+                <Label>Product Image</Label>
+                <div className="mt-1 flex items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3">
+                  <div className="h-14 w-14 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                    {newProductImage ? <img src={newProductImage} alt="Product preview" className="h-full w-full object-cover" /> : null}
+                  </div>
+                  <Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" />
+                </div>
+              </div>
               <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>
               <div className="md:col-span-2"><Label>Additional Product Details</Label><textarea value={newProductDetails} onChange={e => setNewProductDetails(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={4} /></div>
             </div>
@@ -640,8 +813,140 @@ export default function FreightBooking() {
         {wizardStep === 'pricing' && (
           <div>
             <button onClick={() => setWizardStep(sourceMode === 'new' ? 'newInquiry' : 'variants')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="mb-5 grid gap-4 lg:grid-cols-2"><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900"><IndianRupee className="h-4 w-4" /> Pricing Setup</div><div className="grid gap-4 md:grid-cols-2"><div><Label>Exchange Rate</Label><Input type="number" value={exchangeRate} onChange={e => setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div><div><Label>Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div><div><Label>Selling Price (per pcs)</Label><Input type="number" value={sellingPrice} onChange={e => setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div><div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>{orderType !== 'customer_trade' && <div className="md:col-span-2 grid md:grid-cols-2 gap-2"><div><Label>Broker</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select broker</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div><div><Label>Create Broker</Label><div className="flex gap-2"><Input value={newBrokerName} onChange={e => setNewBrokerName(e.target.value)} /><Button type="button" variant="outline" onClick={createBroker}><Plus className="w-4 h-4" /></Button></div></div></div>}</div></div><div className="rounded-3xl border border-slate-200 bg-white p-4"><div className="mb-3 text-sm font-semibold text-slate-900">Entered Totals</div><div className="grid grid-cols-2 gap-3"><SummaryCard label="Entered Pcs" value={formatNumber(activeLines.reduce((s, l) => s + toNum(l.pcs), 0), 0)} /><SummaryCard label="Entered RMB" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.pcs) * toNum(l.rmbPerPcs)), 0))} /><SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} /><SummaryCard label="Exchange" value={`${exchangeRate || 0}`} /></div></div></div>
-            <div className="space-y-4">{activeLines.map(line => { const pcs = toNum(line.pcs); const totalRmb = pcs * toNum(line.rmbPerPcs); const totalInr = totalRmb * toNum(exchangeRate); const ratePerPcs = pcs > 0 ? totalInr / pcs : 0; return <div key={line.key} className="rounded-3xl border border-slate-200 p-4"><div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between"><div><h4 className="text-base font-semibold text-slate-900">{line.label}</h4><p className="text-sm text-slate-500">Stock: {line.stock}</p></div><div className="grid grid-cols-2 gap-2 md:grid-cols-4"><SummaryCard label="Tot. RMB" value={formatNumber(totalRmb)} /><SummaryCard label="INR" value={`₹${formatNumber(totalInr)}`} /><SummaryCard label="Rate/Pcs" value={`₹${formatNumber(ratePerPcs)}`} /><SummaryCard label="Entered Pcs" value={formatNumber(pcs, 0)} /></div></div><div className="grid gap-4 md:grid-cols-2"><div><Label>Total Pcs for this variant</Label><Input type="number" value={line.pcs} onChange={e => updatePricingEntry(line.key, 'pcs', e.target.value)} /></div><div><Label>RMB/Pcs</Label><Input type="number" value={line.rmbPerPcs} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} /></div></div></div>; })}</div>
+            <div className="space-y-4">
+              {sourceMode === 'new' && (
+                <div className="flex justify-end">
+                  <Button type="button" variant="outline" onClick={addNewVariantPricingLine}><Plus className="h-4 w-4 mr-1" /> Add Variant</Button>
+                </div>
+              )}
+              {activeLines.map(line => {
+                const pcs = toNum(line.pcs);
+                const rmbPerPcs = toNum(line.rmbPerPcs);
+                const conversionRate = sourceMode === 'new' ? toNum(line.conversionRate ?? '') : toNum(exchangeRate);
+                const totalRmb = pcs * rmbPerPcs;
+                const totalInr = totalRmb * conversionRate;
+                const ratePerPcs = pcs > 0 ? totalInr / pcs : 0;
+                const piecesPerCarton = toNum(line.piecesPerCarton ?? '');
+                const totalCartons = toNum(line.totalCartons ?? '');
+                const cbmPerCarton = toNum(line.cbmPerCarton ?? '');
+                const totalCbm = cbmPerCarton * totalCartons;
+                const cbmRate = toNum(line.cbmRate ?? '');
+                const totalCbmCost = totalCbm * cbmRate;
+                const cbmPerPiece = pcs > 0 ? totalCbmCost / pcs : 0;
+                const productCost = ratePerPcs + cbmPerPiece;
+                const lineSellingPrice = toNum(line.sellingPrice ?? '');
+                const profitPercent = lineSellingPrice > 0 ? ((lineSellingPrice - productCost) / lineSellingPrice) * 100 : 0;
+                const selectedVariantLabel = sourceMode === 'new'
+                  ? `${newProductName || 'New Product'} · ${line.label}`
+                  : `${selectedProduct?.name || 'Product'} · ${line.label}`;
+                return (
+                  <div key={line.key} className="rounded-3xl border border-slate-200 p-4">
+                    <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <h4 className="text-base font-semibold text-slate-900">Selected Variant</h4>
+                        <p className="text-sm text-slate-600">{selectedVariantLabel}</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                        <SummaryCard label="Stock" value={formatNumber(line.stock, 0)} />
+                        <SummaryCard label="Tot. RMB" value={formatNumber(totalRmb)} />
+                        <SummaryCard label="INR" value={`₹${formatNumber(totalInr)}`} />
+                        <SummaryCard label="Rate/Pcs" value={`₹${formatNumber(ratePerPcs)}`} />
+                        <SummaryCard label="Entered Pcs" value={formatNumber(pcs, 0)} />
+                        <SummaryCard label="Total Pcs for this variant" value={formatNumber(pcs, 0)} />
+                        <SummaryCard label="RMB/Pcs" value={formatNumber(rmbPerPcs)} />
+                        {sourceMode === 'new' && <SummaryCard label="Total Cartons" value={formatNumber(totalCartons, 0)} />}
+                        {sourceMode === 'new' && <SummaryCard label="Total CBM" value={formatNumber(totalCbm, 3)} />}
+                        {sourceMode === 'new' && <SummaryCard label="Total CBM Cost" value={`₹${formatNumber(totalCbmCost)}`} />}
+                        {sourceMode === 'new' && <SummaryCard label="CBM/Piece" value={`₹${formatNumber(cbmPerPiece)}`} />}
+                        {sourceMode === 'new' && <SummaryCard label="Product Cost" value={`₹${formatNumber(productCost)}`} />}
+                        {sourceMode === 'new' && <SummaryCard label="Profit %" value={formatNumber(profitPercent)} />}
+                      </div>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                      {sourceMode === 'new' && (
+                        <>
+                          <div>
+                            <Label>Variant Name</Label>
+                            <Input value={line.label} onChange={e => updatePricingEntry(line.key, 'label', e.target.value)} />
+                          </div>
+                          <div>
+                            <Label>Pcs/CTN</Label>
+                            <Input type="number" min="0" value={toNumberInputValue(line.piecesPerCarton)} onChange={e => updatePricingEntry(line.key, 'piecesPerCarton', e.target.value)} />
+                          </div>
+                          <div>
+                            <Label>Total Cartons</Label>
+                            <Input type="number" min="0" value={toNumberInputValue(line.totalCartons)} onChange={e => updatePricingEntry(line.key, 'totalCartons', e.target.value)} />
+                          </div>
+                          <div>
+                            <Label>Conversion Rate</Label>
+                            <Input type="number" min="0" value={toNumberInputValue(line.conversionRate)} onChange={e => updatePricingEntry(line.key, 'conversionRate', e.target.value)} />
+                          </div>
+                        </>
+                      )}
+                      <div>
+                        <Label>Total Pcs for this variant</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={toNumberInputValue(line.pcs)}
+                          readOnly={sourceMode === 'new'}
+                          onChange={e => sourceMode !== 'new' && updatePricingEntry(line.key, 'pcs', e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <Label>RMB/Pcs</Label>
+                        <Input type="number" min="0" value={toNumberInputValue(line.rmbPerPcs)} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} />
+                      </div>
+                      {sourceMode === 'new' && (
+                        <>
+                          <div>
+                            <Label>CBM/CTN</Label>
+                            <Input type="number" min="0" value={toNumberInputValue(line.cbmPerCarton)} onChange={e => updatePricingEntry(line.key, 'cbmPerCarton', e.target.value)} />
+                          </div>
+                          <div>
+                            <Label>CBM Rate</Label>
+                            <Input type="number" min="0" value={toNumberInputValue(line.cbmRate)} onChange={e => updatePricingEntry(line.key, 'cbmRate', e.target.value)} />
+                          </div>
+                          <div>
+                            <Label>Selling Price</Label>
+                            <Input type="number" min="0" value={toNumberInputValue(line.sellingPrice)} onChange={e => updatePricingEntry(line.key, 'sellingPrice', e.target.value)} />
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900"><IndianRupee className="h-4 w-4" /> Pricing Setup</div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div><Label>Exchange Rate</Label><Input type="number" min="0" value={exchangeRate} onChange={e => setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+                  <div><Label>Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
+                  <div><Label>Selling Price (per pcs)</Label><Input type="number" min="0" value={sellingPrice} onChange={e => setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+                  {sourceMode !== 'new' && <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>}
+                  {orderType !== 'customer_trade' && (
+                    <div className="md:col-span-2 grid md:grid-cols-[1fr_auto] gap-2">
+                      <div><Label>Broker</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select broker</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                      <div className="self-end"><Button type="button" variant="outline" onClick={createBrokerQuick} title="Create broker"><Plus className="w-4 h-4" /></Button></div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">Entered Totals</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <SummaryCard label="Entered Pcs" value={formatNumber(activeLines.reduce((s, l) => s + toNum(l.pcs), 0), 0)} />
+                  <SummaryCard label="Entered RMB" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.pcs) * toNum(l.rmbPerPcs)), 0))} />
+                  <SummaryCard label="Selected Variants" value={formatNumber(activeLines.length, 0)} />
+                  <SummaryCard label="Exchange" value={formatNumber(toNum(exchangeRate))} />
+                  {sourceMode === 'new' && <SummaryCard label="Grand Total CBM" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.cbmPerCarton ?? '') * toNum(l.totalCartons ?? '')), 0), 3)} />}
+                  {sourceMode === 'new' && <SummaryCard label="Grand CBM Cost" value={`₹${formatNumber(activeLines.reduce((s, l) => s + ((toNum(l.cbmPerCarton ?? '') * toNum(l.totalCartons ?? '')) * toNum(l.cbmRate ?? '')), 0))}`} />}
+                  {sourceMode === 'new' && <SummaryCard label="Grand INR" value={`₹${formatNumber(activeLines.reduce((s, l) => s + ((toNum(l.pcs) * toNum(l.rmbPerPcs)) * toNum(l.conversionRate ?? '')), 0))}`} />}
+                </div>
+              </div>
+            </div>
             <div className="mt-6 flex justify-end"><button onClick={() => setWizardStep('cartons')} disabled={!canGoCartonsNext} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next <ArrowRight className="h-4 w-4" /></button></div>
           </div>
         )}
