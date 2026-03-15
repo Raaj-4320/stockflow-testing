@@ -545,6 +545,7 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
   const rows = await readRows(file, 'Transactions');
   const data = loadData();
   const errors: ImportIssue[] = [];
+  const warnings: ImportIssue[] = [];
   const productsById = new Map((data.products || []).map(p => [toStr(p.id), p]));
   const customersById = new Map((data.customers || []).map(c => [toStr(c.id), c]));
   const customersByPhone = new Map((data.customers || []).map(c => [normPhone(toStr(c.phone)), c]));
@@ -565,6 +566,52 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
     }
     if (!grouped.has(txId)) grouped.set(txId, []);
     grouped.get(txId)!.push({ ...r, __rowNo: rowNo });
+  });
+
+  const uploadedSaleQtyByProduct = new Map<string, number>();
+  const uploadedSaleFirstRowByProduct = new Map<string, number>();
+  rows.forEach((r, i) => {
+    const type = toStr(r['Type']).toLowerCase();
+    if (type !== 'sale') return;
+    const productId = toStr(r['Product ID']);
+    const qty = toNum(r['Quantity']);
+    if (!productId || !Number.isFinite(qty) || qty <= 0) return;
+    uploadedSaleQtyByProduct.set(productId, (uploadedSaleQtyByProduct.get(productId) || 0) + qty);
+    if (!uploadedSaleFirstRowByProduct.has(productId)) uploadedSaleFirstRowByProduct.set(productId, i + 2);
+  });
+
+  uploadedSaleQtyByProduct.forEach((uploadedQty, productId) => {
+    const rowNo = uploadedSaleFirstRowByProduct.get(productId) || 1;
+    const product = productsById.get(productId);
+    if (!product) return;
+    const totalPurchase = Number(product.totalPurchase);
+    if (!Number.isFinite(totalPurchase)) {
+      errors.push({
+        sheet: 'Transactions',
+        row: rowNo,
+        field: 'Quantity',
+        message: `Total Purchase is missing or invalid for product '${product.name || product.id}'.`,
+      });
+      return;
+    }
+    if (uploadedQty > totalPurchase) {
+      errors.push({
+        sheet: 'Transactions',
+        row: rowNo,
+        field: 'Quantity',
+        message: `Uploaded transaction quantity for product '${product.name || product.id}' is ${uploadedQty}, which exceeds Total Purchase ${totalPurchase}.`,
+      });
+    }
+
+    const totalSold = Number(product.totalSold);
+    if (Number.isFinite(totalSold) && uploadedQty !== totalSold) {
+      warnings.push({
+        sheet: 'Transactions',
+        row: rowNo,
+        field: 'Quantity',
+        message: `Uploaded transaction quantity for product '${product.name || product.id}' is ${uploadedQty}, but Total Sold is ${totalSold}. Import allowed with warning.`,
+      });
+    }
   });
 
   const importTx: Transaction[] = [];
@@ -673,9 +720,6 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
 
       const currentStock = stockByProduct.get(product.id) || 0;
       const currentSold = soldByProduct.get(product.id) || 0;
-      if (type === 'sale' && qty > currentStock) {
-        errors.push({ sheet: 'Transactions', row: rowNo, field: 'Quantity', message: `Insufficient stock for barcode ${product.barcode}` });
-      }
       if (type === 'return' && qty > currentSold) {
         errors.push({ sheet: 'Transactions', row: rowNo, field: 'Quantity', message: `Return quantity exceeds sold quantity for barcode ${product.barcode}` });
       }
@@ -773,7 +817,8 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
   }, onProgress, 'Importing transactions');
 
   onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Transaction import completed.' });
-  return { totalRows: rows.length, importedRows: importTx.length, errors: [], summary: `Imported ${importTx.length} transactions successfully.` };
+  const warningSummary = warnings.length ? ` Warnings: ${warnings.map(w => w.message).join(' | ')}` : '';
+  return { totalRows: rows.length, importedRows: importTx.length, errors: [], summary: `Imported ${importTx.length} transactions successfully.${warningSummary}` };
 };
 
 export const importPurchaseFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
