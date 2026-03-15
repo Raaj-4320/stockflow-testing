@@ -10,6 +10,7 @@ export interface Product {
   image: string; // Base64 or URL
   category: string;
   totalSold?: number;
+  totalPurchase?: number;
   hsn?: string;
   variants?: string[];
   colors?: string[];
