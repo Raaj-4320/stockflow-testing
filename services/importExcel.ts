@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { CartItem, Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
-import { addCategory, addCustomer, addProduct, createPurchaseOrder, loadData, processTransaction, saveData, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
+import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 
 export type ImportIssue = { sheet: string; row: number; field: string; message: string };
@@ -814,15 +814,7 @@ export const importTransactionsFromFile = async (
   if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, warnings, summary: 'Validation failed. No transactions imported.' };
 
   if (isHistoricalMode) {
-    const latest = loadData();
-    const importedIds = new Set(importTx.map(tx => tx.id));
-    const mergedTransactions = [...importTx, ...latest.transactions.filter(tx => !importedIds.has(tx.id))]
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-    await saveData(
-      { ...latest, transactions: mergedTransactions },
-      { reason: 'importTransactions_historical_only', auditOperation: 'CREATE' }
-    );
+    await addHistoricalTransactions(importTx);
 
     onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Historical transaction import completed.' });
     const summary = warnings.length

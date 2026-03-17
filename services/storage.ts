@@ -2516,6 +2516,46 @@ syncToCloud({ ...data }),
   return fallbackState;
 };
 
+
+export const addHistoricalTransactions = async (transactions: Transaction[]): Promise<Transaction[]> => {
+  if (!Array.isArray(transactions) || transactions.length === 0) {
+    return loadData().transactions;
+  }
+
+  const data = loadData();
+  const existingIds = new Set(data.transactions.map(t => t.id));
+  const incoming = transactions.filter(tx => tx && tx.id && !existingIds.has(tx.id));
+  if (!incoming.length) {
+    return data.transactions;
+  }
+
+  const merged = sortTransactionsDesc([...incoming, ...data.transactions]);
+
+  if (!db) {
+    await saveData({ ...data, transactions: merged }, { throwOnError: true, reason: 'addHistoricalTransactions_local_fallback', auditOperation: 'CREATE' });
+    return merged;
+  }
+
+  await Promise.all(incoming.map(tx => upsertTransactionInSubcollection(tx, 'addHistoricalTransactions_subcollection')));
+
+  memoryState = { ...memoryState, transactions: sortTransactionsDesc([...incoming, ...memoryState.transactions]) };
+  emitLocalStorageUpdate();
+
+  void Promise.all([
+    writeAuditEvent('CREATE', {
+      reason: 'addHistoricalTransactions_subcollection',
+      migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
+      transactionIds: incoming.map(tx => tx.id),
+      transactionsCount: incoming.length,
+    }),
+    syncToCloud({ ...data }),
+  ]).catch(error => {
+    console.error('[storage-transactions] addHistoricalTransactions side effects failed', error);
+  });
+
+  return memoryState.transactions;
+};
+
 export const deleteTransaction = (transactionId: string): Transaction[] => {
   const data = loadData();
   const next = data.transactions.filter(t => t.id !== transactionId);
