@@ -2584,3 +2584,31 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
 
   return next;
 };
+
+export const updateTransaction = async (updatedTransaction: Transaction): Promise<Transaction[]> => {
+  const data = loadData();
+  const next = sortTransactionsDesc(data.transactions.map(t => t.id === updatedTransaction.id ? updatedTransaction : t));
+
+  if (!db) {
+    await saveData({ ...data, transactions: next }, { throwOnError: true, reason: 'updateTransaction_local_fallback', auditOperation: 'UPDATE' });
+    return next;
+  }
+
+  await upsertTransactionInSubcollection(updatedTransaction, 'updateTransaction_subcollection');
+  memoryState = { ...memoryState, transactions: sortTransactionsDesc(memoryState.transactions.map(t => t.id === updatedTransaction.id ? updatedTransaction : t)) };
+  emitLocalStorageUpdate();
+
+  void Promise.all([
+    writeAuditEvent('UPDATE', {
+      reason: 'updateTransaction_subcollection',
+      migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
+      transactionId: updatedTransaction.id,
+      transactionsCount: next.length,
+    }),
+    syncToCloud({ ...data }),
+  ]).catch(error => {
+    console.error('[storage-transactions] failed to update transaction', error);
+  });
+
+  return memoryState.transactions;
+};
