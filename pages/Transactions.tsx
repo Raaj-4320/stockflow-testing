@@ -4,10 +4,10 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
-import { loadData } from '../services/storage';
+import { loadData, deleteTransaction, updateTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
-import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText } from 'lucide-react';
+import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -25,6 +25,8 @@ export default function Transactions() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'summary' | 'invoice'>('summary');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [editingAmount, setEditingAmount] = useState('');
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -479,6 +481,8 @@ export default function Transactions() {
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedTx(tx)}><Eye className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditingTx(tx); setEditingAmount(String(Math.abs(tx.total))); }}><Edit className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => { if (window.confirm('Delete this transaction?')) { const next = deleteTransaction(tx.id); setTransactions(next); } }}><X className="w-3.5 h-3.5" /></Button>
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>
@@ -753,7 +757,7 @@ export default function Transactions() {
           </div>
       )}
 
-      <UploadImportModal
+      <UploadImportModal 
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
         title="Import Transactions"
@@ -766,6 +770,28 @@ export default function Transactions() {
           return result;
         }}
       />
+
+      {editingTx && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader><CardTitle>Edit Transaction #{editingTx.id.slice(-6)}</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <Input type="number" value={editingAmount} onChange={e => setEditingAmount(e.target.value)} placeholder="Amount" />
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => setEditingTx(null)}>Cancel</Button>
+                <Button onClick={async () => {
+                  const amt = Number(editingAmount || 0);
+                  if (!Number.isFinite(amt) || amt <= 0) return;
+                  const nextTx = { ...editingTx, total: editingTx.type === 'return' ? -Math.abs(amt) : Math.abs(amt) };
+                  const next = await updateTransaction(nextTx);
+                  setTransactions(next);
+                  setEditingTx(null);
+                }}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <ExportModal 
         isOpen={isExportModalOpen} 
