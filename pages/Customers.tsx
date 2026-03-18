@@ -121,6 +121,8 @@ export default function Customers() {
     
     if (filterType === 'has_due') {
         processed = processed.filter(c => c.totalDue > 0);
+    } else if (filterType === 'high_value') {
+        processed = processed.filter(c => c.totalSpend >= highValueThreshold && c.totalSpend > 0);
     }
     
     processed.sort((a, b) => {
@@ -133,7 +135,7 @@ export default function Customers() {
 
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
-  }, [customers, searchQuery, filterType, sortBy, sortOrder]);
+  }, [customers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
 
   const customerHistory = useMemo(() => {
       if (!viewingCustomer) return [];
@@ -585,6 +587,11 @@ export default function Customers() {
                 <Input placeholder="Search name or phone..." className="pl-9 h-10 rounded-xl bg-slate-50 border-slate-200" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
             </div>
             <div className="flex items-center bg-white rounded-xl px-2 border border-slate-200 shrink-0 shadow-sm">
+               <Select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="h-full text-xs border-0 bg-transparent w-28 font-bold text-slate-700">
+                   <option value="all_time">All</option>
+                   <option value="has_due">Has Due</option>
+                   <option value="high_value">High Spend</option>
+               </Select>
                <Select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)} className="h-full text-xs border-0 bg-transparent w-24 font-bold text-slate-700">
                    <option value="spend">Spend</option>
                    <option value="due">Due</option>
@@ -597,74 +604,35 @@ export default function Customers() {
           </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
-          {filteredData.displayCustomers.map((customer) => {
-              const isHighValue = customer.totalSpend >= highValueThreshold && customer.totalSpend > 0;
-              const hasDue = customer.totalDue > 0;
-              const lastActive = new Date(customer.lastVisit);
-              const isInactive = (new Date().getTime() - lastActive.getTime()) > (30 * 24 * 60 * 60 * 1000);
-              
-              return (
-                <Card 
-                    key={customer.id} 
-                    className={`cursor-pointer group flex flex-col hover:shadow-xl transition-all duration-300 relative border overflow-hidden min-h-[240px] ${isHighValue ? 'border-slate-800 bg-slate-50/10 shadow-md' : 'border-slate-200 bg-white'}`}
-                    onClick={() => setViewingCustomer(customer)}
-                >
-                    {isHighValue && (
-                        <div className="absolute top-0 right-0 p-1.5 z-10">
-                            <Badge className="bg-slate-800 text-white border-0 shadow-md text-[8px] h-4 sm:h-5 sm:text-[9px] font-bold uppercase tracking-tight">
-                                <Award className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1 mr-0.5 text-amber-400" /> Premium
-                            </Badge>
-                        </div>
-                    )}
-
-                    <CardContent className="p-2.5 sm:p-4 flex flex-col h-full justify-between items-center text-center">
-                        <div className="flex flex-col items-center w-full">
-                            <div className={`w-10 h-10 sm:w-16 sm:h-16 rounded-full flex items-center justify-center text-sm sm:text-2xl font-black text-white shadow-md transition-transform group-hover:scale-105 ${isHighValue ? 'bg-gradient-to-br from-slate-700 to-slate-900 ring-2 ring-slate-100' : 'bg-gradient-to-br from-slate-400 to-slate-500'}`}>
-                                {customer.name.charAt(0).toUpperCase()}
-                            </div>
-                            <div className="mt-2 sm:mt-3">
-                                <h3 className={`font-extrabold text-[11px] sm:text-sm line-clamp-1 leading-tight ${isHighValue ? 'text-slate-900' : 'text-slate-700'}`}>{customer.name}</h3>
-                                <p className="text-[10px] sm:text-xs text-slate-500 font-medium flex items-center justify-center gap-1 mt-1">
-                                    <Phone className="w-2.5 h-2.5" /> {customer.phone}
-                                </p>
-                            </div>
-                        </div>
-
-                        <div className="w-full grid grid-cols-2 gap-0.5 py-1.5 sm:py-2.5 border-y border-slate-100 mt-1.5 sm:mt-3">
-                            <div className="flex flex-col items-center">
-                                <span className="text-[7px] sm:text-[9px] uppercase font-bold text-slate-400 leading-none mb-0.5">Purchases</span>
-                                <span className={`text-[10px] sm:text-xs font-black ${isHighValue ? 'text-slate-900' : 'text-slate-800'}`}>₹{customer.totalSpend.toLocaleString()}</span>
-                            </div>
-                            <div className="flex flex-col items-center border-l border-slate-100">
-                                <span className="text-[7px] sm:text-[9px] uppercase font-bold text-slate-400 leading-none mb-0.5">Dues</span>
-                                <span className={`text-[10px] sm:text-xs font-black ${hasDue ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(0)}</span>
-                            </div>
-                        </div>
-
-                        <div className="w-full pt-1.5 flex flex-col gap-1.5 mt-auto">
-                            {hasDue ? (
-                                <Badge variant="destructive" className="w-full justify-center py-0.5 h-4 sm:h-5 text-[8px] sm:text-[10px] font-bold rounded-sm shadow-sm">
-                                    OUTSTANDING
-                                </Badge>
-                            ) : (
-                                <Badge variant="outline" className="w-full justify-center py-0.5 h-4 sm:h-5 text-[8px] sm:text-[10px] text-emerald-700 bg-emerald-50 border-emerald-100 rounded-sm font-bold">
-                                    SETTLED
-                                </Badge>
-                            )}
-                            
-                            <div className="flex items-center justify-between text-[7px] sm:text-[9px] text-slate-400 px-0.5 font-medium min-h-[14px]">
-                                <span className="flex items-center gap-1">
-                                    <Activity className={`w-2 h-2 sm:w-2.5 sm:h-2.5 ${isInactive ? 'text-slate-200' : 'text-emerald-500'}`} />
-                                    {isInactive ? 'Inactive' : 'Active'}
-                                </span>
-                                <span>{new Date(customer.lastVisit).toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' })}</span>
-                            </div>
-                        </div>
-                    </CardContent>
-                </Card>
-              );
-          })}
+      <div className="border rounded-xl overflow-x-auto bg-white">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/40">
+            <tr>
+              <th className="p-3 text-left">Customer</th>
+              <th className="p-3 text-left">Phone</th>
+              <th className="p-3 text-left">Visits</th>
+              <th className="p-3 text-left">Total Spend</th>
+              <th className="p-3 text-left">Due</th>
+              <th className="p-3 text-left">Last Visit</th>
+              <th className="p-3 text-left">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredData.displayCustomers.map((customer) => (
+              <tr key={customer.id} className="border-t hover:bg-muted/20">
+                <td className="p-3 font-medium">{customer.name}</td>
+                <td className="p-3">{customer.phone}</td>
+                <td className="p-3">{customer.visitCount}</td>
+                <td className="p-3">₹{customer.totalSpend.toLocaleString()}</td>
+                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(2)}</td>
+                <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
+                <td className="p-3">
+                  <Button size="sm" variant="outline" onClick={() => setViewingCustomer(customer)}>View Details</Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       {isAddModalOpen && (

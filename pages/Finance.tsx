@@ -288,6 +288,20 @@ export default function Finance() {
   const expectedClosingForOpenSession = openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : 0;
   const closingVariance = openSession ? (closingCountTotal - expectedClosingForOpenSession) : 0;
 
+  const todayFinanceBreakdown = useMemo(() => {
+    const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, todayISO()));
+    const returns = data.transactions.filter(t => t.type === 'return' && isSameDay(t.date, todayISO()));
+    const cashSales = sales.filter(t => t.paymentMethod === 'Cash').reduce((s, t) => s + Math.abs(t.total), 0);
+    const creditSales = sales.filter(t => t.paymentMethod === 'Credit').reduce((s, t) => s + Math.abs(t.total), 0);
+    const onlineSales = sales.filter(t => t.paymentMethod === 'Online').reduce((s, t) => s + Math.abs(t.total), 0);
+    const returnTotal = returns.reduce((s, t) => s + Math.abs(t.total), 0);
+    const totalSales = sales.reduce((s, t) => s + Math.abs(t.total), 0);
+    const cogs = sales.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+    const todayExpenses = expenses.filter(e => isSameDay(e.createdAt, todayISO())).reduce((s, e) => s + e.amount, 0);
+    const profit = totalSales - returnTotal - cogs - todayExpenses;
+    return { cashSales, creditSales, onlineSales, returnTotal, totalSales, todayExpenses, profit };
+  }, [data.transactions, expenses]);
+
   const expenseActivities: ExpenseActivity[] = useMemo(() => (Array.isArray(data.expenseActivities) ? data.expenseActivities : []), [data]);
 
   const filteredExpenses = useMemo(() => {
@@ -672,6 +686,17 @@ export default function Finance() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <StatCard label="System Cash Sale" value={formatINR(todayFinanceBreakdown.cashSales)} />
+                    <StatCard label="Credit Sale" value={formatINR(todayFinanceBreakdown.creditSales)} />
+                    <StatCard label="Online Sale" value={formatINR(todayFinanceBreakdown.onlineSales)} />
+                    <StatCard label="Returns" value={formatINR(todayFinanceBreakdown.returnTotal)} tone={todayFinanceBreakdown.returnTotal > 0 ? 'bad' : 'neutral'} />
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <StatCard label="Total Sales" value={formatINR(todayFinanceBreakdown.totalSales)} />
+                    <StatCard label="Expense" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Profit (before close)" value={formatINR(todayFinanceBreakdown.profit)} tone={todayFinanceBreakdown.profit >= 0 ? 'good' : 'bad'} />
+                  </div>
                   <div className="rounded-2xl border bg-muted/20 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
