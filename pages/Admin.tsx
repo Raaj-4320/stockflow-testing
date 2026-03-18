@@ -6,7 +6,7 @@ import { Product } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
 import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
-import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode } from 'lucide-react';
+import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -38,6 +38,11 @@ export default function Admin() {
   
   const [barcodePreview, setBarcodePreview] = useState<Product | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [purchaseTarget, setPurchaseTarget] = useState<Product | null>(null);
+  const [purchaseQty, setPurchaseQty] = useState('');
+  const [purchasePrice, setPurchasePrice] = useState('');
+  const [purchaseNextBuyPrice, setPurchaseNextBuyPrice] = useState('');
+  const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const barcodeCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // Form State
@@ -118,6 +123,9 @@ export default function Admin() {
     return Number.isFinite(n) && n >= 0 ? n : 0;
   };
 
+  const roundDisplayNumber = (value: any) => Math.round(toNonNegativeNumber(value));
+  const formatRoundedValue = (value: any) => roundDisplayNumber(value).toLocaleString('en-IN');
+
   const parseOptionalNonNegative = (value: any): number | undefined => {
     if (value === '' || value === null || value === undefined) return undefined;
     const n = Number(value);
@@ -131,7 +139,7 @@ export default function Admin() {
     return Math.max(0, purchase - sold);
   };
 
-  const handleSave = async () => {
+  const saveProduct = async (keepOpenForNext = false) => {
     if (isSaving) return;
     const hasVariantAxes = !!(formData.variants?.length || formData.colors?.length);
     const hasCombos = hasVariantAxes && Array.isArray(formData.stockByVariantColor) && formData.stockByVariantColor.length > 0;
@@ -150,6 +158,7 @@ export default function Admin() {
 
     const productPayload = {
       id: editingProduct ? editingProduct.id : Date.now().toString(),
+      createdAt: editingProduct?.createdAt || new Date().toISOString(),
       image: formData.image || '',
       name: formData.name,
       barcode: formData.barcode,
@@ -187,7 +196,13 @@ export default function Admin() {
         console.debug('[product] create success', { productId: productPayload.id });
         setProducts(updated);
       }
-      closeModal();
+      if (keepOpenForNext) {
+        setEditingProduct(null);
+        setFormData({ ...emptyProductForm, variants: [], colors: [], stockByVariantColor: [] });
+        setError(null);
+      } else {
+        closeModal();
+      }
     } catch (saveError) {
       console.error('Product save error:', saveError);
       const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
@@ -200,6 +215,63 @@ export default function Admin() {
       setIsSaving(false);
     }
   };
+
+  const handleSave = async () => saveProduct(false);
+  const handleSaveAndNext = async () => saveProduct(true);
+
+  const handleAddPurchase = async () => {
+    if (!purchaseTarget) return;
+    const qty = toNonNegativeNumber(purchaseQty);
+    const unitPrice = toNonNegativeNumber(purchasePrice);
+    if (qty <= 0 || unitPrice <= 0) {
+      alert('Enter valid purchase quantity and unit price.');
+      return;
+    }
+
+    const currentStock = toNonNegativeNumber(purchaseTarget.stock);
+    const currentBuyPrice = toNonNegativeNumber(purchaseTarget.buyPrice);
+    const weightedAvg = currentStock + qty > 0 ? ((currentStock * currentBuyPrice) + (qty * unitPrice)) / (currentStock + qty) : unitPrice;
+    const manualBuyPrice = parseOptionalNonNegative(purchaseNextBuyPrice);
+    const nextBuyPrice = manualBuyPrice ?? weightedAvg;
+
+    const updatedProduct: Product = {
+      ...purchaseTarget,
+      stock: currentStock + qty,
+      totalPurchase: toNonNegativeNumber(purchaseTarget.totalPurchase) + qty,
+      buyPrice: nextBuyPrice,
+      purchaseHistory: [
+        {
+          id: `ph-${Date.now()}`,
+          date: new Date().toISOString(),
+          variant: NO_VARIANT,
+          color: NO_COLOR,
+          quantity: qty,
+          unitPrice,
+          previousStock: currentStock,
+          previousBuyPrice: currentBuyPrice,
+          nextBuyPrice,
+        },
+        ...(purchaseTarget.purchaseHistory || []),
+      ],
+    };
+
+    const updated = await updateProduct(updatedProduct);
+    setProducts(updated);
+    setPurchaseTarget(null);
+    setPurchaseQty('');
+    setPurchasePrice('');
+    setPurchaseNextBuyPrice('');
+  };
+
+  const purchaseAveragePrice = useMemo(() => {
+    if (!purchaseTarget) return 0;
+    const qty = toNonNegativeNumber(purchaseQty);
+    const unitPrice = toNonNegativeNumber(purchasePrice);
+    const currentStock = toNonNegativeNumber(purchaseTarget.stock);
+    const currentBuyPrice = toNonNegativeNumber(purchaseTarget.buyPrice);
+    if (qty <= 0 || unitPrice <= 0) return currentBuyPrice;
+    return currentStock + qty > 0 ? ((currentStock * currentBuyPrice) + (qty * unitPrice)) / (currentStock + qty) : unitPrice;
+  }, [purchaseTarget, purchaseQty, purchasePrice]);
 
   const handleDelete = async (id: string) => {
     if (window.confirm('Are you sure you want to permanently delete this product?')) {
@@ -838,7 +910,7 @@ export default function Admin() {
                <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
                    <div>
                        <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">Inventory Value (Cost)</p>
-                       <p className="text-2xl font-bold text-blue-900 mt-1">₹{stats.totalInventoryValue.toLocaleString()}</p>
+                       <p className="text-2xl font-bold text-blue-900 mt-1">₹{formatRoundedValue(stats.totalInventoryValue)}</p>
                    </div>
                    <div className="absolute right-2 top-2 p-2 bg-blue-100 rounded-lg text-blue-600 opacity-50 group-hover:opacity-100 transition-opacity">
                        <Coins className="w-5 h-5" />
@@ -917,97 +989,66 @@ export default function Admin() {
           </div>
       </div>
 
-      {/* 3. Modern Product Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4">
-        {filteredProducts.map(product => {
-            const isOutOfStock = product.stock === 0;
-            const isLowStock = product.stock > 0 && product.stock < 5;
-            
-            return (
-              <Card key={product.id} className="group overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 border-muted/60">
-                 {/* Image Area - SQUARE ASPECT RATIO */}
-                 <div 
-                    className="relative aspect-square w-full bg-white flex items-center justify-center overflow-hidden cursor-pointer"
-                    onClick={() => product.image && setPreviewImage(product.image)}
-                 >
-                    {product.image ? (
-                        <img src={product.image} alt={product.name} className="object-contain w-full h-full transition-transform duration-500 group-hover:scale-110" />
-                    ) : (
-                        <div className="text-center p-2 opacity-30">
-                            <Package className="w-8 h-8 mx-auto mb-1" />
-                            <p className="text-[9px] font-medium">No Image</p>
-                        </div>
-                    )}
-                    
-                    {/* Floating Status Badge */}
-                    <div className="absolute top-2 right-2">
-                        {isOutOfStock ? (
-                            <Badge variant="destructive" className="h-5 px-1.5 text-[10px] shadow-sm">Out</Badge>
-                        ) : isLowStock ? (
-                            <Badge variant="secondary" className="bg-amber-100 text-amber-700 h-5 px-1.5 text-[10px] shadow-sm hover:bg-amber-200">Low</Badge>
-                        ) : (
-                            <Badge variant="success" className="h-5 px-1.5 text-[10px] shadow-sm opacity-0 group-hover:opacity-100 transition-opacity">
-                                {product.stock}
-                            </Badge>
-                        )}
-                    </div>
-                 </div>
-
-                 <CardContent className="p-2 sm:p-3 relative bg-card">
-                    <div className="mb-2">
-                        {/* Title & Meta */}
-                        <h3 className="font-semibold truncate text-[11px] sm:text-sm text-foreground leading-tight" title={product.name}>
-                            {product.name}
-                        </h3>
-                        <div className="flex items-center gap-1 mt-1 text-[9px] sm:text-[10px] text-muted-foreground">
-                            <span className="font-mono bg-muted px-1 rounded truncate max-w-[50%]">{product.barcode}</span>
-                            <span className="truncate text-gray-400">|</span>
-                            <span className="truncate text-blue-600 font-medium">{product.category}</span>
-                        </div>
-                        
-                        {/* Price Row (Show BUY Price as requested) */}
-                        <div className="flex items-end justify-between mt-2">
-                            <div className="flex flex-col">
-                                <span className="text-[9px] text-muted-foreground leading-none">Cost</span>
-                                <span className="font-bold text-sm sm:text-base text-primary">₹{product.buyPrice}</span>
+      <div className="border rounded-xl overflow-x-auto bg-card">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/40">
+            <tr>
+              <th className="text-left p-3">Image</th><th className="text-left p-3">Product</th><th className="text-left p-3">Category</th><th className="text-left p-3">Purchase/Sold</th><th className="text-left p-3">Stock</th><th className="text-left p-3">Buy/Sell</th><th className="text-left p-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredProducts.map(product => (
+              <tr key={product.id} className="border-t align-top">
+                <td className="p-3">
+                  <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">
+                    {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
+                  </div>
+                </td>
+                <td className="p-3 min-w-[260px]">
+                  <div className="group relative inline-block">
+                    <div className="font-medium">{product.name}</div>
+                    <div className="text-xs text-muted-foreground">{product.barcode}</div>
+                    {product.stockByVariantColor && product.stockByVariantColor.length > 0 && (
+                      <>
+                        <div className="mt-1 text-[11px] text-primary">Hover to view variants</div>
+                        <div className="pointer-events-none absolute z-20 hidden group-hover:block top-full left-0 mt-2 w-[360px] rounded-xl border bg-white p-3 shadow-xl">
+                          <div className="mb-2 flex items-center gap-2">
+                            <div className="h-10 w-10 rounded overflow-hidden border bg-muted/30 flex items-center justify-center">{product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-3 h-3 text-muted-foreground" />}</div>
+                            <div>
+                              <div className="text-xs font-semibold">{product.name}</div>
+                              <div className="text-[10px] text-muted-foreground">{product.category}</div>
                             </div>
-                            <p className="text-[9px] sm:text-[10px] text-muted-foreground">Qty: {product.stock}</p>
+                          </div>
+                          <div className="max-h-56 overflow-y-auto space-y-1.5">
+                            {product.stockByVariantColor.map((row, idx) => (
+                              <div key={`${row.variant}-${row.color}-${idx}`} className="rounded border p-2 text-[11px]">
+                                <div className="font-semibold">{row.variant || NO_VARIANT} / {row.color || NO_COLOR}</div>
+                                <div className="text-muted-foreground">Stock: {formatRoundedValue(row.stock)} • Buy: ₹{formatRoundedValue(row.buyPrice)} • Sell: ₹{formatRoundedValue(row.sellPrice)}</div>
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                    </div>
+                      </>
+                    )}
+                  </div>
+                </td>
+                <td className="p-3">{product.category}</td>
+                <td className="p-3">{formatRoundedValue(product.totalPurchase)} / {formatRoundedValue(product.totalSold)}</td>
+                <td className="p-3 font-semibold">{formatRoundedValue(product.stock)}</td>
+                <td className="p-3">₹{formatRoundedValue(product.buyPrice)} / ₹{formatRoundedValue(product.sellPrice)}</td>
+                <td className="p-3">
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
+                    <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
+                    <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
 
-                    {/* Action Bar (Reveals on Hover for Desktop, Always visible on Touch) */}
-                    <div className="flex gap-1 justify-between pt-2 border-t border-dashed border-gray-100 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity delay-75">
-                        <Button 
-                            variant="ghost" size="icon" 
-                            className="h-7 w-7 sm:h-8 sm:w-8 hover:bg-blue-50 hover:text-blue-600" 
-                            onClick={(e) => { e.stopPropagation(); openModal(product); }}
-                            title="Edit"
-                        >
-                            <Edit className="w-3.5 h-3.5" />
-                        </Button>
-                        <Button 
-                            variant="ghost" size="icon" 
-                            className="h-7 w-7 sm:h-8 sm:w-8 hover:bg-purple-50 hover:text-purple-600" 
-                            onClick={(e) => { e.stopPropagation(); setBarcodePreview(product); }}
-                            title="Barcode"
-                        >
-                            <ScanBarcode className="w-3.5 h-3.5" />
-                        </Button>
-                        <Button 
-                            variant="ghost" size="icon" 
-                            className="h-7 w-7 sm:h-8 sm:w-8 hover:bg-red-50 hover:text-red-600" 
-                            onClick={(e) => { e.stopPropagation(); handleDelete(product.id); }}
-                            title="Delete"
-                        >
-                            <Trash2 className="w-3.5 h-3.5" />
-                        </Button>
-                    </div>
-                 </CardContent>
-              </Card>
-            );
-        })}
-        
-        {/* Empty State */}
         {filteredProducts.length === 0 && (
           <div className="col-span-full py-20 flex flex-col items-center justify-center text-center border-2 border-dashed border-muted rounded-xl bg-muted/5">
             <div className="w-16 h-16 bg-muted rounded-full flex items-center justify-center mb-4">
@@ -1027,7 +1068,7 @@ export default function Admin() {
       {/* Edit/Add Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <Card className="w-full max-w-lg max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-200 shadow-2xl">
+          <Card className="w-full max-w-5xl max-h-[95vh] overflow-y-auto animate-in fade-in zoom-in duration-200 shadow-2xl">
             <CardHeader className="flex flex-row items-center justify-between border-b pb-4 bg-muted/20">
                 <CardTitle className="text-xl">{editingProduct ? 'Edit Product' : 'Add New Product'}</CardTitle>
                 <Button variant="ghost" size="sm" onClick={closeModal}><X className="w-4 h-4" /></Button>
@@ -1040,78 +1081,71 @@ export default function Admin() {
                     </div>
                 )}
                 
-                <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                        <Label>Product Name <span className="text-red-500">*</span></Label>
-                        <Input value={formData.name || ''} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="e.g. Wireless Mouse" />
-                    </div>
-                    <div className="space-y-2">
-                        <Label>Barcode <span className="text-red-500">*</span></Label>
-                        <Input value={formData.barcode || ''} onChange={e => setFormData({...formData, barcode: e.target.value})} placeholder="Scan or Type" />
-                    </div>
-                </div>
-
-                <div className="space-y-2">
-                    <Label>HSN Code</Label>
-                    <Input value={formData.hsn || ''} onChange={e => setFormData({...formData, hsn: e.target.value})} placeholder="Tax HSN Code" />
-                </div>
-
-                <div className="p-4 bg-muted/30 rounded-lg border space-y-4">
-                    <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Pricing & Stock</h4>
-                    {(formData.variants?.length || formData.colors?.length) ? (
-                      <p className="text-xs text-muted-foreground">Variant rows control pricing and stock when variants/colors are configured.</p>
-                    ) : null}
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <Label>Buy Price</Label>
-                            <div className="relative">
-                                <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">₹</span>
-                                <Input type="number" className="pl-6" value={formData.buyPrice ?? ''} onChange={e => setFormData({...formData, buyPrice: e.target.value})} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
-                            </div>
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Sell Price</Label>
-                            <div className="relative">
-                                <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">₹</span>
-                                <Input type="number" className="pl-6 font-bold text-primary" value={formData.sellPrice ?? ''} onChange={e => setFormData({...formData, sellPrice: e.target.value})} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
-                            </div>
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Total Purchase</Label>
-                            <Input type="number" min="0" value={formData.totalPurchase ?? ''} onChange={e => setFormData({...formData, totalPurchase: e.target.value})} placeholder="0" />
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Total Sold</Label>
-                            <Input type="number" min="0" value={formData.totalSold ?? ''} onChange={e => setFormData({...formData, totalSold: e.target.value})} placeholder="0" />
-                        </div>
-                        <div className="space-y-2 col-span-2">
-                            <Label>Current Stock</Label>
-                            {(!formData.variants?.length && !formData.colors?.length) ? (
-                              <Input
-                                type="number"
-                                value={formData.stock ?? ''}
-                                onChange={e => setFormData({...formData, stock: e.target.value})}
-                                placeholder={String(getSuggestedStock(formData.totalPurchase, formData.totalSold))}
-                              />
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="space-y-4 rounded-xl border p-4 bg-muted/10">
+                    <div className="grid grid-cols-[112px_1fr] gap-4 items-start">
+                      <div className="space-y-2">
+                        <Label>Product Image</Label>
+                        <div className="border rounded-lg border-dashed hover:bg-muted/10 transition-colors p-2">
+                          <div className="h-24 w-24 bg-white rounded-md overflow-hidden border flex items-center justify-center shadow-sm mx-auto">
+                            {formData.image ? (
+                              <img src={formData.image} alt="Preview" className="h-full w-full object-contain" />
                             ) : (
-                              <Input
-                                value={(formData.stockByVariantColor || []).reduce((sum: number, row: any) => sum + toNonNegativeNumber(row.stock), 0)}
-                                readOnly
-                                disabled
-                              />
+                              <span className="text-[10px] text-muted-foreground">No Image</span>
                             )}
-                          <p className="text-[11px] text-muted-foreground mt-1">Suggested: {getSuggestedStock(formData.totalPurchase, formData.totalSold)} (Total Purchase - Total Sold)</p>
+                          </div>
                         </div>
-                    </div>
-                </div>
+                        <Input type="file" accept="image/*" onChange={handleImageUpload} className="file:mr-2 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90" />
+                      </div>
 
-                <div className="p-4 bg-muted/20 rounded-lg border space-y-3">
-                    <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Variant / Color (Optional)</h4>
-                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-4">
+                        <div className="space-y-2 max-w-[240px]">
+                          <Label>Product Name <span className="text-red-500">*</span></Label>
+                          <Input className="w-full" value={formData.name || ''} onChange={e => setFormData({ ...formData, name: e.target.value })} placeholder="e.g. Wireless Mouse" />
+                        </div>
+
+                        <div className="space-y-2 max-w-[240px]">
+                          <Label>Product Category <span className="text-red-500">*</span></Label>
+                          <Select
+                            className="w-full"
+                            value={formData.category}
+                            onChange={e => {
+                              const newCat = e.target.value;
+                              let newBarcode = formData.barcode;
+                              const isGenBarcode = !formData.barcode || formData.barcode.startsWith('GEN-');
+                              const categoryChanged = editingProduct ? editingProduct.category !== newCat : true;
+                              if (isGenBarcode && categoryChanged) {
+                                newBarcode = newCat ? getNextBarcode(newCat) : '';
+                              }
+                              setFormData({ ...formData, category: newCat, barcode: newBarcode });
+                            }}
+                          >
+                            <option value="">Select Category</option>
+                            {[...categories].sort().map(c => <option key={c} value={c}>{c}</option>)}
+                          </Select>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2 max-w-[240px]">
+                        <Label>HSN Code</Label>
+                        <Input className="w-full" value={formData.hsn || ''} onChange={e => setFormData({ ...formData, hsn: e.target.value })} placeholder="Tax HSN Code" />
+                      </div>
+
+                      <div className="space-y-2 max-w-[240px]">
+                        <Label>Barcode</Label>
+                        <Input value={formData.barcode || ''} readOnly disabled className="w-full bg-muted/50" />
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 border rounded-md p-3">
+                      <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Variant / Color (Optional)</h4>
+                      <div className="grid grid-cols-2 gap-3">
                       <div>
                         <Label className="text-xs">Variant master</Label>
                         <div className="flex gap-2 mt-1">
-                          <Input list="variant-master" value={formData.variantInput || ''} onChange={e => setFormData({ ...formData, variantInput: e.target.value })} placeholder="Search or add variant" />
+                          <Input list="variant-master" className="w-full max-w-[200px] appearance-none [&::-webkit-calendar-picker-indicator]:hidden" value={formData.variantInput || ''} onChange={e => setFormData({ ...formData, variantInput: e.target.value })} placeholder="Search or add variant" />
                           <Button type="button" variant="outline" onClick={addVariantToForm}>+</Button>
                         </div>
                         <datalist id="variant-master">{variantsMaster.map(v => <option key={v} value={v} />)}</datalist>
@@ -1120,18 +1154,18 @@ export default function Admin() {
                       <div>
                         <Label className="text-xs">Color master</Label>
                         <div className="flex gap-2 mt-1">
-                          <Input list="color-master" value={formData.colorInput || ''} onChange={e => setFormData({ ...formData, colorInput: e.target.value })} placeholder="Search or add color" />
+                          <Input list="color-master" className="w-full max-w-[200px] appearance-none [&::-webkit-calendar-picker-indicator]:hidden" value={formData.colorInput || ''} onChange={e => setFormData({ ...formData, colorInput: e.target.value })} placeholder="Search or add color" />
                           <Button type="button" variant="outline" onClick={addColorToForm}>+</Button>
                         </div>
                         <datalist id="color-master">{colorsMaster.map(v => <option key={v} value={v} />)}</datalist>
                         <div className="mt-1 flex flex-wrap gap-1">{(formData.colors || []).map((v: string) => <span key={v}><Badge variant="outline">{v}</Badge></span>)}</div>
                       </div>
-                    </div>
+                      </div>
 
-                    {(formData.variants?.length || formData.colors?.length) && (
+                      {(formData.variants?.length || formData.colors?.length) && (
                       <div className="border rounded-md overflow-hidden">
                         <div className="grid grid-cols-7 gap-2 bg-muted px-2 py-1 text-xs font-semibold">
-                          <div>Variant</div><div>Color</div><div>Current Stock</div><div>Buy Price</div><div>Sell Price</div><div>Total Purchase</div><div>Total Sold</div>
+                          <div>Variant</div><div>Color</div><div>Opening/Current Stock</div><div>Buy Price</div><div>Sell Price</div><div>Total Purchase</div><div>Total Sold</div>
                         </div>
                         {(formData.stockByVariantColor || []).map((row: any, idx: number) => (
                           <div className="grid grid-cols-7 gap-2 px-2 py-1 border-t" key={getRowKey(row.variant || NO_VARIANT, row.color || NO_COLOR)}>
@@ -1168,71 +1202,200 @@ export default function Admin() {
                           </div>
                         ))}
                       </div>
-                    )}
-                </div>
-                
-                <div className="space-y-2">
-                     <Label>Product Image</Label>
-                     <div className="flex items-center gap-4 p-3 border rounded-lg border-dashed hover:bg-muted/10 transition-colors">
-                        <div className="h-16 w-16 bg-white rounded-md overflow-hidden border flex items-center justify-center shadow-sm">
-                            {formData.image ? (
-                                <img src={formData.image} alt="Preview" className="h-full w-full object-contain" /> 
-                            ) : (
-                                <span className="text-[10px] text-muted-foreground">No Image</span>
-                            )}
-                        </div>
-                        <div className="flex-1">
-                            {/* Updated Input for Image Handling */}
-                            <Input type="file" accept="image/*" onChange={handleImageUpload} className="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90" />
-                        </div>
-                     </div>
-                </div>
-
-                <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                        <Label>Category <span className="text-red-500">*</span></Label>
-                        <Button variant="ghost" size="sm" className="h-6 text-xs text-primary hover:text-primary/80 px-2" onClick={() => setIsCategoryModalOpen(true)}>
-                            + Manage
-                        </Button>
+                      )}
                     </div>
-                    <Select 
-                        value={formData.category} 
-                        onChange={e => {
-                            const newCat = e.target.value;
-                            let newBarcode = formData.barcode;
-                            
-                            // Check if it's a generated barcode or empty
-                            const isGenBarcode = !formData.barcode || formData.barcode.startsWith('GEN-');
-                            // Check if category actually changed from the original product (if editing) or if it's a new product
-                            const categoryChanged = editingProduct ? editingProduct.category !== newCat : true;
+                  </div>
 
-                            if (isGenBarcode && categoryChanged) {
-                                if (newCat) {
-                                    newBarcode = getNextBarcode(newCat);
-                                } else {
-                                    newBarcode = editingProduct ? '' : ''; // Keep empty if no category
-                                }
-                            }
-                            setFormData({...formData, category: newCat, barcode: newBarcode});
-                        }}
-                    >
-                        <option value="">Select Category</option>
-                        {[...categories].sort().map(c => (
-                            <option key={c} value={c}>{c}</option>
-                        ))}
-                    </Select>
+                  <div className="space-y-4 rounded-xl border p-4 bg-muted/10">
+                    <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Inventory & Pricing</h4>
+                    <div className="grid grid-cols-2 gap-3 justify-items-start">
+                      <div className="space-y-2 col-span-2 max-w-[240px] w-full">
+                        <Label>Opening / Current Stock</Label>
+                        {(!formData.variants?.length && !formData.colors?.length) ? (
+                          <Input
+                            className="w-full"
+                            type="number"
+                            value={formData.stock ?? ''}
+                            onChange={e => setFormData({ ...formData, stock: e.target.value })}
+                            placeholder={String(getSuggestedStock(formData.totalPurchase, formData.totalSold))}
+                          />
+                        ) : (
+                          <Input
+                            className="w-full"
+                            value={(formData.stockByVariantColor || []).reduce((sum: number, row: any) => sum + toNonNegativeNumber(row.stock), 0)}
+                            readOnly
+                            disabled
+                          />
+                        )}
+                      </div>
+
+                      <div className="space-y-2 max-w-[240px] w-full">
+                        <Label>Purchase / Buy Price</Label>
+                        <div className="relative w-full">
+                          <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">₹</span>
+                          <Input type="number" className="w-full pl-6" value={formData.buyPrice ?? ''} onChange={e => setFormData({ ...formData, buyPrice: e.target.value })} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 max-w-[240px] w-full">
+                        <Label>Sell Price</Label>
+                        <div className="relative w-full">
+                          <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">₹</span>
+                          <Input type="number" className="w-full pl-6 font-bold text-primary" value={formData.sellPrice ?? ''} onChange={e => setFormData({ ...formData, sellPrice: e.target.value })} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 max-w-[240px] w-full">
+                        <Label>Total Purchase <span className="text-muted-foreground">(Optional)</span></Label>
+                        <Input className="w-full" type="number" min="0" value={formData.totalPurchase ?? ''} onChange={e => setFormData({ ...formData, totalPurchase: e.target.value })} placeholder="0" />
+                      </div>
+
+                      <div className="space-y-2 max-w-[240px] w-full">
+                        <Label>Total Sold <span className="text-muted-foreground">(Optional)</span></Label>
+                        <Input className="w-full" type="number" min="0" value={formData.totalSold ?? ''} onChange={e => setFormData({ ...formData, totalSold: e.target.value })} placeholder="0" />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">Suggested stock: {getSuggestedStock(formData.totalPurchase, formData.totalSold)} (Total Purchase - Total Sold)</p>
                 </div>
-
-                <div className="space-y-2">
-                    <Label>Description</Label>
-                    <Input value={formData.description || ''} onChange={e => setFormData({...formData, description: e.target.value})} placeholder="Optional details..." />
                 </div>
                 
                 <div className="pt-2">
-                    <Button className="w-full h-11 text-base shadow-lg" onClick={handleSave} disabled={isSaving}>
-                        <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Saving...' : editingProduct ? 'Update Product' : 'Save Product'}
-                    </Button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button className="h-11 text-base shadow-lg" onClick={handleSave} disabled={isSaving}>
+                          <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Saving...' : editingProduct ? 'Update Product' : 'Save Product'}
+                      </Button>
+                      <Button variant="outline" className="h-11 text-base" onClick={handleSaveAndNext} disabled={isSaving}>
+                          {isSaving ? 'Saving...' : editingProduct ? 'Update & Next' : 'Save & Next'}
+                      </Button>
+                    </div>
                 </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {purchaseTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
+          <Card className="w-full max-w-lg">
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Add Purchase - {purchaseTarget.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => setPurchaseTarget(null)}><X className="w-4 h-4"/></Button></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="rounded-lg border bg-muted/20 p-3">
+                <div className="flex items-center gap-3">
+                  <div className="h-16 w-16 rounded-md border overflow-hidden bg-white flex items-center justify-center">
+                    {purchaseTarget.image ? <img src={purchaseTarget.image} alt={purchaseTarget.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
+                  </div>
+                  <div>
+                    <div className="font-semibold">{purchaseTarget.name}</div>
+                    <div className="text-xs text-muted-foreground">{purchaseTarget.category} • HSN: {purchaseTarget.hsn || 'N/A'}</div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded border bg-white p-2 font-medium">Current Stock: <span className="text-primary">{formatRoundedValue(purchaseTarget.stock)}</span></div>
+                  <div className="rounded border bg-white p-2 font-medium">Current Buy Price: <span className="text-primary">₹{formatRoundedValue(purchaseTarget.buyPrice)}</span></div>
+                  <div className="rounded border bg-white p-2">Total Purchase: {formatRoundedValue(purchaseTarget.totalPurchase)}</div>
+                  <div className="rounded border bg-white p-2">Total Sold: {formatRoundedValue(purchaseTarget.totalSold)}</div>
+                </div>
+              </div>
+
+              <Input type="number" placeholder="Purchase quantity" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} />
+              <Input type="number" placeholder="Purchase unit price" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" onClick={() => setPurchaseNextBuyPrice(String(roundDisplayNumber(purchaseAveragePrice)))}>Average Price: ₹{formatRoundedValue(purchaseAveragePrice)}</Button>
+                <Input type="number" placeholder="New buy price (you can edit)" value={purchaseNextBuyPrice} onChange={(e) => setPurchaseNextBuyPrice(e.target.value)} />
+              </div>
+              <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
+              <Button onClick={handleAddPurchase} className="w-full">Apply Purchase</Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {viewingProduct && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
+          <Card className="w-full max-w-5xl max-h-[90vh] overflow-y-auto">
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Product Details - {viewingProduct.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => setViewingProduct(null)}><X className="w-4 h-4"/></Button></CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
+                <div className="rounded-xl border bg-muted/20 p-4">
+                  <div className="aspect-square overflow-hidden rounded-lg border bg-white flex items-center justify-center">
+                    {viewingProduct.image ? <img src={viewingProduct.image} alt={viewingProduct.name} className="h-full w-full object-cover" /> : <Package className="w-10 h-10 text-muted-foreground" />}
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <div className="rounded-xl border p-3"><div className="text-xs text-muted-foreground">Product Name</div><div className="font-semibold">{viewingProduct.name}</div></div>
+                  <div className="rounded-xl border p-3"><div className="text-xs text-muted-foreground">Category</div><div className="font-semibold">{viewingProduct.category || '—'}</div></div>
+                  <div className="rounded-xl border p-3"><div className="text-xs text-muted-foreground">Barcode</div><div className="font-semibold">{viewingProduct.barcode || '—'}</div></div>
+                  <div className="rounded-xl border p-3"><div className="text-xs text-muted-foreground">HSN</div><div className="font-semibold">{viewingProduct.hsn || '—'}</div></div>
+                  <div className="rounded-xl border p-3"><div className="text-xs text-muted-foreground">Created</div><div className="font-semibold">{viewingProduct.createdAt ? new Date(viewingProduct.createdAt).toLocaleString() : 'N/A'}</div></div>
+                  <div className="rounded-xl border p-3"><div className="text-xs text-muted-foreground">Variants / Colors</div><div className="font-semibold">{viewingProduct.variants?.length || viewingProduct.colors?.length ? `${viewingProduct.variants?.length || 0} / ${viewingProduct.colors?.length || 0}` : 'No variants'}</div></div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-xl border bg-primary/5 p-4"><div className="text-xs text-muted-foreground">Current Stock</div><div className="text-xl font-bold text-primary">{formatRoundedValue(viewingProduct.stock)}</div></div>
+                <div className="rounded-xl border bg-primary/5 p-4"><div className="text-xs text-muted-foreground">Buy Price</div><div className="text-xl font-bold text-primary">₹{formatRoundedValue(viewingProduct.buyPrice)}</div></div>
+                <div className="rounded-xl border bg-primary/5 p-4"><div className="text-xs text-muted-foreground">Sell Price</div><div className="text-xl font-bold text-primary">₹{formatRoundedValue(viewingProduct.sellPrice)}</div></div>
+                <div className="rounded-xl border bg-primary/5 p-4"><div className="text-xs text-muted-foreground">Total Purchase / Sold</div><div className="text-xl font-bold text-primary">{formatRoundedValue(viewingProduct.totalPurchase)} / {formatRoundedValue(viewingProduct.totalSold)}</div></div>
+              </div>
+
+              {viewingProduct.stockByVariantColor && viewingProduct.stockByVariantColor.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="font-semibold">Variant Inventory Details</h4>
+                  <div className="border rounded-lg overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-muted/40">
+                        <tr>
+                          <th className="p-2 text-left">Variant</th>
+                          <th className="p-2 text-left">Color</th>
+                          <th className="p-2 text-left">Stock</th>
+                          <th className="p-2 text-left">Buy Price</th>
+                          <th className="p-2 text-left">Sell Price</th>
+                          <th className="p-2 text-left">Total Purchase</th>
+                          <th className="p-2 text-left">Total Sold</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {viewingProduct.stockByVariantColor.map((row, idx) => (
+                          <tr key={`${row.variant}-${row.color}-${idx}`} className="border-t">
+                            <td className="p-2">{row.variant || NO_VARIANT}</td>
+                            <td className="p-2">{row.color || NO_COLOR}</td>
+                            <td className="p-2">{formatRoundedValue(row.stock)}</td>
+                            <td className="p-2">₹{formatRoundedValue(row.buyPrice)}</td>
+                            <td className="p-2">₹{formatRoundedValue(row.sellPrice)}</td>
+                            <td className="p-2">{formatRoundedValue(row.totalPurchase)}</td>
+                            <td className="p-2">{formatRoundedValue(row.totalSold)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <h4 className="font-semibold">Purchase History</h4>
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/40"><tr><th className="p-2 text-left">Date</th><th className="p-2 text-left">Variant</th><th className="p-2 text-left">Color</th><th className="p-2 text-left">Qty</th><th className="p-2 text-left">Purchase Price</th><th className="p-2 text-left">Previous Stock</th><th className="p-2 text-left">Previous Buy</th><th className="p-2 text-left">New Buy</th></tr></thead>
+                    <tbody>
+                      {(viewingProduct.purchaseHistory || []).length ? (viewingProduct.purchaseHistory || []).map((h) => (
+                        <tr key={h.id} className="border-t">
+                          <td className="p-2">{new Date(h.date).toLocaleString()}</td>
+                          <td className="p-2">{h.variant || NO_VARIANT}</td>
+                          <td className="p-2">{h.color || NO_COLOR}</td>
+                          <td className="p-2">{formatRoundedValue(h.quantity)}</td>
+                          <td className="p-2">₹{formatRoundedValue(h.unitPrice)}</td>
+                          <td className="p-2">{formatRoundedValue(h.previousStock)}</td>
+                          <td className="p-2">₹{formatRoundedValue(h.previousBuyPrice)}</td>
+                          <td className="p-2">₹{formatRoundedValue(h.nextBuyPrice)}</td>
+                        </tr>
+                      )) : (
+                        <tr><td className="p-3 text-muted-foreground" colSpan={8}>No purchase history yet.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </CardContent>
           </Card>
         </div>

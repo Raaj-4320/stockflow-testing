@@ -23,6 +23,18 @@ export interface Product {
     totalPurchase?: number;
     totalSold?: number;
   }>;
+  createdAt?: string;
+  purchaseHistory?: Array<{
+    id: string;
+    date: string;
+    variant: string;
+    color: string;
+    quantity: number;
+    unitPrice: number;
+    previousStock: number;
+    previousBuyPrice: number;
+    nextBuyPrice: number;
+  }>;
 }
 
 export interface CartItem extends Product {
