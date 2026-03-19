@@ -11,7 +11,7 @@ import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, 
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
-import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
+import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile, importTransactionsFromFile } from '../services/importExcel';
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -762,8 +762,14 @@ export default function Transactions() {
         onClose={() => setIsImportModalOpen(false)}
         title="Import Transactions"
         onDownloadTemplate={downloadTransactionsTemplate}
-        onImportFile={async (file) => {
-          const result = await importHistoricalTransactionsFromFile(file);
+        importModes={[
+          { value: 'historical_reference', label: 'Historical Reference', description: 'Store past transactions for reference only without changing stock or balances.' },
+          { value: 'live', label: 'Live', description: 'Replay transactions through normal business logic and affect live stock/totals.' },
+        ]}
+        onImportFile={async (file, _onProgress, mode) => {
+          const result = mode === 'live'
+            ? await importTransactionsFromFile(file, _onProgress, { mode: 'live' })
+            : await importHistoricalTransactionsFromFile(file, _onProgress);
           const data = loadData();
           setTransactions(data.transactions);
           setCustomers(data.customers);

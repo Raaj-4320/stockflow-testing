@@ -1117,8 +1117,12 @@ export default function Customers() {
         onClose={() => setIsImportModalOpen(false)}
         title="Import Customers"
         onDownloadTemplate={downloadCustomersTemplate}
-        onImportFile={async (file) => {
-          const result = await importCustomersFromFile(file);
+        importModes={[
+          { value: 'master_data', label: 'Master Data', description: 'Create/update customer identity fields like name and phone.' },
+          { value: 'opening_balance', label: 'Opening Balance', description: 'Seed or correct opening spend, due, visit count, and last visit values.' },
+        ]}
+        onImportFile={async (file, _onProgress, mode) => {
+          const result = await importCustomersFromFile(file, _onProgress, { mode: (mode as any) || 'master_data' });
           refreshData();
           return result;
         }}
