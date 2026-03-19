@@ -1532,8 +1532,12 @@ export default function Admin() {
         onClose={() => setIsImportModalOpen(false)}
         title="Import Inventory"
         onDownloadTemplate={downloadInventoryTemplate}
-        onImportFile={async (file) => {
-          const result = await importInventoryFromFile(file);
+        importModes={[
+          { value: 'master_data', label: 'Master Data', description: 'Create/update product master fields like barcode, name, category, pricing, description, and image.' },
+          { value: 'opening_balance', label: 'Opening Balance', description: 'Seed or correct opening stock, total purchase, and total sold without changing master fields.' },
+        ]}
+        onImportFile={async (file, _onProgress, mode) => {
+          const result = await importInventoryFromFile(file, _onProgress, { mode: (mode as any) || 'master_data' });
           refreshData();
           return result;
         }}
