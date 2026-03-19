@@ -1,5 +1,6 @@
 import {
   Product,
+  CartItem,
   Transaction,
   AppState,
   Customer,
@@ -18,6 +19,7 @@ import {
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
+import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -86,6 +88,7 @@ const emitDataOpStatus = (detail: {
   entity?: string;
   message?: string;
   error?: string;
+  transactionId?: string;
 }) => {
   window.dispatchEvent(new CustomEvent(APP_EVENTS.DATA_OP_STATUS, { detail }));
 };
@@ -263,31 +266,19 @@ const commitProcessTransactionAtomically = async ({
   return runFirestoreTransaction(db!, async (firestoreTx) => {
     const transactionRef = doc(db!, 'stores', user.uid, 'transactions', transaction.id);
     const existingTransactionSnap = await firestoreTx.get(transactionRef);
+    const bucketedItems = transaction.type === 'payment' ? [] : aggregateCartItemsByStockBucket(transaction.items);
 
     // Idempotency guard: repeated retries with same transaction id should not re-apply stock/customer deltas.
     if (existingTransactionSnap.exists()) {
       return { created: false, committedProducts: [], committedCustomer: null };
     }
 
-    const productDeltas = new Map<string, { quantityDelta: number; totalSoldDelta: number; variant?: string; color?: string }>();
-    if (transaction.type !== 'payment') {
-      transaction.items.forEach(item => {
-        const existing = productDeltas.get(item.id);
-        const quantityDelta = transaction.type === 'sale' ? -item.quantity : item.quantity;
-        const totalSoldDelta = transaction.type === 'sale' ? item.quantity : -item.quantity;
-        productDeltas.set(item.id, {
-          quantityDelta: (existing?.quantityDelta || 0) + quantityDelta,
-          totalSoldDelta: (existing?.totalSoldDelta || 0) + totalSoldDelta,
-          variant: item.selectedVariant,
-          color: item.selectedColor,
-        });
-      });
-    }
+    const productIds = Array.from(new Set(bucketedItems.map(item => item.productId)));
 
     // Firestore transactions require all reads before writes.
     // Collect every document we will reference up front.
     const productSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
-    for (const productId of productDeltas.keys()) {
+    for (const productId of productIds) {
       const productRef = doc(db!, 'stores', user.uid, 'products', productId);
       const productSnap = await firestoreTx.get(productRef);
       productSnapshots.set(productId, productSnap);
@@ -301,8 +292,8 @@ const commitProcessTransactionAtomically = async ({
 
     const statsSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
     if (transaction.customerId && transaction.type !== 'payment') {
-      for (const item of transaction.items) {
-        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, item.id);
+      for (const productId of productIds) {
+        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, productId);
         const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
         const statsSnap = await firestoreTx.get(statsRef);
         statsSnapshots.set(statsDocId, statsSnap);
@@ -310,7 +301,7 @@ const commitProcessTransactionAtomically = async ({
     }
 
     const committedProducts: Product[] = [];
-    for (const [productId, delta] of productDeltas.entries()) {
+    for (const productId of productIds) {
       const productRef = doc(db!, 'stores', user.uid, 'products', productId);
       const productSnap = productSnapshots.get(productId)!;
       if (!productSnap.exists()) {
@@ -318,31 +309,33 @@ const commitProcessTransactionAtomically = async ({
       }
 
       const currentProduct = { ...(productSnap.data() as Product), id: productSnap.id };
-      const availableStock = getAvailableStockForItem(currentProduct, delta.variant, delta.color);
-      if (transaction.type === 'sale' && Math.abs(delta.quantityDelta) > availableStock) {
-        failValidation('OVERSALE_STOCK', 'Insufficient stock for product in cloud state.', {
-          itemId: productId,
-          requestedQuantity: Math.abs(delta.quantityDelta),
-          availableStock,
-        });
-      }
+      const productBuckets = bucketedItems.filter(item => item.productId === productId);
+      productBuckets.forEach(bucket => {
+        const availableStock = getAvailableStockForItem(currentProduct, bucket.variant, bucket.color);
+        if (transaction.type === 'sale' && bucket.quantity > availableStock) {
+          failValidation('OVERSALE_STOCK', 'Insufficient stock for product in cloud state.', {
+            itemId: productId,
+            requestedQuantity: bucket.quantity,
+            availableStock,
+            variant: bucket.variant,
+            color: bucket.color,
+          });
+        }
+      });
 
+      const totalSoldDelta = productBuckets.reduce((sum, bucket) => sum + (transaction.type === 'sale' ? bucket.quantity : -bucket.quantity), 0);
       if (transaction.type === 'return') {
         const soldCount = currentProduct.totalSold || 0;
-        if (Math.abs(delta.totalSoldDelta) > soldCount) {
+        if (Math.abs(totalSoldDelta) > soldCount) {
           failValidation('RETURN_EXCEEDS_TOTAL_SOLD', 'Return quantity exceeds sold quantity in cloud state.', {
             itemId: productId,
-            returnQuantity: Math.abs(delta.totalSoldDelta),
+            returnQuantity: Math.abs(totalSoldDelta),
             soldCount,
           });
         }
       }
 
-      const withStock = applyStockDeltaToProduct(currentProduct, delta.quantityDelta, delta.variant, delta.color);
-      const updatedProduct: Product = {
-        ...withStock,
-        totalSold: Math.max(0, (currentProduct.totalSold || 0) + delta.totalSoldDelta),
-      };
+      const updatedProduct = applyTransactionItemsToProduct(currentProduct, transaction.items, transaction.type);
       firestoreTx.set(productRef, sanitizeData(updatedProduct), { merge: true });
       committedProducts.push(updatedProduct);
     }
@@ -392,32 +385,34 @@ const commitProcessTransactionAtomically = async ({
       firestoreTx.set(customerRef, sanitizeData(committedCustomer), { merge: true });
 
       if (transaction.type !== 'payment') {
-        for (const item of transaction.items) {
-          const statsDocId = getCustomerProductStatsDocId(transaction.customerId, item.id);
+        for (const productId of productIds) {
+          const qty = bucketedItems
+            .filter(item => item.productId === productId)
+            .reduce((sum, item) => sum + item.quantity, 0);
+          const statsDocId = getCustomerProductStatsDocId(transaction.customerId, productId);
           const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
           const statsSnap = statsSnapshots.get(statsDocId)!;
           if (transaction.type === 'return' && !statsSnap.exists() && !allowLegacySeed) {
             failValidation('CUSTOMER_PRODUCT_STATS_MISSING', 'Customer product stats missing after backfill enforcement.', {
               customerId: transaction.customerId,
-              productId: item.id,
+              productId,
               markerVersion: CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION,
             });
           }
 
-          const fallbackSeed = legacyCustomerProductStatsSeed[item.id] || { soldQty: 0, returnedQty: 0 };
+          const fallbackSeed = legacyCustomerProductStatsSeed[productId] || { soldQty: 0, returnedQty: 0 };
           const stats = statsSnap.exists()
             ? (statsSnap.data() as { soldQty?: number; returnedQty?: number })
             : fallbackSeed;
 
           const soldQty = Math.max(0, Number.isFinite(stats.soldQty) ? Number(stats.soldQty) : 0);
           const returnedQty = Math.max(0, Number.isFinite(stats.returnedQty) ? Number(stats.returnedQty) : 0);
-          const qty = Math.max(0, item.quantity || 0);
 
           if (transaction.type === 'return') {
             const netPurchased = soldQty - returnedQty;
             if (qty > netPurchased) {
               failValidation('RETURN_EXCEEDS_CUSTOMER_PURCHASE', 'Return quantity exceeds customer purchase history in cloud state.', {
-                itemId: item.id,
+                itemId: productId,
                 returnQuantity: qty,
                 customerRemaining: netPurchased,
                 soldQty,
@@ -432,7 +427,7 @@ const commitProcessTransactionAtomically = async ({
 
           firestoreTx.set(statsRef, sanitizeData({
             customerId: transaction.customerId,
-            productId: item.id,
+            productId,
             soldQty: nextStats.soldQty,
             returnedQty: nextStats.returnedQty,
             updatedAt: new Date().toISOString(),
@@ -454,7 +449,7 @@ const commitProcessTransactionAtomically = async ({
       transactionId: transaction.id,
       transactionType: transaction.type,
       customerId: transaction.customerId || null,
-      touchedProductIds: Array.from(productDeltas.keys()),
+      touchedProductIds: productIds,
       touchedCustomerIds: transaction.customerId ? [transaction.customerId] : [],
       payloadVersion: 1,
     }, { merge: true });
@@ -751,7 +746,7 @@ const isDataUrlImage = (value: string | undefined): boolean => {
 
 
 const normalizeLabel = (value?: string) => (value || '').trim();
-const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(variant) || 'No Variant'}__${normalizeLabel(color) || 'No Color'}`;
+const toStockKey = (variant?: string, color?: string) => `${normalizeStockBucketVariant(variant)}__${normalizeStockBucketColor(color)}`;
 
 const sanitizeVariantColorStock = (product: Product): Product => {
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
@@ -808,8 +803,8 @@ const getAvailableStockForItem = (product: Product, variant?: string, color?: st
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
   if (!entries.length) return Math.max(0, product.stock || 0);
 
-  const targetVariant = normalizeLabel(variant) || 'No Variant';
-  const targetColor = normalizeLabel(color) || 'No Color';
+  const targetVariant = normalizeStockBucketVariant(variant);
+  const targetColor = normalizeStockBucketColor(color);
   const found = entries.find(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
   return found ? Math.max(0, found.stock) : 0;
 };
@@ -820,8 +815,8 @@ const applyStockDeltaToProduct = (product: Product, delta: number, variant?: str
     return { ...product, stock: Math.max(0, (product.stock || 0) + delta) };
   }
 
-  const targetVariant = normalizeLabel(variant) || 'No Variant';
-  const targetColor = normalizeLabel(color) || 'No Color';
+  const targetVariant = normalizeStockBucketVariant(variant);
+  const targetColor = normalizeStockBucketColor(color);
   const index = entries.findIndex(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
 
   if (index >= 0) {
@@ -832,6 +827,28 @@ const applyStockDeltaToProduct = (product: Product, delta: number, variant?: str
 
   const totalStock = entries.reduce((sum, entry) => sum + Math.max(0, entry.stock || 0), 0);
   return { ...product, stockByVariantColor: entries, stock: totalStock };
+};
+
+const applyTransactionItemsToProduct = (product: Product, items: CartItem[], transactionType: Transaction['type']) => {
+  if (transactionType === 'payment') return product;
+
+  const relevantBuckets = aggregateCartItemsByStockBucket(items).filter(bucket => bucket.productId === product.id);
+  if (!relevantBuckets.length) return product;
+
+  let nextProduct = { ...product };
+  let totalSoldDelta = 0;
+  relevantBuckets.forEach(bucket => {
+    const quantityDelta = transactionType === 'sale' ? -bucket.quantity : bucket.quantity;
+    totalSoldDelta += transactionType === 'sale' ? bucket.quantity : -bucket.quantity;
+    nextProduct = applyStockDeltaToProduct(nextProduct, quantityDelta, bucket.variant, bucket.color);
+  });
+
+  return {
+    ...nextProduct,
+    totalSold: transactionType === 'sale'
+      ? (product.totalSold || 0) + totalSoldDelta
+      : Math.max(0, (product.totalSold || 0) + totalSoldDelta),
+  };
 };
 
 const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
@@ -1628,17 +1645,18 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
   if (transaction.type === 'payment') return;
 
   const productMap = new Map(products.map(p => [p.id, p]));
+  const bucketedItems = aggregateCartItemsByStockBucket(transaction.items);
 
-  for (const item of transaction.items) {
-    const product = productMap.get(item.id);
+  for (const item of bucketedItems) {
+    const product = productMap.get(item.productId);
     if (!product) {
-      failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found.', { itemId: item.id });
+      failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found.', { itemId: item.productId });
     }
 
-    const availableStock = getAvailableStockForItem(product, item.selectedVariant, item.selectedColor);
+    const availableStock = getAvailableStockForItem(product, item.variant, item.color);
     if (transaction.type === 'sale' && item.quantity > availableStock) {
       failValidation('OVERSALE_STOCK', 'Insufficient stock for product.', {
-        itemId: item.id,
+        itemId: item.productId,
         requestedQuantity: item.quantity,
         availableStock
       });
@@ -1648,7 +1666,7 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
       const soldCount = product.totalSold || 0;
       if (item.quantity > soldCount) {
         failValidation('RETURN_EXCEEDS_TOTAL_SOLD', 'Return quantity exceeds sold quantity.', {
-          itemId: item.id,
+          itemId: item.productId,
           returnQuantity: item.quantity,
           soldCount
         });
@@ -1657,15 +1675,15 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
       if (transaction.customerId) {
         const bought = historicalTransactions
           .filter(t => t.customerId === transaction.customerId && t.type === 'sale')
-          .reduce((acc, t) => acc + (t.items.find(i => i.id === item.id)?.quantity || 0), 0);
+          .reduce((acc, t) => acc + t.items.filter(i => i.id === item.productId).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
 
         const returned = historicalTransactions
           .filter(t => t.customerId === transaction.customerId && t.type === 'return')
-          .reduce((acc, t) => acc + (t.items.find(i => i.id === item.id)?.quantity || 0), 0);
+          .reduce((acc, t) => acc + t.items.filter(i => i.id === item.productId).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
 
         if (item.quantity > (bought - returned)) {
           failValidation('RETURN_EXCEEDS_CUSTOMER_PURCHASE', 'Return quantity exceeds customer purchase history.', {
-            itemId: item.id,
+            itemId: item.productId,
             returnQuantity: item.quantity,
             customerRemaining: bought - returned
           });
@@ -2350,19 +2368,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   const newTransactions = [transaction, ...data.transactions];
   let newProducts = [...data.products];
   if (transaction.type !== 'payment') {
-      newProducts = data.products.map(p => {
-        const itemInCart = transaction.items.find(i => i.id === p.id);
-        if (itemInCart) {
-          const qty = itemInCart.quantity;
-          const delta = transaction.type === 'sale' ? -qty : qty;
-          const withStock = applyStockDeltaToProduct(p, delta, itemInCart.selectedVariant, itemInCart.selectedColor);
-          if (transaction.type === 'sale') {
-            return { ...withStock, totalSold: (p.totalSold || 0) + qty };
-          }
-          return { ...withStock, totalSold: Math.max(0, (p.totalSold || 0) - qty) };
-        }
-        return p;
-      });
+      newProducts = data.products.map(p => applyTransactionItemsToProduct(p, transaction.items, transaction.type));
   }
   let newCustomers = [...data.customers];
   if (transaction.customerId) {
@@ -2414,16 +2420,16 @@ export const processTransaction = (transaction: Transaction): AppState => {
     touchedProductIds.forEach((productId) => {
       const soldQty = data.transactions
         .filter(t => t.customerId === transaction.customerId && t.type === 'sale')
-        .reduce((acc, t) => acc + (t.items.find(i => i.id === productId)?.quantity || 0), 0);
+        .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       const returnedQty = data.transactions
         .filter(t => t.customerId === transaction.customerId && t.type === 'return')
-        .reduce((acc, t) => acc + (t.items.find(i => i.id === productId)?.quantity || 0), 0);
+        .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       legacyCustomerProductStatsSeed[productId] = { soldQty, returnedQty };
     });
   }
 
   if (db) {
-    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…' });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…', transactionId: transaction.id });
 
     void commitProcessTransactionAtomically({
       transaction,
@@ -2438,7 +2444,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
           committedCustomer: committedCustomer?.id || null,
         });
         if (!created) {
-          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.' });
+          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.', transactionId: transaction.id });
           void writeAuditEvent('BLOCKED_WRITE', {
             reason: 'processTransaction_idempotent_duplicate_skip',
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
@@ -2461,7 +2467,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
           transactions: nextTransactions,
         };
         emitLocalStorageUpdate();
-        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.' });
+        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.', transactionId: transaction.id });
 
         void Promise.all([
           touchedProductIds.length > 0
@@ -2502,6 +2508,7 @@ syncToCloud({ ...data }),
           op: OPERATION_TYPES.PROCESS_TRANSACTION,
           entity: 'transaction',
           error: error instanceof Error ? error.message : 'Transaction save failed.',
+          transactionId: transaction.id,
         });
       });
 
@@ -2513,6 +2520,7 @@ syncToCloud({ ...data }),
 
   const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
+  emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: transaction.id });
   return fallbackState;
 };
 
