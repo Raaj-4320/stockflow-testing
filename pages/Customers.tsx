@@ -1117,8 +1117,8 @@ export default function Customers() {
         onClose={() => setIsImportModalOpen(false)}
         title="Import Customers"
         onDownloadTemplate={downloadCustomersTemplate}
-        onImportFile={async (file) => {
-          const result = await importCustomersFromFile(file);
+        onImportFile={async (file, _onProgress) => {
+          const result = await importCustomersFromFile(file, _onProgress);
           refreshData();
           return result;
         }}
