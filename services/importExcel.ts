@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
-import { CartItem, Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
-import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
+import { CartItem, Customer, EntitySourceType, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
+import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, getOperationalTransactions, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
+import { buildImportSource, buildSystemId, DEFAULT_WAREHOUSE_ID } from './entityMetadata';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 
 export type ImportIssue = { sheet: string; row: number; field: string; message: string };
@@ -18,6 +19,10 @@ type TemplateField = {
   example: string;
 };
 
+export type ProductImportMode = 'master_data' | 'opening_balance';
+export type CustomerImportMode = 'master_data' | 'opening_balance';
+export type TransactionImportMode = 'live' | 'historical_reference';
+
 const IMPORT_BATCH_SIZE = 10;
 const IMPORT_BATCH_DELAY_MS = 150;
 
@@ -34,11 +39,16 @@ const includesNormalized = (items: string[] | undefined, value: string) => {
   const normalizedValue = normName(value);
   return Array.isArray(items) && items.some(item => normName(toStr(item)) === normalizedValue);
 };
+const hasLiveProductActivity = (transactions: Transaction[], productId: string) => transactions.some(transaction =>
+  transaction.type !== 'payment' && transaction.items.some(item => item.id === productId)
+);
+const hasLiveCustomerActivity = (transactions: Transaction[], customerId: string) => transactions.some(transaction => transaction.customerId === customerId);
 
 const isDataUrlImage = (value: string) => /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(value);
 const isHttpUrl = (value: string) => /^https?:\/\//i.test(value);
 const isLikelyLocalPath = (value: string) => /^(\.\/|\.\.\/|\/|[a-zA-Z]:\\)/.test(value);
 const isCloudinaryUrl = (value: string) => /(^|\.)cloudinary\.com\//i.test(value);
+const buildUploadId = (prefix: string, file: File) => `${prefix}_${file.name.replace(/\W+/g, '_').toLowerCase()}_${Date.now()}`;
 
 const fetchImageAsDataUrl = async (url: string): Promise<string> => {
   const response = await fetch(url);
@@ -165,8 +175,8 @@ export const downloadTransactionsTemplate = () => writeTemplate(
     { field: 'Date', behavior: 'Editable', required: 'Mandatory', format: 'ISO or parseable date-time', notes: 'Transaction date/time.', example: new Date().toISOString() },
     { field: 'Type', behavior: 'Editable', required: 'Mandatory', format: 'sale | return | payment', notes: 'payment uses Amount field; sale/return uses item rows.', example: 'sale' },
     { field: 'Customer ID', behavior: 'Lookup-only', required: 'Preferred', format: 'Text', notes: 'Primary customer identity for import matching when provided.', example: 'customer-001' },
-    { field: 'Customer Phone', behavior: 'Lookup-only', required: 'Preferred', format: 'Text digits', notes: 'Used to map existing customer.', example: '9876543210' },
-    { field: 'Customer Name', behavior: 'Lookup-only', required: 'Optional', format: 'Text', notes: 'Used as fallback lookup if phone missing. Must uniquely match existing customer.', example: 'Ravi Kumar' },
+    { field: 'Customer Phone', behavior: 'Lookup-only', required: 'Preferred', format: 'Text digits', notes: 'Used to map an existing customer when Customer ID is not provided.', example: '9876543210' },
+    { field: 'Customer Name', behavior: 'Lookup-only', required: 'Optional', format: 'Text', notes: 'Reference-only verification field; does not resolve identity by itself.', example: 'Ravi Kumar' },
     { field: 'Payment Method', behavior: 'Editable', required: 'Mandatory', format: 'Cash | Credit | Online', notes: 'Credit requires matched customer.', example: 'Cash' },
     { field: 'Product ID', behavior: 'Lookup-only', required: 'Mandatory', format: 'Text', notes: 'Required for sale/return rows. Primary product identity for stock-safe import.', example: 'product-001' },
     { field: 'Product Barcode', behavior: 'Validation-only', required: 'Optional', format: 'Text', notes: 'Optional cross-check. If provided, must match Product ID barcode.', example: 'SKU-1001' },
@@ -319,8 +329,8 @@ export const downloadTransactionsData = () => {
     { field: 'Date', behavior: 'Editable', required: 'Mandatory', format: 'ISO or parseable date-time', notes: 'Used when creating new transactions.', example: new Date().toISOString() },
     { field: 'Type', behavior: 'Editable', required: 'Mandatory', format: 'sale|return|payment', notes: 'Used when creating new transactions. Existing IDs must still match immutable records.', example: 'sale' },
     { field: 'Customer ID', behavior: 'Lookup-only', required: 'Preferred', format: 'Text', notes: 'Primary customer identity for import matching when present.', example: 'customer-001' },
-    { field: 'Customer Phone', behavior: 'Lookup-only', required: 'Preferred', format: 'Text digits', notes: 'Used to resolve existing customer only.', example: '9876543210' },
-    { field: 'Customer Name', behavior: 'Lookup-only', required: 'Optional', format: 'Text', notes: 'Fallback lookup when phone missing. Must uniquely match existing customer.', example: 'Ravi Kumar' },
+    { field: 'Customer Phone', behavior: 'Lookup-only', required: 'Preferred', format: 'Text digits', notes: 'Used to resolve an existing customer only when Customer ID is not provided.', example: '9876543210' },
+    { field: 'Customer Name', behavior: 'Lookup-only', required: 'Optional', format: 'Text', notes: 'Reference-only verification field; does not resolve identity by itself.', example: 'Ravi Kumar' },
     { field: 'Payment Method', behavior: 'Editable', required: 'Mandatory', format: 'Cash | Credit | Online', notes: 'Stored on created transactions (Credit requires resolved customer).', example: 'Cash' },
     { field: 'Product ID', behavior: 'Lookup-only', required: 'Mandatory', format: 'Text', notes: 'Required for sale/return rows. Primary stock-safe product lookup key.', example: 'product-001' },
     { field: 'Product Barcode', behavior: 'Validation-only', required: 'Optional', format: 'Text', notes: 'Reference consistency check. If provided, must match Product ID barcode.', example: 'SKU-1001' },
@@ -377,16 +387,24 @@ export const downloadPurchaseData = () => {
   ], 'Purchase_Data');
 };
 
-export const importInventoryFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
+export const importInventoryFromFile = async (
+  file: File,
+  onProgress?: (progress: ImportProgress) => void,
+  options?: { mode?: ProductImportMode }
+): Promise<ImportResult> => {
   const rows = await readRows(file, 'Inventory');
   const data = loadData();
+  const liveTransactions = getOperationalTransactions(data.transactions || []);
+  const mode = options?.mode || 'master_data';
+  const isOpeningMode = mode === 'opening_balance';
+  const uploadId = buildUploadId('inventory', file);
   const errors: ImportIssue[] = [];
   const existingById = new Map((data.products || []).map(p => [p.id, p]));
   const existingByBarcode = new Map((data.products || []).map(p => [toStr(p.barcode).toLowerCase(), p]));
   const existingBarcodes = new Set((data.products || []).map(p => toStr(p.barcode).toLowerCase()));
   const seen = new Set<string>();
   const seenIds = new Set<string>();
-  const valid: Array<Product & { __rowNo: number; __imageSourceRaw: string }> = [];
+  const valid: Array<Product & { __rowNo: number; __imageSourceRaw: string; __externalId: string; __matchedId?: string }> = [];
 
   onProgress?.({ phase: 'validating', processed: 0, total: rows.length, message: 'Validating inventory rows...' });
   rows.forEach((row, i) => {
@@ -403,6 +421,9 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
     const totalSoldInput = row['Total Sold'];
     const totalSold = totalSoldInput === '' || totalSoldInput === undefined || totalSoldInput === null ? 0 : toNum(totalSoldInput);
     const totalPurchase = totalPurchaseInput === '' || totalPurchaseInput === undefined || totalPurchaseInput === null ? (Number.isFinite(stock) && Number.isFinite(totalSold) ? stock + totalSold : NaN) : toNum(totalPurchaseInput);
+    const key = barcode.toLowerCase();
+    const existingByInternalId = productId ? existingById.get(productId) : undefined;
+    const existingByBusinessKey = key ? existingByBarcode.get(key) : undefined;
 
     if (productId && seenIds.has(productId)) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Product ID', message: 'Duplicate Product ID in file' });
     if (productId) seenIds.add(productId);
@@ -418,12 +439,9 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
     if (Number.isFinite(stock) && Number.isFinite(totalPurchase) && Number.isFinite(totalSold) && stock !== (totalPurchase - totalSold)) {
       errors.push({ sheet: 'Inventory', row: rowNo, field: 'Current Stock', message: 'Current Stock must equal Total Purchase - Total Sold' });
     }
-
-    const key = barcode.toLowerCase();
     if (key && seen.has(key)) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Barcode', message: 'Duplicate barcode in file' });
     if (key && existingBarcodes.has(key)) {
-      const existing = existingByBarcode.get(key);
-      if (!productId || !existing || existing.id !== productId) {
+      if (existingByInternalId && existingByBusinessKey && existingByInternalId.id !== existingByBusinessKey.id) {
         errors.push({ sheet: 'Inventory', row: rowNo, field: 'Barcode', message: 'Barcode already exists for another product' });
       }
     }
@@ -431,7 +449,7 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
 
     if (!errors.some(e => e.row === rowNo)) {
       valid.push({
-        id: `import-product-${Date.now()}-${i}`,
+        id: buildSystemId('prd'),
         barcode,
         name,
         category,
@@ -444,11 +462,35 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
         totalPurchase,
         totalSold,
         __rowNo: rowNo,
+        __externalId: productId,
+        __matchedId: productId && existingById.has(productId) ? productId : undefined,
         __imageSourceRaw: toStr(row['Image Source'] || row['Image'] || row['Image URL']),
+        source: buildImportSource({
+          type: 'excel_import',
+          uploadId,
+          externalId: productId || undefined,
+          fileName: file.name,
+          rowNumber: rowNo,
+        }),
       });
-      if (productId) valid[valid.length - 1].id = productId;
     }
   });
+
+  if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, summary: 'Validation failed. No products imported.' };
+
+  if (isOpeningMode) {
+    valid.forEach(product => {
+      const matched = (product.__matchedId ? existingById.get(product.__matchedId) : undefined) || existingByBarcode.get(toStr(product.barcode).toLowerCase());
+      if (matched && hasLiveProductActivity(liveTransactions, matched.id)) {
+        errors.push({
+          sheet: 'Inventory',
+          row: product.__rowNo,
+          field: 'Product ID',
+          message: 'Opening Balance import is blocked for products with existing live sales or returns. Create a new product or use live transactions to adjust balances.',
+        });
+      }
+    });
+  }
 
   if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, summary: 'Validation failed. No products imported.' };
 
@@ -468,22 +510,58 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
 
   await runThrottled(valid, async product => {
     if (product.category) addCategory(product.category);
-    const { __rowNo: _omitRowNo, __imageSourceRaw: _omitImageSourceRaw, ...payload } = product;
-    const matched = existingById.get(payload.id) || existingByBarcode.get(toStr(payload.barcode).toLowerCase());
+    const { __rowNo: _omitRowNo, __imageSourceRaw: _omitImageSourceRaw, __externalId: _omitExternalId, __matchedId, ...payload } = product;
+    const matched = (__matchedId ? existingById.get(__matchedId) : undefined) || existingByBarcode.get(toStr(payload.barcode).toLowerCase());
     if (matched) {
-      await updateProduct({ ...matched, ...payload, id: matched.id, barcode: payload.barcode || matched.barcode });
+      const nextProduct: Product = isOpeningMode
+        ? {
+            ...matched,
+            totalPurchase: payload.totalPurchase,
+            totalSold: payload.totalSold,
+            stock: payload.stock,
+            source: payload.source,
+          }
+        : {
+            ...matched,
+            barcode: payload.barcode || matched.barcode,
+            name: payload.name,
+            category: payload.category,
+            buyPrice: payload.buyPrice,
+            sellPrice: payload.sellPrice,
+            description: payload.description,
+            hsn: payload.hsn,
+            image: payload.image || matched.image,
+            source: payload.source,
+          };
+      await updateProduct(nextProduct);
     } else {
-      await addProduct(payload);
+      const newProduct: Product = isOpeningMode
+        ? payload
+        : {
+            ...payload,
+            stock: 0,
+            totalPurchase: 0,
+            totalSold: 0,
+          };
+      await addProduct(newProduct);
     }
   }, onProgress, 'Importing inventory');
 
   onProgress?.({ phase: 'completed', processed: valid.length, total: valid.length, message: 'Inventory import completed.' });
-  return { totalRows: rows.length, importedRows: valid.length, errors: [], summary: `Imported ${valid.length} products successfully.` };
+  return { totalRows: rows.length, importedRows: valid.length, errors: [], summary: `Imported ${valid.length} products successfully in ${mode.replace('_', ' ')} mode.` };
 };
 
-export const importCustomersFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
+export const importCustomersFromFile = async (
+  file: File,
+  onProgress?: (progress: ImportProgress) => void,
+  options?: { mode?: CustomerImportMode }
+): Promise<ImportResult> => {
   const rows = await readRows(file, 'Customers');
   const data = loadData();
+  const liveTransactions = getOperationalTransactions(data.transactions || []);
+  const mode = options?.mode || 'master_data';
+  const isOpeningMode = mode === 'opening_balance';
+  const uploadId = buildUploadId('customers', file);
   const errors: ImportIssue[] = [];
   const existingById = new Map((data.customers || []).map(c => [c.id, c]));
   const existingByPhone = new Map((data.customers || []).map(c => [normPhone(toStr(c.phone)), c]));
@@ -504,6 +582,8 @@ export const importCustomersFromFile = async (file: File, onProgress?: (progress
     const openingCredit = toNum(row['Opening Credit']);
     const visitCount = toNum(row['Visit Count']);
     const lastVisitInput = toStr(row['Last Visit (ISO DateTime)']);
+    const existingByInternalId = customerId ? existingById.get(customerId) : undefined;
+    const existingByBusinessKey = normalizedPhone ? existingByPhone.get(normalizedPhone) : undefined;
 
     if (customerId && seenIds.has(customerId)) errors.push({ sheet: 'Customers', row: rowNo, field: 'Customer ID', message: 'Duplicate Customer ID in file' });
     if (customerId) seenIds.add(customerId);
@@ -513,8 +593,7 @@ export const importCustomersFromFile = async (file: File, onProgress?: (progress
     if (normalizedPhone.length < 8) errors.push({ sheet: 'Customers', row: rowNo, field: 'Phone', message: 'Phone format is invalid' });
     if (normalizedPhone && seen.has(normalizedPhone)) errors.push({ sheet: 'Customers', row: rowNo, field: 'Phone', message: 'Duplicate phone in file' });
     if (normalizedPhone && existingPhones.has(normalizedPhone)) {
-      const existing = existingByPhone.get(normalizedPhone);
-      if (!customerId || !existing || existing.id !== customerId) {
+      if (existingByInternalId && existingByBusinessKey && existingByInternalId.id !== existingByBusinessKey.id) {
         errors.push({ sheet: 'Customers', row: rowNo, field: 'Phone', message: 'Customer phone already exists for another customer' });
       }
     }
@@ -532,44 +611,95 @@ export const importCustomersFromFile = async (file: File, onProgress?: (progress
         ? totalDue
         : (Number.isFinite(openingCredit) ? openingCredit : 0);
       valid.push({
-        id: customerId || `import-customer-${Date.now()}-${i}`,
+        id: customerId && existingById.has(customerId) ? customerId : buildSystemId('cus'),
         name,
         phone,
         totalSpend: Number.isFinite(totalSpend) ? totalSpend : 0,
         totalDue: resolvedDue,
         visitCount: Number.isFinite(visitCount) ? Math.floor(visitCount) : 0,
         lastVisit: lastVisitInput ? new Date(lastVisitInput).toISOString() : new Date().toISOString(),
+        source: buildImportSource({
+          type: 'excel_import',
+          uploadId,
+          externalId: customerId || undefined,
+          fileName: file.name,
+          rowNumber: rowNo,
+        }),
       });
     }
   });
 
   if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, summary: 'Validation failed. No customers imported.' };
 
+  if (isOpeningMode) {
+    valid.forEach(customer => {
+      const externalId = customer.source?.externalId;
+      const matched = (externalId ? existingById.get(externalId) : undefined) || existingByPhone.get(normPhone(customer.phone));
+      if (matched && hasLiveCustomerActivity(liveTransactions, matched.id)) {
+        const matchField = externalId ? 'Customer ID' : 'Phone';
+        errors.push({
+          sheet: 'Customers',
+          row: customer.source?.rowNumber || 0,
+          field: matchField,
+          message: 'Opening Balance import is blocked for customers with existing live transactions or payments. Use live transactions to correct balances instead.',
+        });
+      }
+    });
+  }
+
+  if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, summary: 'Validation failed. No customers imported.' };
+
   await runThrottled(valid, customer => {
-    const matched = existingById.get(customer.id) || existingByPhone.get(normPhone(customer.phone));
+    const externalId = customer.source?.externalId;
+    const matched = (externalId ? existingById.get(externalId) : undefined) || existingByPhone.get(normPhone(customer.phone));
     if (matched) {
-      updateCustomer({ ...matched, ...customer, id: matched.id });
+      const nextCustomer: Customer = isOpeningMode
+        ? {
+            ...matched,
+            totalSpend: customer.totalSpend,
+            totalDue: customer.totalDue,
+            visitCount: customer.visitCount,
+            lastVisit: customer.lastVisit,
+            source: customer.source,
+          }
+        : {
+            ...matched,
+            name: customer.name,
+            phone: customer.phone,
+            source: customer.source,
+          };
+      updateCustomer(nextCustomer);
     } else {
-      addCustomer(customer);
+      const newCustomer: Customer = isOpeningMode
+        ? customer
+        : {
+            ...customer,
+            totalSpend: 0,
+            totalDue: 0,
+            visitCount: 0,
+          };
+      addCustomer(newCustomer);
     }
   }, onProgress, 'Importing customers');
 
   onProgress?.({ phase: 'completed', processed: valid.length, total: valid.length, message: 'Customer import completed.' });
-  return { totalRows: rows.length, importedRows: valid.length, errors: [], summary: `Imported ${valid.length} customers successfully.` };
+  return { totalRows: rows.length, importedRows: valid.length, errors: [], summary: `Imported ${valid.length} customers successfully in ${mode.replace('_', ' ')} mode.` };
 };
 
 export const importTransactionsFromFile = async (
   file: File,
   onProgress?: (progress: ImportProgress) => void,
-  options?: { mode?: 'live' | 'historical' }
+  options?: { mode?: TransactionImportMode }
 ): Promise<ImportResult> => {
   const rows = await readRows(file, 'Transactions');
   const data = loadData();
   const mode = options?.mode || 'live';
-  const isHistoricalMode = mode === 'historical';
+  const isHistoricalMode = mode === 'historical_reference';
+  const uploadId = buildUploadId('transactions', file);
   const errors: ImportIssue[] = [];
   const warnings: ImportIssue[] = [];
   const productsById = new Map((data.products || []).map(p => [toStr(p.id), p]));
+  const transactionsByExternalId = new Map((data.transactions || []).map(t => [toStr(t.source?.externalId), t]));
   const customersById = new Map((data.customers || []).map(c => [toStr(c.id), c]));
   const customersByPhone = new Map((data.customers || []).map(c => [normPhone(toStr(c.phone)), c]));
   const customersByName = new Map<string, Customer[]>();
@@ -617,8 +747,11 @@ export const importTransactionsFromFile = async (
       customer = customerPhone ? customersByPhone.get(customerPhone) : undefined;
       if (!customer && customerNameFromFile) {
         const byName = customersByName.get(normName(customerNameFromFile)) || [];
-        if (byName.length === 1) customer = byName[0];
-        if (byName.length > 1) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer Name', message: 'Multiple customers match this name. Provide Customer ID or Customer Phone.' });
+        if (byName.length > 1) {
+          errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer Name', message: 'Multiple customers match this name. Provide Customer ID or Customer Phone.' });
+        } else {
+          errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer Name', message: 'Customer Name alone cannot resolve identity. Provide Customer ID or Customer Phone.' });
+        }
       }
     }
     if (customer && customerPhone && normPhone(toStr(customer.phone)) !== customerPhone) {
@@ -628,11 +761,11 @@ export const importTransactionsFromFile = async (
       errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer Name', message: 'Customer Name does not match resolved customer' });
     }
 
-    const existingTx = (data.transactions || []).find(t => t.id === txId);
+    const existingTx = (data.transactions || []).find(t => t.id === txId) || transactionsByExternalId.get(txId);
     if (!date || Number.isNaN(Date.parse(date))) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Date', message: 'Date format is invalid' });
     if (!['sale', 'return', 'payment'].includes(type)) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Type', message: 'Type must be sale, return, or payment' });
     if (!['Cash', 'Credit', 'Online'].includes(paymentMethod)) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Payment Method', message: 'Payment Method is invalid' });
-    if (paymentMethod === 'Credit' && !customer) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer', message: 'Credit transactions require an existing customer (Customer ID preferred, else phone/name match)' });
+    if (paymentMethod === 'Credit' && !customer) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer', message: 'Credit transactions require an existing customer (Customer ID preferred, else phone match).' });
 
     if (type === 'payment') {
       const amount = Number.isFinite(toNum(row0['Amount'])) ? toNum(row0['Amount']) : toNum(row0['Total']);
@@ -641,15 +774,24 @@ export const importTransactionsFromFile = async (
         continue;
       }
       const paymentTx: Transaction = {
-        id: txId,
+        id: existingTx?.id || buildSystemId('tx'),
         date: new Date(date).toISOString(),
         type: 'payment',
+        mode: isHistoricalMode ? 'historical' : 'live',
+        warehouseId: DEFAULT_WAREHOUSE_ID,
         items: [],
         total: amount,
         customerId: customer?.id,
         customerName: customer?.name || customerNameFromFile || undefined,
         paymentMethod: paymentMethod as Transaction['paymentMethod'],
         notes: toStr(row0['Notes']) || undefined,
+        source: buildImportSource({
+          type: isHistoricalMode ? 'historical_import' : 'excel_import',
+          uploadId,
+          externalId: txId,
+          fileName: file.name,
+          rowNumber: rowNo0,
+        }),
       };
       if (existingTx) {
         if (existingTx.type !== 'payment' || Math.abs((existingTx.total || 0) - paymentTx.total) > 0.01) {
@@ -753,8 +895,10 @@ export const importTransactionsFromFile = async (
     }
 
     const computedTx: Transaction = {
-      id: txId,
+      id: existingTx?.id || buildSystemId('tx'),
       date: new Date(date).toISOString(),
+      mode: isHistoricalMode ? 'historical' : 'live',
+      warehouseId: DEFAULT_WAREHOUSE_ID,
       type: type as Transaction['type'],
       customerId: customer?.id,
       customerName: customer?.name || customerNameFromFile || undefined,
@@ -767,6 +911,13 @@ export const importTransactionsFromFile = async (
       taxLabel,
       total: computedTotal,
       notes: toStr(row0['Notes']) || undefined,
+      source: buildImportSource({
+        type: isHistoricalMode ? 'historical_import' : 'excel_import',
+        uploadId,
+        externalId: txId,
+        fileName: file.name,
+        rowNumber: rowNo0,
+      }),
     };
     if (existingTx) {
       const existingComparable = JSON.stringify({
@@ -818,8 +969,8 @@ export const importTransactionsFromFile = async (
 
     onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Historical transaction import completed.' });
     const summary = warnings.length
-      ? `Imported ${importTx.length} historical transactions with ${warnings.length} warning(s).`
-      : `Imported ${importTx.length} historical transactions successfully.`;
+      ? `Imported ${importTx.length} historical reference transactions with ${warnings.length} warning(s).`
+      : `Imported ${importTx.length} historical reference transactions successfully.`;
     return { totalRows: rows.length, importedRows: importTx.length, errors: [], warnings, summary };
   }
 
@@ -828,11 +979,11 @@ export const importTransactionsFromFile = async (
   }, onProgress, 'Importing transactions');
 
   onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Transaction import completed.' });
-  return { totalRows: rows.length, importedRows: importTx.length, errors: [], warnings, summary: `Imported ${importTx.length} transactions successfully.` };
+  return { totalRows: rows.length, importedRows: importTx.length, errors: [], warnings, summary: `Imported ${importTx.length} live transactions successfully.` };
 };
 
 export const importHistoricalTransactionsFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
-  return importTransactionsFromFile(file, onProgress, { mode: 'historical' });
+  return importTransactionsFromFile(file, onProgress, { mode: 'historical_reference' });
 };
 
 export const importPurchaseFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
