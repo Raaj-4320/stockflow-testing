@@ -187,21 +187,23 @@ export default function Admin() {
 
     setIsSaving(true);
     try {
+      let updatedProducts: Product[] = [];
+
       if (editingProduct) {
-        const updated = await updateProduct(productPayload);
+        updatedProducts = await updateProduct(productPayload);
         console.debug('[product] update success', { productId: productPayload.id });
-        setProducts(updated);
+        setProducts(updatedProducts);
       } else {
-        const updated = await addProduct(productPayload);
+        updatedProducts = await addProduct(productPayload);
         console.debug('[product] create success', { productId: productPayload.id });
-        setProducts(updated);
+        setProducts(updatedProducts);
       }
       if (keepOpenForNext) {
         if (editingProduct && batchEditProductIds.length > 0) {
           const nextIndex = batchEditIndex + 1;
           const nextProductId = batchEditProductIds[nextIndex];
           if (nextProductId) {
-            const nextProduct = updated.find(product => product.id === nextProductId);
+            const nextProduct = updatedProducts.find(product => product.id === nextProductId);
             if (nextProduct) {
               setBatchEditIndex(nextIndex);
               openModal(nextProduct);
