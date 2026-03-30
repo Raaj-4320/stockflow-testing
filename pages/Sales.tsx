@@ -505,38 +505,239 @@ export default function Sales() {
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
 
   return (
-    <div className={`h-full flex flex-col md:grid md:grid-cols-12 gap-4 pb-0 md:pb-0 ${isReturnMode ? 'bg-orange-50/30' : 'bg-background'}`}>
-      {/* Catalog Panel */}
-      <div className="flex flex-col gap-4 md:col-span-8 h-full overflow-hidden relative">
-        <div className="shrink-0 flex flex-col sm:flex-row gap-3 bg-card p-3 rounded-xl border shadow-sm">
-            <div className="flex p-1 bg-muted rounded-lg shrink-0">
-                <button onClick={() => { setIsReturnMode(false); setCart([]); }} className={`px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-md transition-all ${!isReturnMode ? 'bg-background shadow text-primary' : 'text-muted-foreground hover:text-foreground'}`}>Sale</button>
-                <button onClick={() => { setIsReturnMode(true); setCart([]); }} className={`px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-md transition-all ${isReturnMode ? 'bg-background shadow text-orange-600' : 'text-muted-foreground hover:text-foreground'}`}>Return</button>
+    <div
+      style={{
+        minHeight: '100vh',
+        background: isReturnMode ? '#fff7ed' : '#f5f5f7',
+        padding: 11,
+        boxSizing: 'border-box',
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1440,
+          margin: '0 auto',
+          minHeight: 'calc(100vh - 22px)',
+          background: '#fff',
+          border: '1px solid #e5e7eb',
+          borderRadius: 14,
+          overflow: 'hidden',
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) 400px',
+        }}
+      >
+        <div style={{ minWidth: 0, padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 10, alignItems: 'center' }}>
+              <input
+                value={productSearch}
+                onChange={(e) => setProductSearch(e.target.value)}
+                placeholder="Search product, barcode, variant"
+                style={{ height: 36, border: '1px solid #d1d5db', borderRadius: 10, padding: '0 10px', fontSize: 13.5 }}
+              />
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, minWidth: 180 }}>
+                <button
+                  onClick={() => { setIsReturnMode(false); setCart([]); }}
+                  style={{
+                    height: 36,
+                    borderRadius: 10,
+                    border: !isReturnMode ? 'none' : '1px solid #d1d5db',
+                    background: !isReturnMode ? '#111111' : '#fff',
+                    color: !isReturnMode ? '#fff' : '#111827',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Sale
+                </button>
+                <button
+                  onClick={() => { setIsReturnMode(true); setCart([]); }}
+                  style={{
+                    height: 36,
+                    borderRadius: 10,
+                    border: isReturnMode ? 'none' : '1px solid #d1d5db',
+                    background: isReturnMode ? '#d97706' : '#fff',
+                    color: isReturnMode ? '#fff' : '#111827',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Return
+                </button>
+              </div>
             </div>
-            <div className="relative flex-1 group">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <input className="w-full bg-muted/50 hover:bg-muted focus:bg-background border-transparent focus:border-input rounded-lg pl-9 pr-4 py-2 text-sm outline-none border transition-all" placeholder="Search products..." value={productSearch} onChange={e => setProductSearch(e.target.value)} />
+          </div>
+
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 10 }}>
+              {filteredProducts.map((product) => {
+                const qtyInCart = cart.filter((item) => item.id === product.id).reduce((sum, item) => sum + item.quantity, 0);
+                const isDisabled = !isReturnMode && product.stock <= 0;
+
+                return (
+                  <div
+                    key={product.id}
+                    style={{
+                      border: `1px solid ${isReturnMode ? '#fdba74' : '#e5e7eb'}`,
+                      borderRadius: 12,
+                      padding: 10,
+                      background: isDisabled ? '#ededed' : '#fff',
+                      opacity: isDisabled ? 0.6 : 1,
+                    }}
+                  >
+                    <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#fff', height: 118 }}>
+                      {product.image ? (
+                        <img src={product.image} alt={product.name} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center bg-secondary/50">
+                          <Package className="h-8 w-8 text-muted-foreground/30" />
+                        </div>
+                      )}
+
+                      <div style={{ position: 'absolute', right: 8, bottom: 4, background: 'rgba(17,24,39,0.30)', color: '#fff', borderRadius: 999, padding: '2px 7px', fontSize: 11.25, fontWeight: 600 }}>
+                        ₹ {product.sellPrice}
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.3, marginTop: 8 }}>{product.name}</div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'auto 28px 1fr 28px', gap: 8, alignItems: 'center', marginTop: 8 }}>
+                      <div style={{ fontSize: 11.75, color: '#6b7280', whiteSpace: 'nowrap' }}>
+                        {isReturnMode ? `Sold: ${product.totalSold || 0}` : `Stock: ${Math.max(0, product.stock)}`}
+                      </div>
+
+                      <button
+                        onClick={() => updateQuantity(String(product.id), -1, NO_VARIANT, NO_COLOR)}
+                        style={{ width: 28, height: 28, border: '1px solid #d1d5db', borderRadius: 9, background: '#fff', cursor: 'pointer' }}
+                        disabled={qtyInCart <= 0}
+                      >
+                        −
+                      </button>
+
+                      <div style={{ height: 30, borderRadius: 8, background: '#f3f4f6', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13.5, fontWeight: 600 }}>
+                        {qtyInCart}
+                      </div>
+
+                      <button
+                        onClick={() => handleProductSelect(`${product.id}`, 1)}
+                        style={{ width: 28, height: 28, border: '1px solid #d1d5db', borderRadius: 9, background: '#fff', cursor: 'pointer' }}
+                        disabled={isDisabled}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto pr-1">
-                <div className="grid grid-cols-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 pb-24 md:pb-4">
-                    {filteredProducts.map(p => {
-                        const cartItem = cart.find(item => item.id === p.id);
-                        return (
-                            <ProductGridItem 
-                                key={p.id} 
-                                product={p} 
-                                isReturnMode={isReturnMode} 
-                                cartQty={cartItem?.quantity || 0}
-                                onAdd={(qty) => handleProductSelect(`${p.id}`, qty)} 
-                            />
-                        );
-                    })}
-                </div>
+        <div style={{ minWidth: 0, background: '#fcfcfd', padding: 11, display: 'flex', flexDirection: 'column', gap: 10, height: 'calc(100vh - 22px)', boxSizing: 'border-box' }}>
+          <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>{isReturnMode ? 'Return Cart' : 'Cart'}</span>
+              {cart.length > 0 && (
+                <button onClick={() => setCart([])} style={{ height: 30, borderRadius: 10, border: '1px solid #d1d5db', background: '#fff', padding: '0 10px', cursor: 'pointer' }}>
+                  Clear
+                </button>
+              )}
             </div>
-      </div>
 
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {cart.length === 0 ? (
+                <div style={{ border: '1px dashed #e5e7eb', borderRadius: 12, padding: 20, textAlign: 'center', color: '#6b7280', fontSize: 12.5, background: '#fafafa' }}>
+                  {isReturnMode ? 'Return cart is empty' : 'Cart is empty'}
+                </div>
+              ) : (
+                cart.map((item) => (
+                  <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} style={{ border: `1px solid ${isReturnMode ? '#fdba74' : '#e5e7eb'}`, borderRadius: 11, padding: 8, background: '#fff', display: 'grid', gridTemplateColumns: '44px minmax(0, 1fr) 26px', gap: 8 }}>
+                    <div style={{ width: 44, height: 44, borderRadius: 10, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#fff' }}>
+                      {item.image ? (
+                        <img src={item.image} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center bg-secondary/50">
+                          <Package className="h-5 w-5 text-muted-foreground/30" />
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#6b7280', marginTop: 2 }}>Buy price: ₹ {item.buyPrice}</div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '28px 1fr 28px 90px 1fr', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                        <button onClick={() => updateQuantity(String(item.id), -1, item.selectedVariant, item.selectedColor)} style={{ width: 28, height: 28, border: '1px solid #d1d5db', borderRadius: 9, background: '#fff', cursor: 'pointer' }}>
+                          −
+                        </button>
+
+                        <input
+                          type="number"
+                          value={item.quantity}
+                          onChange={(e) => setManualQuantity(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)}
+                          style={{ height: 30, borderRadius: 8, border: '1px solid #d1d5db', padding: '0 8px', textAlign: 'center' }}
+                        />
+
+                        <button onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)} style={{ width: 28, height: 28, border: '1px solid #d1d5db', borderRadius: 9, background: '#fff', cursor: 'pointer' }}>
+                          +
+                        </button>
+
+                        <input
+                          type="number"
+                          value={item.sellPrice}
+                          onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)}
+                          style={{ height: 30, borderRadius: 8, border: '1px solid #d1d5db', padding: '0 8px', textAlign: 'center' }}
+                        />
+
+                        <div style={{ textAlign: 'right', fontSize: 16, fontWeight: 700 }}>₹ {(item.sellPrice * item.quantity).toFixed(2)}</div>
+                      </div>
+                    </div>
+
+                    <button onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)} style={{ width: 24, height: 24, border: '1px solid #fecaca', borderRadius: 8, background: '#fff', cursor: 'pointer' }}>
+                      <Trash2 className="w-4 h-4 text-red-600" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: 10, marginTop: 10 }}>
+              {cartError && <div className="mb-2 text-xs bg-destructive/10 text-destructive p-2 rounded flex items-center gap-2"><AlertCircle className="w-3 h-3" /> {cartError}</div>}
+              {transactionSyncStatus.phase !== 'idle' && (
+                <div className={`mb-2 text-xs p-2 rounded flex items-center gap-2 border ${transactionSyncStatus.phase === 'error' ? 'bg-destructive/10 text-destructive border-destructive/30' : transactionSyncStatus.phase === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
+                  <AlertCircle className="w-3 h-3" />
+                  {transactionSyncStatus.message}
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14.5, marginBottom: 6 }}><span style={{ color: '#6b7280' }}>Subtotal</span><span style={{ fontWeight: 600 }}>₹ {subtotal.toFixed(2)}</span></div>
+              {totalDiscount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14.5, marginBottom: 6 }}><span style={{ color: '#6b7280' }}>Discount</span><span style={{ fontWeight: 600 }}>-₹ {totalDiscount.toFixed(2)}</span></div>}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14.5, marginBottom: 8, cursor: 'pointer' }} onClick={() => setIsTaxModalOpen(true)}><span style={{ color: '#6b7280' }}>Tax ({selectedTax.label})</span><span style={{ fontWeight: 600 }}>₹ {taxVal.toFixed(2)}</span></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontWeight: 700, marginBottom: 10 }}><span>Total</span><span>{isReturnMode ? '-' : ''}₹ {Math.abs(grandTotal).toFixed(2)}</span></div>
+
+              <button
+                onClick={() => initiateCheckout()}
+                disabled={cart.length === 0}
+                style={{
+                  width: '100%',
+                  height: 38,
+                  borderRadius: 10,
+                  border: 'none',
+                  background: isReturnMode ? '#d97706' : '#111111',
+                  color: '#fff',
+                  fontWeight: 700,
+                  opacity: cart.length === 0 ? 0.5 : 1,
+                  cursor: cart.length === 0 ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {isReturnMode ? 'Process Return' : 'Proceed'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {variantPicker.open && variantPicker.product && (
         <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4" onClick={() => setVariantPicker({ open: false, product: null, rows: [] })}>
@@ -573,130 +774,6 @@ export default function Sales() {
         </div>
       )}
 
-      {/* Cart Panel */}
-      <div className={`md:col-span-4 flex flex-col h-full transition-all duration-300 ${isCartExpanded ? 'fixed inset-0 bg-background z-[70]' : 'fixed bottom-16 left-0 right-0 h-16 md:static md:h-full md:bg-transparent z-40'}`}>
-          <div className={`flex flex-col h-full bg-card md:rounded-xl md:border shadow-xl md:shadow-sm overflow-hidden ${isReturnMode ? 'border-orange-200' : 'border-border'}`}>
-              <div className={`p-4 flex items-center justify-between cursor-pointer md:cursor-default ${isReturnMode ? 'bg-orange-50' : 'bg-muted/30'}`} onClick={() => window.innerWidth < 768 && setIsCartExpanded(!isCartExpanded)}>
-                  <div className="flex items-center gap-2">
-                      <div className={`p-2 rounded-lg ${isReturnMode ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}><ShoppingCart className="w-5 h-5" /></div>
-                      <div><h2 className="font-bold text-sm">Cart</h2><p className="text-[10px] text-muted-foreground">{cart.length} items</p></div>
-                  </div>
-                  <div className="flex items-center gap-3 md:hidden">
-                      {cart.length > 0 && <div className="text-right"><p className="font-bold text-sm">₹{Math.abs(grandTotal).toFixed(0)}</p></div>}
-                      <ChevronUp className={`w-5 h-5 text-muted-foreground transition-transform ${isCartExpanded ? 'rotate-180' : ''}`} />
-                  </div>
-              </div>
-
-              <div className={`flex-1 overflow-y-auto p-3 space-y-3 ${!isCartExpanded ? 'hidden md:block' : 'block'}`}>
-                  {cart.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-muted-foreground/40 space-y-2"><ShoppingCart className="w-12 h-12" /><p className="text-sm font-medium">Cart is empty</p></div>
-                  ) : cart.map(item => (
-                      <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="flex flex-col gap-3 p-3 rounded-xl border bg-card shadow-sm hover:border-primary/20 transition-all">
-                          <div className="flex gap-3">
-                              <div className="h-12 w-12 shrink-0 bg-muted rounded-lg border overflow-hidden">
-                                {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                  <p className="font-bold text-sm truncate leading-tight mb-1">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
-                                  <p className="text-[10px] text-muted-foreground mb-1">Buy: ₹{item.buyPrice}</p>
-                                  <div className="flex items-center gap-1">
-                                      <span className="text-xs text-muted-foreground">₹</span>
-                                      <Input 
-                                          className="h-6 w-20 px-1 py-0 text-xs font-medium bg-transparent border-muted-foreground/30 focus-visible:ring-1"
-                                          value={item.sellPrice ?? ''}
-                                          type="number"
-                                          onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)}
-                                      />
-                                  </div>
-                              </div>
-                              <div className="text-right shrink-0">
-                                  <p className="font-bold text-sm text-primary">₹{(item.sellPrice * item.quantity).toFixed(0)}</p>
-                              </div>
-                          </div>
-                          
-                          <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center rounded-lg border h-8 overflow-hidden bg-background">
-                                  <button className="px-2 h-full hover:bg-muted border-r transition-colors" onClick={() => updateQuantity(String(item.id), -1, item.selectedVariant, item.selectedColor)}><Minus className="w-3.5 h-3.5" /></button>
-                                  <Input 
-                                    className="w-10 h-full border-0 text-center text-sm font-bold p-0 bg-transparent focus-visible:ring-0" 
-                                    value={item.quantity ?? ''} 
-                                    type="number"
-                                    onChange={(e) => setManualQuantity(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)}
-                                  />
-                                  <button className="px-2 h-full hover:bg-muted border-l transition-colors" onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)}><Plus className="w-3.5 h-3.5" /></button>
-                              </div>
-                              
-                              <div className="flex items-center gap-2 ml-auto">
-                                  <div className="flex items-center rounded-lg border h-8 bg-background px-2 group">
-                                      <Input 
-                                        className="h-full w-8 border-0 text-center text-xs p-0 bg-transparent focus-visible:ring-0" 
-                                        placeholder="0" 
-                                        value={item.discountPercent ?? ''} 
-                                        onChange={(e) => updateDiscount(String(item.id), e.target.value, 'percent', item.selectedVariant, item.selectedColor)} 
-                                      />
-                                      <span className="text-[10px] font-bold text-muted-foreground">%</span>
-                                  </div>
-                                  <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-destructive/10 hover:text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)}>
-                                      <Trash2 className="w-4 h-4" />
-                                  </Button>
-                              </div>
-                          </div>
-                      </div>
-                  ))}
-              </div>
-
-              <div className={`p-5 bg-muted/20 border-t shrink-0 ${!isCartExpanded ? 'hidden md:block' : 'block'}`}>
-                  {cartError && <div className="mb-3 text-xs bg-destructive/10 text-destructive p-2 rounded flex items-center gap-2"><AlertCircle className="w-3 h-3" /> {cartError}</div>}
-                  {transactionSyncStatus.phase !== 'idle' && (
-                    <div className={`mb-3 text-xs p-2 rounded flex items-center gap-2 border ${transactionSyncStatus.phase === 'error' ? 'bg-destructive/10 text-destructive border-destructive/30' : transactionSyncStatus.phase === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
-                      <AlertCircle className="w-3 h-3" />
-                      {transactionSyncStatus.phase === 'pending' ? 'Pending:' : transactionSyncStatus.phase === 'committing' ? 'Committing:' : transactionSyncStatus.phase === 'success' ? 'Committed:' : 'Commit failed:'} {transactionSyncStatus.message}
-                    </div>
-                  )}
-                  
-                  <div className="space-y-2.5 mb-5">
-                      <div className="flex justify-between text-sm text-muted-foreground">
-                          <span>Subtotal</span>
-                          <span className="font-medium">₹{subtotal.toFixed(2)}</span>
-                      </div>
-                      
-                      {totalDiscount > 0 && (
-                          <div className="flex justify-between text-sm text-green-600">
-                              <span>Discount</span>
-                              <span className="font-medium">-₹{totalDiscount.toFixed(2)}</span>
-                          </div>
-                      )}
-
-                      <div 
-                        className="flex justify-between items-center group cursor-pointer hover:bg-muted/50 p-1.5 -mx-1.5 rounded-lg transition-colors border border-transparent hover:border-primary/10"
-                        onClick={() => setIsTaxModalOpen(true)}
-                      >
-                          <span className="flex items-center gap-2 text-sm text-muted-foreground">
-                              Tax ({selectedTax.label}) <Settings2 className="w-3 h-3 opacity-50" />
-                          </span>
-                          <span className="font-medium text-sm">₹{taxVal.toFixed(2)}</span>
-                      </div>
-                      
-                      <div className="h-px bg-border/50 my-2"></div>
-                      
-                      <div className="flex justify-between items-center pt-1">
-                          <span className="font-extrabold text-xl">Total</span>
-                          <span className={`font-extrabold text-2xl ${isReturnMode ? 'text-red-600' : 'text-primary'}`}>
-                             {isReturnMode ? '-' : ''}₹{Math.abs(grandTotal).toFixed(0)}
-                          </span>
-                      </div>
-                  </div>
-
-                  <Button 
-                    className={`w-full h-14 text-lg font-extrabold shadow-xl rounded-xl transition-transform active:scale-95 ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : 'bg-primary hover:bg-primary/90'}`} 
-                    disabled={cart.length === 0} 
-                    onClick={() => initiateCheckout()}
-                  >
-                      {isReturnMode ? 'Process Return' : 'Proceed'}
-                  </Button>
-              </div>
-          </div>
-      </div>
 
       {/* Tax Selection Modal */}
       {isTaxModalOpen && (
