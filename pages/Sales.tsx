@@ -133,7 +133,6 @@ export default function Sales() {
 
   const [productSearch, setProductSearch] = useState('');
   const [isReturnMode, setIsReturnMode] = useState(false);
-  const [isCartExpanded, setIsCartExpanded] = useState(false);
   const [cartError, setCartError] = useState<string | null>(null);
   const [isTaxModalOpen, setIsTaxModalOpen] = useState(false);
   
@@ -157,6 +156,7 @@ export default function Sales() {
   
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState('All');
   const [transactionSyncStatus, setTransactionSyncStatus] = useState<{ phase: 'idle' | 'pending' | 'committing' | 'success' | 'error'; message: string }>({ phase: 'idle', message: '' });
 
   const refreshData = () => {
@@ -211,7 +211,6 @@ export default function Sales() {
         if (pendingCheckoutRef.current?.transactionId === detail.transactionId) {
           setCart(pendingCheckoutRef.current.cart);
           pendingCheckoutRef.current = null;
-          setIsCartExpanded(true);
         }
         setTransactionSyncStatus({ phase: 'error', message: detail.error || detail.message || 'Transaction sync failed. Data was rolled back.' });
       }
@@ -472,7 +471,6 @@ export default function Sales() {
       // Cleanup
       setIsCustomerModalOpen(false); 
       setCart([]); 
-      setIsCartExpanded(false);
       setSelectedCustomer(null);
       setNewCustomerName('');
       setNewCustomerPhone('');
@@ -501,40 +499,53 @@ export default function Sales() {
   const taxVal = (taxable * (selectedTax.value / 100));
   const grandTotal = isReturnMode ? -(taxable + taxVal) : (taxable + taxVal);
 
-  const filteredProducts = products.filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.barcode.toLowerCase().includes(productSearch.toLowerCase()) || (p.variants || []).some(v => v.toLowerCase().includes(productSearch.toLowerCase())) || (p.colors || []).some(c => c.toLowerCase().includes(productSearch.toLowerCase())));
+  const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
+  const filteredProducts = products.filter(p => {
+    const searchMatch = p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.barcode.toLowerCase().includes(productSearch.toLowerCase()) || (p.variants || []).some(v => v.toLowerCase().includes(productSearch.toLowerCase())) || (p.colors || []).some(c => c.toLowerCase().includes(productSearch.toLowerCase()));
+    const categoryMatch = selectedCategory === 'All' || (p.category || 'Uncategorized') === selectedCategory;
+    return searchMatch && categoryMatch;
+  });
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
 
   return (
-    <div className={`h-full flex flex-col md:grid md:grid-cols-12 gap-4 pb-0 md:pb-0 ${isReturnMode ? 'bg-orange-50/30' : 'bg-background'}`}>
-      {/* Catalog Panel */}
-      <div className="flex flex-col gap-4 md:col-span-8 h-full overflow-hidden relative">
-        <div className="shrink-0 flex flex-col sm:flex-row gap-3 bg-card p-3 rounded-xl border shadow-sm">
-            <div className="flex p-1 bg-muted rounded-lg shrink-0">
-                <button onClick={() => { setIsReturnMode(false); setCart([]); }} className={`px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-md transition-all ${!isReturnMode ? 'bg-background shadow text-primary' : 'text-muted-foreground hover:text-foreground'}`}>Sale</button>
-                <button onClick={() => { setIsReturnMode(true); setCart([]); }} className={`px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-md transition-all ${isReturnMode ? 'bg-background shadow text-orange-600' : 'text-muted-foreground hover:text-foreground'}`}>Return</button>
+    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_390px] gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
+      <div className="min-w-0 flex flex-col gap-3">
+        <div className="bg-card border rounded-xl p-3 space-y-3">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px] items-center">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input value={productSearch} onChange={e => setProductSearch(e.target.value)} className="pl-9 h-9" placeholder="Search product, barcode, variant" />
             </div>
-            <div className="relative flex-1 group">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <input className="w-full bg-muted/50 hover:bg-muted focus:bg-background border-transparent focus:border-input rounded-lg pl-9 pr-4 py-2 text-sm outline-none border transition-all" placeholder="Search products..." value={productSearch} onChange={e => setProductSearch(e.target.value)} />
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant={!isReturnMode ? 'default' : 'outline'} className={!isReturnMode ? '' : 'text-foreground'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sale</Button>
+              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setCart([]); }}>Return</Button>
             </div>
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {categories.map((category) => (
+              <Button key={category} variant={selectedCategory === category ? 'default' : 'outline'} size="sm" className={`h-8 shrink-0 ${selectedCategory === category && isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} onClick={() => setSelectedCategory(category)}>
+                {category}
+              </Button>
+            ))}
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto pr-1">
-                <div className="grid grid-cols-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 pb-24 md:pb-4">
-                    {filteredProducts.map(p => {
-                        const cartItem = cart.find(item => item.id === p.id);
-                        return (
-                            <ProductGridItem 
-                                key={p.id} 
-                                product={p} 
-                                isReturnMode={isReturnMode} 
-                                cartQty={cartItem?.quantity || 0}
-                                onAdd={(qty) => handleProductSelect(`${p.id}`, qty)} 
-                            />
-                        );
-                    })}
-                </div>
-            </div>
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+            {filteredProducts.map(p => {
+              const cartItem = cart.find(item => item.id === p.id);
+              return (
+                <ProductGridItem
+                  key={p.id}
+                  product={p}
+                  isReturnMode={isReturnMode}
+                  cartQty={cartItem?.quantity || 0}
+                  onAdd={(qty) => handleProductSelect(`${p.id}`, qty)}
+                />
+              );
+            })}
+          </div>
+        </div>
       </div>
 
 
@@ -573,129 +584,65 @@ export default function Sales() {
         </div>
       )}
 
-      {/* Cart Panel */}
-      <div className={`md:col-span-4 flex flex-col h-full transition-all duration-300 ${isCartExpanded ? 'fixed inset-0 bg-background z-[70]' : 'fixed bottom-16 left-0 right-0 h-16 md:static md:h-full md:bg-transparent z-40'}`}>
-          <div className={`flex flex-col h-full bg-card md:rounded-xl md:border shadow-xl md:shadow-sm overflow-hidden ${isReturnMode ? 'border-orange-200' : 'border-border'}`}>
-              <div className={`p-4 flex items-center justify-between cursor-pointer md:cursor-default ${isReturnMode ? 'bg-orange-50' : 'bg-muted/30'}`} onClick={() => window.innerWidth < 768 && setIsCartExpanded(!isCartExpanded)}>
-                  <div className="flex items-center gap-2">
-                      <div className={`p-2 rounded-lg ${isReturnMode ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}><ShoppingCart className="w-5 h-5" /></div>
-                      <div><h2 className="font-bold text-sm">Cart</h2><p className="text-[10px] text-muted-foreground">{cart.length} items</p></div>
-                  </div>
-                  <div className="flex items-center gap-3 md:hidden">
-                      {cart.length > 0 && <div className="text-right"><p className="font-bold text-sm">₹{Math.abs(grandTotal).toFixed(0)}</p></div>}
-                      <ChevronUp className={`w-5 h-5 text-muted-foreground transition-transform ${isCartExpanded ? 'rotate-180' : ''}`} />
-                  </div>
-              </div>
-
-              <div className={`flex-1 overflow-y-auto p-3 space-y-3 ${!isCartExpanded ? 'hidden md:block' : 'block'}`}>
-                  {cart.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-muted-foreground/40 space-y-2"><ShoppingCart className="w-12 h-12" /><p className="text-sm font-medium">Cart is empty</p></div>
-                  ) : cart.map(item => (
-                      <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="flex flex-col gap-3 p-3 rounded-xl border bg-card shadow-sm hover:border-primary/20 transition-all">
-                          <div className="flex gap-3">
-                              <div className="h-12 w-12 shrink-0 bg-muted rounded-lg border overflow-hidden">
-                                {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                  <p className="font-bold text-sm truncate leading-tight mb-1">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
-                                  <p className="text-[10px] text-muted-foreground mb-1">Buy: ₹{item.buyPrice}</p>
-                                  <div className="flex items-center gap-1">
-                                      <span className="text-xs text-muted-foreground">₹</span>
-                                      <Input 
-                                          className="h-6 w-20 px-1 py-0 text-xs font-medium bg-transparent border-muted-foreground/30 focus-visible:ring-1"
-                                          value={item.sellPrice ?? ''}
-                                          type="number"
-                                          onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)}
-                                      />
-                                  </div>
-                              </div>
-                              <div className="text-right shrink-0">
-                                  <p className="font-bold text-sm text-primary">₹{(item.sellPrice * item.quantity).toFixed(0)}</p>
-                              </div>
-                          </div>
-                          
-                          <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center rounded-lg border h-8 overflow-hidden bg-background">
-                                  <button className="px-2 h-full hover:bg-muted border-r transition-colors" onClick={() => updateQuantity(String(item.id), -1, item.selectedVariant, item.selectedColor)}><Minus className="w-3.5 h-3.5" /></button>
-                                  <Input 
-                                    className="w-10 h-full border-0 text-center text-sm font-bold p-0 bg-transparent focus-visible:ring-0" 
-                                    value={item.quantity ?? ''} 
-                                    type="number"
-                                    onChange={(e) => setManualQuantity(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)}
-                                  />
-                                  <button className="px-2 h-full hover:bg-muted border-l transition-colors" onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)}><Plus className="w-3.5 h-3.5" /></button>
-                              </div>
-                              
-                              <div className="flex items-center gap-2 ml-auto">
-                                  <div className="flex items-center rounded-lg border h-8 bg-background px-2 group">
-                                      <Input 
-                                        className="h-full w-8 border-0 text-center text-xs p-0 bg-transparent focus-visible:ring-0" 
-                                        placeholder="0" 
-                                        value={item.discountPercent ?? ''} 
-                                        onChange={(e) => updateDiscount(String(item.id), e.target.value, 'percent', item.selectedVariant, item.selectedColor)} 
-                                      />
-                                      <span className="text-[10px] font-bold text-muted-foreground">%</span>
-                                  </div>
-                                  <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-destructive/10 hover:text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)}>
-                                      <Trash2 className="w-4 h-4" />
-                                  </Button>
-                              </div>
-                          </div>
-                      </div>
-                  ))}
-              </div>
-
-              <div className={`p-5 bg-muted/20 border-t shrink-0 ${!isCartExpanded ? 'hidden md:block' : 'block'}`}>
-                  {cartError && <div className="mb-3 text-xs bg-destructive/10 text-destructive p-2 rounded flex items-center gap-2"><AlertCircle className="w-3 h-3" /> {cartError}</div>}
-                  {transactionSyncStatus.phase !== 'idle' && (
-                    <div className={`mb-3 text-xs p-2 rounded flex items-center gap-2 border ${transactionSyncStatus.phase === 'error' ? 'bg-destructive/10 text-destructive border-destructive/30' : transactionSyncStatus.phase === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
-                      <AlertCircle className="w-3 h-3" />
-                      {transactionSyncStatus.phase === 'pending' ? 'Pending:' : transactionSyncStatus.phase === 'committing' ? 'Committing:' : transactionSyncStatus.phase === 'success' ? 'Committed:' : 'Commit failed:'} {transactionSyncStatus.message}
-                    </div>
-                  )}
-                  
-                  <div className="space-y-2.5 mb-5">
-                      <div className="flex justify-between text-sm text-muted-foreground">
-                          <span>Subtotal</span>
-                          <span className="font-medium">₹{subtotal.toFixed(2)}</span>
-                      </div>
-                      
-                      {totalDiscount > 0 && (
-                          <div className="flex justify-between text-sm text-green-600">
-                              <span>Discount</span>
-                              <span className="font-medium">-₹{totalDiscount.toFixed(2)}</span>
-                          </div>
-                      )}
-
-                      <div 
-                        className="flex justify-between items-center group cursor-pointer hover:bg-muted/50 p-1.5 -mx-1.5 rounded-lg transition-colors border border-transparent hover:border-primary/10"
-                        onClick={() => setIsTaxModalOpen(true)}
-                      >
-                          <span className="flex items-center gap-2 text-sm text-muted-foreground">
-                              Tax ({selectedTax.label}) <Settings2 className="w-3 h-3 opacity-50" />
-                          </span>
-                          <span className="font-medium text-sm">₹{taxVal.toFixed(2)}</span>
-                      </div>
-                      
-                      <div className="h-px bg-border/50 my-2"></div>
-                      
-                      <div className="flex justify-between items-center pt-1">
-                          <span className="font-extrabold text-xl">Total</span>
-                          <span className={`font-extrabold text-2xl ${isReturnMode ? 'text-red-600' : 'text-primary'}`}>
-                             {isReturnMode ? '-' : ''}₹{Math.abs(grandTotal).toFixed(0)}
-                          </span>
-                      </div>
-                  </div>
-
-                  <Button 
-                    className={`w-full h-14 text-lg font-extrabold shadow-xl rounded-xl transition-transform active:scale-95 ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : 'bg-primary hover:bg-primary/90'}`} 
-                    disabled={cart.length === 0} 
-                    onClick={() => initiateCheckout()}
-                  >
-                      {isReturnMode ? 'Process Return' : 'Proceed'}
-                  </Button>
-              </div>
+      <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold">{isReturnMode ? 'Return Cart' : 'Cart'}</h2>
+            <p className="text-xs text-muted-foreground">{cart.length} items</p>
           </div>
+          {cart.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => setCart([])}>Clear</Button>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+          {cart.length === 0 ? (
+            <div className="border border-dashed rounded-xl p-6 text-center text-sm text-muted-foreground">Cart is empty</div>
+          ) : cart.map(item => (
+            <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="border rounded-lg p-2.5 grid grid-cols-[44px_minmax(0,1fr)_24px] gap-2 items-start">
+              <div className="h-11 w-11 bg-muted rounded-md border overflow-hidden">
+                {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
+              </div>
+              <div className="space-y-1 min-w-0">
+                <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
+                <p className="text-[11px] text-muted-foreground">Stock left: {Math.max(0, getLineAvailableStock(item, item.selectedVariant, item.selectedColor) - item.quantity)} · Buy: ₹{item.buyPrice}</p>
+                <div className="grid grid-cols-[92px_80px_1fr] gap-2 items-center">
+                  <div className="flex items-center border rounded-md h-7 overflow-hidden">
+                    <button className="px-1.5 h-full border-r" onClick={() => updateQuantity(String(item.id), -1, item.selectedVariant, item.selectedColor)}><Minus className="w-3 h-3" /></button>
+                    <Input className="border-0 h-full text-center p-0 text-xs font-semibold" value={item.quantity ?? ''} type="number" onChange={(e) => setManualQuantity(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)} />
+                    <button className="px-1.5 h-full border-l" onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)}><Plus className="w-3 h-3" /></button>
+                  </div>
+                  <Input className="h-7 text-xs" value={item.sellPrice ?? ''} type="number" onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)} />
+                  <p className="text-right font-bold text-sm">₹{(item.sellPrice * item.quantity).toFixed(2)}</p>
+                </div>
+              </div>
+              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)}>
+                <Trash2 className="w-4 h-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+
+        <div className="border-t p-4 space-y-3">
+          {cartError && <div className="text-xs bg-destructive/10 text-destructive p-2 rounded flex items-center gap-2"><AlertCircle className="w-3 h-3" /> {cartError}</div>}
+          {transactionSyncStatus.phase !== 'idle' && (
+            <div className={`text-xs p-2 rounded flex items-center gap-2 border ${transactionSyncStatus.phase === 'error' ? 'bg-destructive/10 text-destructive border-destructive/30' : transactionSyncStatus.phase === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
+              <AlertCircle className="w-3 h-3" />
+              {transactionSyncStatus.phase === 'pending' ? 'Pending:' : transactionSyncStatus.phase === 'committing' ? 'Committing:' : transactionSyncStatus.phase === 'success' ? 'Committed:' : 'Commit failed:'} {transactionSyncStatus.message}
+            </div>
+          )}
+          <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span>₹{subtotal.toFixed(2)}</span></div>
+          {totalDiscount > 0 && <div className="flex justify-between text-sm text-green-600"><span>Discount</span><span>-₹{totalDiscount.toFixed(2)}</span></div>}
+          <button className="w-full flex justify-between text-sm p-1 rounded hover:bg-muted" onClick={() => setIsTaxModalOpen(true)}>
+            <span className="text-muted-foreground">Tax ({selectedTax.label})</span>
+            <span>₹{taxVal.toFixed(2)}</span>
+          </button>
+          <div className="h-px bg-border" />
+          <div className="flex justify-between items-center"><span className="text-lg font-bold">Total</span><span className={`text-xl font-extrabold ${isReturnMode ? 'text-orange-600' : ''}`}>{isReturnMode ? '-' : ''}₹{Math.abs(grandTotal).toFixed(2)}</span></div>
+          <Button className={`w-full h-10 font-semibold ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} disabled={cart.length === 0} onClick={() => initiateCheckout()}>
+            {isReturnMode ? 'Create Return Invoice' : 'Create Invoice'}
+          </Button>
+        </div>
       </div>
 
       {/* Tax Selection Modal */}
