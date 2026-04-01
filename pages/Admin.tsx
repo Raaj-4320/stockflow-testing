@@ -187,12 +187,13 @@ export default function Admin() {
 
     setIsSaving(true);
     try {
+      let updated: Product[];
       if (editingProduct) {
-        const updated = await updateProduct(productPayload);
+        updated = await updateProduct(productPayload);
         console.debug('[product] update success', { productId: productPayload.id });
         setProducts(updated);
       } else {
-        const updated = await addProduct(productPayload);
+        updated = await addProduct(productPayload);
         console.debug('[product] create success', { productId: productPayload.id });
         setProducts(updated);
       }

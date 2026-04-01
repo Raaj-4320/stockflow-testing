@@ -174,6 +174,31 @@ const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
 const getOperationCommitsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'operationCommits');
 
+const ensureStoreInitializedForCurrentUser = async (
+  user: NonNullable<typeof auth>['currentUser'],
+  context: string
+): Promise<{ created: boolean }> => {
+  if (!db || !user) return { created: false };
+
+  const storeRef = doc(db, 'stores', user.uid);
+  const nowIso = new Date().toISOString();
+
+  return runFirestoreTransaction(db, async (firestoreTx) => {
+    const storeSnap = await firestoreTx.get(storeRef);
+    if (storeSnap.exists()) {
+      return { created: false };
+    }
+
+    firestoreTx.set(storeRef, {
+      initializedAt: nowIso,
+      initializedBy: user.uid,
+      provisioningSource: `client_${context}`,
+    }, { merge: true });
+
+    return { created: true };
+  });
+};
+
 const assertCloudWriteReady = async (reason: string) => {
   if (!db || !auth) throw new Error('Firestore not configured.');
   const user = auth.currentUser;
@@ -474,8 +499,7 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard',
-  adminPin: '1234'
+  invoiceFormat: 'standard'
 };
 
 const initialData: AppState = {
@@ -569,6 +593,15 @@ const syncFromCloud = async () => {
     }
     
     try {
+        const ensureResult = await ensureStoreInitializedForCurrentUser(user, 'first_verified_login');
+        if (ensureResult.created) {
+          void writeAuditEvent('SECURITY_EVENT', {
+            reason: 'store_initialized_on_verified_login',
+            storePath: `stores/${user.uid}`,
+            actorUid: user.uid,
+          });
+        }
+
         // Use UID for strict isolation
         const docRef = doc(db, "stores", user.uid);
         
