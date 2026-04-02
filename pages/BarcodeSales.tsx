@@ -340,7 +340,24 @@ export default function BarcodeSales() {
               currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
           }
       }
-      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
+      const tx: Transaction = {
+        id: Date.now().toString(),
+        items: [...cart],
+        total,
+        subtotal,
+        discount: totalDiscount,
+        tax: taxAmount,
+        taxRate: selectedTax.value,
+        taxLabel: selectedTax.label,
+        date: new Date().toISOString(),
+        type: isReturnMode ? 'return' : 'sale',
+        customerId: finalCustomer?.id,
+        customerName: finalCustomer?.name,
+        paymentMethod,
+        returnSettlementMode: isReturnMode
+          ? (paymentMethod === 'Credit' ? 'due_adjustment' : paymentMethod === 'Online' ? 'online_refund' : 'cash_refund')
+          : undefined,
+      };
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
       const newState = processTransaction(tx);

@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { loadData, saveData, processTransaction } from '../services/storage';
+import { loadData, saveData, processTransaction, saveCashSessions } from '../services/storage';
 import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
+import { getPaymentDirection, isCashRefundReturn } from '../services/returnSettlement';
 
 type Expense = {
   id: string;
@@ -55,11 +56,13 @@ const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], 
     return expTime >= start && expTime <= end;
   });
 
-  const cashSales = cashTransactions.filter(t => t.type === 'sale').reduce((sum, t) => sum + t.total, 0);
-  const cashRefunds = cashTransactions.filter(t => t.type === 'return').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashSales = cashTransactions.filter(t => t.type === 'sale').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashDueCollections = cashTransactions.filter(t => t.type === 'payment' && getPaymentDirection(t) === 'collection').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashPaymentRefunds = cashTransactions.filter(t => t.type === 'payment' && getPaymentDirection(t) === 'refund').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashRefunds = cashTransactions.filter(t => t.type === 'return' && isCashRefundReturn(t)).reduce((sum, t) => sum + Math.abs(t.total), 0);
   const expenseTotal = windowExpenses.reduce((sum, e) => sum + e.amount, 0);
 
-  return { cashSales, cashRefunds, expenseTotal, systemCashTotal: cashSales - cashRefunds - expenseTotal };
+  return { cashSales, cashDueCollections, cashPaymentRefunds, cashRefunds, expenseTotal, systemCashTotal: cashSales + cashDueCollections - cashPaymentRefunds - cashRefunds - expenseTotal };
 };
 
 const CLOSING_DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1] as const;
@@ -379,8 +382,15 @@ export default function Finance() {
     const value = openingBalance.trim() ? Number(openingBalance) : (autoCarryBalance !== undefined ? autoCarryBalance : Number.NaN);
     if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
-    const session: CashSession = { id: buildCashSessionId(cashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
-    await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
+    const latestState = loadData();
+    const latestSessions: CashSession[] = Array.isArray(latestState.cashSessions) ? latestState.cashSessions : [];
+    const hasOpenSession = latestSessions.some(session => session.status === 'open');
+    if (hasOpenSession) return setErrors('An open cash session already exists.');
+
+    const session: CashSession = { id: buildCashSessionId(latestSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
+    await saveCashSessions([session, ...latestSessions], { throwOnError: true, reason: 'finance_startShift', auditOperation: 'CREATE' });
+    refreshData();
+    setErrors(null);
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
