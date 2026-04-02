@@ -4,10 +4,10 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
-import { loadData, deleteTransaction, updateTransaction } from '../services/storage';
+import { loadData, createCorrectionTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
-import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit } from 'lucide-react';
+import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, ArrowUpDown, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -36,6 +36,7 @@ export default function Transactions() {
   const [editingError, setEditingError] = useState<string | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const mutationBlockedMessage = 'This transaction cannot be edited or deleted. Use correction instead.';
 
   useEffect(() => {
     const refreshData = () => {
@@ -150,74 +151,34 @@ export default function Transactions() {
   };
 
   const handleBatchEditTransactions = () => {
-    const queue = filteredTransactions.filter(tx => selectedTransactionIds.includes(tx.id)).map(tx => tx.id);
-    if (!queue.length) return;
-    setBatchEditTransactionIds(queue);
-    setBatchEditTransactionIndex(0);
-    const firstTx = transactions.find(tx => tx.id === queue[0]);
-    if (firstTx) openTransactionEditor(firstTx);
+    setEditingError(mutationBlockedMessage);
   };
 
   const handleBatchDeleteTransactions = () => {
     if (!selectedTransactions.length) return;
-    const confirmed = window.confirm(`Delete ${selectedTransactions.length} selected transaction${selectedTransactions.length > 1 ? 's' : ''}?`);
-    if (!confirmed) return;
-    let nextTransactions = transactions;
-    selectedTransactionIds.forEach(transactionId => {
-      nextTransactions = deleteTransaction(transactionId);
-    });
-    setTransactions(nextTransactions);
-    setSelectedTransactionIds([]);
+    setEditingError(mutationBlockedMessage);
   };
 
   const handleSaveTransaction = async (goToNext = false) => {
+    void goToNext;
     if (!editingTx) return;
+    setEditingError(mutationBlockedMessage);
+  };
 
+  const handleCreateCorrection = (tx: Transaction) => {
     try {
-      const nextDate = editingTxDate ? new Date(editingTxDate).toISOString() : editingTx.date;
-      const nextNotes = editingTxNotes.trim();
-      let nextTransaction: Transaction = {
-        ...editingTx,
-        date: nextDate,
-        paymentMethod: editingTxPaymentMethod,
-        notes: nextNotes,
-      };
-
-      if (editingTx.type === 'payment') {
-        const amt = Number(editingAmount || 0);
-        if (!Number.isFinite(amt) || amt <= 0) {
-          setEditingError('Please enter a valid payment amount.');
-          return;
-        }
-        nextTransaction = { ...nextTransaction, total: Math.abs(amt) };
-      }
-
-      const nextTransactions = await updateTransaction(nextTransaction);
-      setTransactions(nextTransactions);
-
-      if (goToNext && batchEditTransactionIds.length > 0) {
-        const nextIndex = batchEditTransactionIndex + 1;
-        const nextTransactionId = batchEditTransactionIds[nextIndex];
-        if (nextTransactionId) {
-          const nextTx = nextTransactions.find(tx => tx.id === nextTransactionId);
-          if (nextTx) {
-            setBatchEditTransactionIndex(nextIndex);
-            openTransactionEditor(nextTx);
-            return;
-          }
-        }
-      }
-
-      closeTransactionEditor();
+      const nextState = createCorrectionTransaction(tx.id);
+      setTransactions(nextState.transactions);
+      setEditingError(null);
     } catch (error) {
-      console.error('[transactions] update failed', error);
-      setEditingError(error instanceof Error ? error.message : 'Transaction update failed. Please try again.');
+      setEditingError(error instanceof Error ? error.message : 'Unable to create correction transaction.');
     }
   };
 
   const stats = useMemo(() => {
       let totalRevenue = 0;
       let totalReturns = 0;
+      let totalPayments = 0;
       let grossProfit = 0;
       let totalDiscount = 0;
 
@@ -232,19 +193,22 @@ export default function Transactions() {
                   const profit = (item.sellPrice - item.buyPrice) * item.quantity;
                   grossProfit += profit;
               });
-          } else {
+          } else if (tx.type === 'return') {
               totalReturns += amount;
               // Reverse Profit for returns
               tx.items.forEach(item => {
                   const profit = (item.sellPrice - item.buyPrice) * item.quantity;
                   grossProfit -= profit;
               });
+          } else if (tx.type === 'payment') {
+              totalPayments += amount;
           }
       });
 
       return {
           totalRevenue,
           totalReturns,
+          totalPayments,
           netSales: totalRevenue - totalReturns,
           grossProfit,
           totalDiscount
@@ -614,8 +578,9 @@ export default function Transactions() {
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedTx(tx)}><Eye className="w-3.5 h-3.5" /></Button>
-                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>
-                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => { if (window.confirm('Delete this transaction?')) { const next = deleteTransaction(tx.id); setTransactions(next); setSelectedTransactionIds(prev => prev.filter(id => id !== tx.id)); } }}><X className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-amber-600" onClick={() => handleCreateCorrection(tx)} title="Create correction transaction"><ArrowUpDown className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7 opacity-60" onClick={() => setEditingError(mutationBlockedMessage)} title={mutationBlockedMessage}><Edit className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600 opacity-60" onClick={() => setEditingError(mutationBlockedMessage)} title={mutationBlockedMessage}><X className="w-3.5 h-3.5" /></Button>
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>

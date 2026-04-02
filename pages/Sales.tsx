@@ -494,7 +494,12 @@ export default function Sales() {
       const tx: Transaction = {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
           taxRate: selectedTax.value, taxLabel: selectedTax.label, date: buildEffectiveTransactionDate(), type: isReturnMode ? 'return' : 'sale',
-          customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod
+          customerId: finalCustomer?.id,
+          customerName: finalCustomer?.name,
+          paymentMethod,
+          returnSettlementMode: isReturnMode
+            ? (paymentMethod === 'Credit' ? 'due_adjustment' : paymentMethod === 'Online' ? 'online_refund' : 'cash_refund')
+            : undefined
       };
 
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
