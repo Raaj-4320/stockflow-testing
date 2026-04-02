@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { loadData, saveData, processTransaction } from '../services/storage';
+import { loadData, saveData, processTransaction, saveCashSessions } from '../services/storage';
 import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
+import { getPaymentDirection, isCashRefundReturn } from '../services/returnSettlement';
+import { calcTrace, calcTraceError } from '../services/financialTrace';
 
 type Expense = {
   id: string;
@@ -55,11 +57,13 @@ const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], 
     return expTime >= start && expTime <= end;
   });
 
-  const cashSales = cashTransactions.filter(t => t.type === 'sale').reduce((sum, t) => sum + t.total, 0);
-  const cashRefunds = cashTransactions.filter(t => t.type === 'return').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashSales = cashTransactions.filter(t => t.type === 'sale').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashDueCollections = cashTransactions.filter(t => t.type === 'payment' && getPaymentDirection(t) === 'collection').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashPaymentRefunds = cashTransactions.filter(t => t.type === 'payment' && getPaymentDirection(t) === 'refund').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashRefunds = cashTransactions.filter(t => t.type === 'return' && isCashRefundReturn(t)).reduce((sum, t) => sum + Math.abs(t.total), 0);
   const expenseTotal = windowExpenses.reduce((sum, e) => sum + e.amount, 0);
 
-  return { cashSales, cashRefunds, expenseTotal, systemCashTotal: cashSales - cashRefunds - expenseTotal };
+  return { cashSales, cashDueCollections, cashPaymentRefunds, cashRefunds, expenseTotal, systemCashTotal: cashSales + cashDueCollections - cashPaymentRefunds - cashRefunds - expenseTotal };
 };
 
 const CLOSING_DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1] as const;
@@ -366,7 +370,7 @@ export default function Finance() {
       refreshData();
       setErrors(null);
     } catch (error) {
-      console.error('[finance] Persist failed', error);
+      calcTraceError('CASH', 'PERSIST_FAILED', { error: error instanceof Error ? error.message : 'unknown' });
       setErrors('Unable to save finance data. Please try again.');
     }
   };
@@ -379,8 +383,20 @@ export default function Finance() {
     const value = openingBalance.trim() ? Number(openingBalance) : (autoCarryBalance !== undefined ? autoCarryBalance : Number.NaN);
     if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
-    const session: CashSession = { id: buildCashSessionId(cashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
-    await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
+    const latestState = loadData();
+    const latestSessions: CashSession[] = Array.isArray(latestState.cashSessions) ? latestState.cashSessions : [];
+    const hasOpenSession = latestSessions.some(session => session.status === 'open');
+    if (hasOpenSession) return setErrors('An open cash session already exists.');
+
+    const session: CashSession = { id: buildCashSessionId(latestSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
+    await saveCashSessions([session, ...latestSessions], { throwOnError: true, reason: 'finance_startShift', auditOperation: 'CREATE' });
+    calcTrace('SHIFT', 'OPEN', {
+      sessionId: session.id,
+      openingBalance: value,
+      openSessionCountBefore: latestSessions.filter(s => s.status === 'open').length,
+    });
+    refreshData();
+    setErrors(null);
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
@@ -396,6 +412,15 @@ export default function Finance() {
     const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, openSession.startTime, closedAt);
     const expectedClosing = openSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
+    calcTrace('SHIFT', 'CLOSE_CALC', {
+      sessionId: openSession.id,
+      openingBalance: openSession.openingBalance,
+      systemCashTotal,
+      expenseTotal,
+      expectedClosing,
+      actualClosing: counted,
+      variance: difference,
+    });
 
     const updated = (data.cashSessions || []).map(session => session.id === openSession.id ? {
       ...session,
@@ -488,6 +513,13 @@ export default function Finance() {
     };
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
+    calcTrace('EXPENSE', 'ADD', {
+      expenseId: expense.id,
+      category: expense.category,
+      amount: expense.amount,
+      cashImpact: -expense.amount,
+      pnlImpact: -expense.amount,
+    });
     await persistState({
       ...data,
       expenses: [expense, ...expenses],
@@ -502,6 +534,15 @@ export default function Finance() {
 
   const removeExpense = async (id: string) => {
     const item = expenses.find(e => e.id === id);
+    if (item) {
+      calcTrace('EXPENSE', 'DELETE', {
+        expenseId: item.id,
+        category: item.category,
+        amount: item.amount,
+        cashImpact: item.amount,
+        pnlImpact: item.amount,
+      });
+    }
     await persistState({
       ...data,
       expenses: expenses.filter(e => e.id !== id),
@@ -574,13 +615,20 @@ export default function Finance() {
 
     try {
       const nextState = processTransaction(tx);
+      calcTrace('LEDGER', 'PAYMENT_COLLECTION', {
+        txId: tx.id,
+        customerId: tx.customerId,
+        paymentMethod: tx.paymentMethod,
+        paymentDirection: tx.paymentDirection || 'collection',
+        amount: tx.total,
+      });
       setData(nextState);
       setCollectingCustomer(null);
       setPaymentAmount('');
       setPaymentMethod('Cash');
       setErrors(null);
     } catch (error) {
-      console.error('[finance] Collect payment failed', error);
+      calcTraceError('LEDGER', 'PAYMENT_COLLECTION_FAILED', { error: error instanceof Error ? error.message : 'unknown' });
       setErrors('Unable to collect payment. Please try again.');
     }
   };

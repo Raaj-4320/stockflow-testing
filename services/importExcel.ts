@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { CartItem, Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
-import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
+import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, processTransaction, reconcileCustomerDueFromTransactions, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 
 export type ImportIssue = { sheet: string; row: number; field: string; message: string };
@@ -556,6 +556,11 @@ export const importCustomersFromFile = async (file: File, onProgress?: (progress
       addCustomer(customer);
     }
   }, onProgress, 'Importing customers');
+  const importedCustomerIds = valid.map(customer => {
+    const matched = existingById.get(customer.id) || existingByPhone.get(normPhone(customer.phone));
+    return (matched?.id || customer.id);
+  });
+  await reconcileCustomerDueFromTransactions(importedCustomerIds);
 
   onProgress?.({ phase: 'completed', processed: valid.length, total: valid.length, message: 'Customer import completed.' });
   return { totalRows: rows.length, importedRows: valid.length, errors: [], summary: `Imported ${valid.length} customers successfully.` };
@@ -762,6 +767,9 @@ export const importTransactionsFromFile = async (
       customerId: customer?.id,
       customerName: customer?.name || customerNameFromFile || undefined,
       paymentMethod: paymentMethod as Transaction['paymentMethod'],
+      returnSettlementMode: type === 'return'
+        ? (paymentMethod === 'Credit' ? 'due_adjustment' : paymentMethod === 'Online' ? 'online_refund' : 'cash_refund')
+        : undefined,
       items,
       subtotal,
       discount,

@@ -69,6 +69,10 @@ export interface Transaction {
   taxRate?: number;
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
+  paymentDirection?: 'collection' | 'refund';
+  returnSettlementMode?: 'cash_refund' | 'online_refund' | 'due_adjustment';
+  isCorrection?: boolean;
+  sourceTransactionId?: string;
   notes?: string;
 }
 
