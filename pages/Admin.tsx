@@ -190,11 +190,9 @@ export default function Admin() {
       let updated: Product[];
       if (editingProduct) {
         updated = await updateProduct(productPayload);
-        console.debug('[product] update success', { productId: productPayload.id });
         setProducts(updated);
       } else {
         updated = await addProduct(productPayload);
-        console.debug('[product] create success', { productId: productPayload.id });
         setProducts(updated);
       }
       if (keepOpenForNext) {
@@ -292,7 +290,6 @@ export default function Admin() {
     if (window.confirm('Are you sure you want to permanently delete this product?')) {
       try {
         const updated = await deleteProduct(id);
-        console.debug('[product] delete success', { productId: id });
         setProducts(updated);
         setSelectedProductIds(prev => prev.filter(productId => productId !== id));
       } catch (deleteError) {
@@ -599,7 +596,6 @@ export default function Admin() {
                   files: [file]
               });
           } catch (e) {
-              console.log("Share failed or cancelled", e);
           }
       } else {
           alert("Sharing not supported on this device/browser.");
