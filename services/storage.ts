@@ -15,11 +15,14 @@ import {
   PurchaseOrder,
   PurchaseOrderLine,
   PurchaseParty,
+  CashSession,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
+import { getPaymentDirection, isDueAdjustmentReturn } from './returnSettlement';
+import { calcTrace, calcTraceError } from './financialTrace';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -392,9 +395,10 @@ const commitProcessTransactionAtomically = async ({
         if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
       } else if (transaction.type === 'return') {
         newTotalSpend -= amount;
-        if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
+        if (isDueAdjustmentReturn(transaction)) newTotalDue -= amount;
       } else if (transaction.type === 'payment') {
-        newTotalDue -= amount;
+        const paymentDirection = getPaymentDirection(transaction);
+        newTotalDue += paymentDirection === 'refund' ? amount : -amount;
         newLastVisit = new Date().toISOString();
       }
 
@@ -624,7 +628,6 @@ const syncFromCloud = async () => {
               .filter(p => !((p as any).isDeleted));
 
             memoryState = { ...memoryState, products };
-            console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length });
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to product subcollection:', error);
@@ -636,7 +639,6 @@ const syncFromCloud = async () => {
               .filter(c => !((c as any).isDeleted));
 
             memoryState = { ...memoryState, customers };
-            console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length });
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to customer subcollection:', error);
@@ -649,7 +651,6 @@ const syncFromCloud = async () => {
 
             const sortedTransactions = sortTransactionsDesc(transactions);
             memoryState = { ...memoryState, transactions: sortedTransactions };
-            console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: sortedTransactions.length });
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to transaction subcollection:', error);
@@ -671,14 +672,6 @@ const syncFromCloud = async () => {
                 const hydratedProducts = subcollectionProducts;
                 const hydratedCustomers = subcollectionCustomers;
                 const hydratedTransactions = subcollectionTransactions;
-                console.debug('[migration-trace] root hydration merge', {
-                  subProducts: subcollectionProducts.length,
-                  subCustomers: subcollectionCustomers.length,
-                  subTransactions: subcollectionTransactions.length,
-                  finalProducts: hydratedProducts.length,
-                  finalCustomers: hydratedCustomers.length,
-                  finalTransactions: hydratedTransactions.length,
-                });
                 memoryState = {
                     ...initialData,
                     ...cloudData,
@@ -1328,6 +1321,16 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
   }
 };
 
+export const saveCashSessions = async (cashSessions: CashSession[], options?: { throwOnError?: boolean; reason?: string; auditOperation?: AuditOperation }) => {
+  const latest = loadData();
+  const nextState: AppState = { ...latest, cashSessions: Array.isArray(cashSessions) ? cashSessions : [] };
+  return saveData(nextState, {
+    throwOnError: options?.throwOnError,
+    reason: options?.reason || 'saveCashSessions',
+    auditOperation: options?.auditOperation || 'UPDATE',
+  });
+};
+
 export const requestStoreProvisioning = async (context?: string) => {
   await writeAuditEvent('SECURITY_EVENT', {
     reason: 'store_provisioning_required',
@@ -1625,6 +1628,22 @@ const assertPaymentMethodByType = (type: Transaction['type'], paymentMethod: Tra
   }
 };
 
+const assertReturnSettlementMode = (transaction: Transaction) => {
+  if (transaction.type !== 'return') return;
+  const mode = transaction.returnSettlementMode;
+  if (mode === undefined) return;
+  if (!['cash_refund', 'online_refund', 'due_adjustment'].includes(mode)) {
+    failValidation('INVALID_RETURN_SETTLEMENT_MODE', 'Return settlement mode is invalid.', { mode });
+  }
+};
+
+const assertPaymentDirection = (transaction: Transaction) => {
+  if (transaction.type !== 'payment') return;
+  if (transaction.paymentDirection !== undefined && !['collection', 'refund'].includes(transaction.paymentDirection)) {
+    failValidation('INVALID_PAYMENT_DIRECTION', 'Payment direction is invalid.', { paymentDirection: transaction.paymentDirection });
+  }
+};
+
 const assertTransactionFinancials = (transaction: Transaction) => {
   if (transaction.type === 'payment') {
     if (!Number.isFinite(transaction.total) || transaction.total <= 0) {
@@ -1729,6 +1748,35 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
       }
     }
   }
+};
+
+const getTransactionCalcDeltas = (transaction: Transaction) => {
+  const amount = Math.abs(transaction.total || 0);
+  const paymentDirection = getPaymentDirection(transaction);
+  const dueDelta = transaction.type === 'sale'
+    ? (transaction.paymentMethod === 'Credit' ? amount : 0)
+    : transaction.type === 'return'
+      ? (isDueAdjustmentReturn(transaction) ? -amount : 0)
+      : (paymentDirection === 'refund' ? amount : -amount);
+  const cashDelta = transaction.paymentMethod !== 'Cash'
+    ? 0
+    : transaction.type === 'sale'
+      ? amount
+      : transaction.type === 'return'
+        ? (isDueAdjustmentReturn(transaction) ? 0 : -amount)
+        : (paymentDirection === 'refund' ? -amount : amount);
+  const revenueDelta = transaction.type === 'sale' ? amount : transaction.type === 'return' ? -amount : 0;
+  const profitDelta = transaction.type === 'payment'
+    ? 0
+    : transaction.items.reduce((sum, item) => {
+      const line = (item.sellPrice - item.buyPrice) * item.quantity;
+      return sum + (transaction.type === 'sale' ? line : -line);
+    }, 0);
+  const stockUnitsDelta = transaction.type === 'payment'
+    ? 0
+    : transaction.items.reduce((sum, item) => sum + (transaction.type === 'sale' ? -item.quantity : item.quantity), 0);
+
+  return { amount, paymentDirection, dueDelta, cashDelta, revenueDelta, profitDelta, stockUnitsDelta };
 };
 
 export const addCustomer = (customer: Customer): Customer[] => {
@@ -2395,7 +2443,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   }
 
   if (data.transactions.some(t => t.id === transaction.id)) {
-    console.warn('[processTransaction] duplicate transaction id ignored', { transactionId: transaction.id });
+    calcTrace('TX', 'DUPLICATE_BLOCKED', { transactionId: transaction.id });
     void writeAuditEvent('BLOCKED_WRITE', {
       reason: 'processTransaction_duplicate_transaction_id',
       transactionId: transaction.id,
@@ -2405,8 +2453,27 @@ export const processTransaction = (transaction: Transaction): AppState => {
   }
 
   assertPaymentMethodByType(transaction.type, transaction.paymentMethod);
+  assertReturnSettlementMode(transaction);
+  assertPaymentDirection(transaction);
   assertTransactionFinancials(transaction);
   assertTransactionInventoryRules(transaction, data.products, data.transactions);
+  const txDeltas = getTransactionCalcDeltas(transaction);
+  calcTrace('TX', 'CLASSIFIED', {
+    txId: transaction.id,
+    type: transaction.type,
+    customerId: transaction.customerId || null,
+    paymentMethod: transaction.paymentMethod || null,
+    paymentDirection: txDeltas.paymentDirection,
+    returnSettlementMode: transaction.returnSettlementMode || null,
+    isCorrection: !!transaction.isCorrection,
+    sourceTransactionId: transaction.sourceTransactionId || null,
+    amount: txDeltas.amount,
+    dueDelta: txDeltas.dueDelta,
+    cashDelta: txDeltas.cashDelta,
+    revenueDelta: txDeltas.revenueDelta,
+    profitDelta: txDeltas.profitDelta,
+    stockUnitsDelta: txDeltas.stockUnitsDelta,
+  });
 
   const newTransactions = [transaction, ...data.transactions];
   let newProducts = [...data.products];
@@ -2433,9 +2500,10 @@ export const processTransaction = (transaction: Transaction): AppState => {
           if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
       } else if (transaction.type === 'return') {
           newTotalSpend -= amount;
-          if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
+          if (isDueAdjustmentReturn(transaction)) newTotalDue -= amount;
       } else if (transaction.type === 'payment') {
-          newTotalDue -= amount;
+          const paymentDirection = getPaymentDirection(transaction);
+          newTotalDue += paymentDirection === 'refund' ? amount : -amount;
           newLastVisit = new Date().toISOString();
       }
 
@@ -2453,6 +2521,13 @@ export const processTransaction = (transaction: Transaction): AppState => {
         visitCount: newVisitCount,
         lastVisit: newLastVisit
       };
+      calcTrace('LEDGER', 'DUE_CHANGE', {
+        txId: transaction.id,
+        customerId: c.id,
+        previousDue: c.totalDue,
+        delta: Math.max(0, newTotalDue) - c.totalDue,
+        newDue: Math.max(0, newTotalDue),
+      });
   }
   const touchedProductIds = transaction.type !== 'payment'
     ? Array.from(new Set(transaction.items.map(item => item.id)))
@@ -2481,7 +2556,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
     })
       .then(({ created, committedProducts, committedCustomer }) => {
-        console.debug('[migration-trace] processTransaction commit result', {
+        calcTrace('TX', 'COMMIT_RESULT', {
           transactionId: transaction.id,
           created,
           committedProducts: committedProducts.length,
@@ -2538,13 +2613,16 @@ export const processTransaction = (transaction: Transaction): AppState => {
           }),
 syncToCloud({ ...data }),
         ]).catch(error => {
-          console.error('[storage-transactions] post-commit side effects failed', error);
+          calcTraceError('TX', 'POST_COMMIT_SIDE_EFFECT_FAILED', {
+            transactionId: transaction.id,
+            error: error instanceof Error ? error.message : 'unknown',
+          });
         });
       })
       .catch(error => {
-        console.error('[storage-transactions] failed atomic processTransaction commit', {
+        calcTraceError('TX', 'ATOMIC_COMMIT_FAILED', {
           transactionId: transaction.id,
-          error,
+          error: error instanceof Error ? error.message : 'unknown',
         });
         memoryState = { ...memoryState, products: data.products, transactions: data.transactions, customers: data.customers };
         emitLocalStorageUpdate();
@@ -2564,10 +2642,151 @@ syncToCloud({ ...data }),
   }
 
   const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
+  calcTrace('TX', 'LOCAL_APPLY', {
+    txId: transaction.id,
+    dueDelta: txDeltas.dueDelta,
+    cashDelta: txDeltas.cashDelta,
+    revenueDelta: txDeltas.revenueDelta,
+    profitDelta: txDeltas.profitDelta,
+    stockUnitsDelta: txDeltas.stockUnitsDelta,
+  });
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
   emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: transaction.id });
   emitBehaviorStateChange({ type: transaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: transaction.id, to: 'local_saved', metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod, total: transaction.total } });
   return fallbackState;
+};
+
+const computeCustomerDueFromTransactions = (customerId: string, transactions: Transaction[]): number => {
+  let due = 0;
+  transactions.forEach((tx) => {
+    if (tx.customerId !== customerId) return;
+    const amount = Math.abs(Number(tx.total) || 0);
+    if (tx.type === 'sale' && tx.paymentMethod === 'Credit') {
+      due += amount;
+      return;
+    }
+    if (tx.type === 'return' && isDueAdjustmentReturn(tx)) {
+      due -= amount;
+      return;
+    }
+    if (tx.type === 'payment') {
+      const paymentDirection = getPaymentDirection(tx);
+      due += paymentDirection === 'refund' ? amount : -amount;
+    }
+  });
+  return Math.max(0, due);
+};
+
+const buildCorrectionTransaction = (source: Transaction): Transaction => {
+  const correctionId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  if (source.type === 'sale') {
+    const settlement = source.paymentMethod === 'Credit' ? 'due_adjustment' : source.paymentMethod === 'Online' ? 'online_refund' : 'cash_refund';
+    return {
+      ...source,
+      id: correctionId,
+      date: new Date().toISOString(),
+      type: 'return',
+      total: -Math.abs(source.total),
+      returnSettlementMode: settlement,
+      isCorrection: true,
+      sourceTransactionId: source.id,
+      notes: `Correction for TX #${source.id.slice(-6)}${source.notes ? ` | ${source.notes}` : ''}`,
+    };
+  }
+  if (source.type === 'return') {
+    const paymentMethod = source.returnSettlementMode === 'due_adjustment' ? 'Credit' : source.returnSettlementMode === 'online_refund' ? 'Online' : 'Cash';
+    return {
+      ...source,
+      id: correctionId,
+      date: new Date().toISOString(),
+      type: 'sale',
+      total: Math.abs(source.total),
+      paymentMethod,
+      returnSettlementMode: undefined,
+      isCorrection: true,
+      sourceTransactionId: source.id,
+      notes: `Correction for TX #${source.id.slice(-6)}${source.notes ? ` | ${source.notes}` : ''}`,
+    };
+  }
+
+  return {
+    ...source,
+    id: correctionId,
+    date: new Date().toISOString(),
+    paymentDirection: getPaymentDirection(source) === 'refund' ? 'collection' : 'refund',
+    isCorrection: true,
+    sourceTransactionId: source.id,
+    notes: `Correction for TX #${source.id.slice(-6)}${source.notes ? ` | ${source.notes}` : ''}`,
+  };
+};
+
+export const createCorrectionTransaction = (sourceTransactionId: string): AppState => {
+  const data = loadData();
+  const source = data.transactions.find(tx => tx.id === sourceTransactionId);
+  if (!source) {
+    failValidation('TRANSACTION_NOT_FOUND', 'Source transaction not found for correction.', { sourceTransactionId });
+  }
+  const correction = buildCorrectionTransaction(source);
+  calcTrace('CORRECTION', 'CREATE', {
+    sourceTransactionId: source.id,
+    correctionTransactionId: correction.id,
+    sourceType: source.type,
+    correctionType: correction.type,
+    paymentMethod: correction.paymentMethod || null,
+    paymentDirection: correction.paymentDirection || 'collection',
+    returnSettlementMode: correction.returnSettlementMode || null,
+    amount: Math.abs(correction.total || 0),
+  });
+  return processTransaction(correction);
+};
+
+export const reconcileCustomerDueFromTransactions = async (customerIds?: string[]): Promise<Customer[]> => {
+  const data = loadData();
+  const idsFilter = customerIds && customerIds.length ? new Set(customerIds) : null;
+  const transactionCountsByCustomer = new Map<string, number>();
+  data.transactions.forEach((tx) => {
+    if (!tx.customerId) return;
+    transactionCountsByCustomer.set(tx.customerId, (transactionCountsByCustomer.get(tx.customerId) || 0) + 1);
+  });
+
+  const nextCustomers = data.customers.map((customer) => {
+    if (idsFilter && !idsFilter.has(customer.id)) return customer;
+    if (!transactionCountsByCustomer.has(customer.id)) return customer;
+    const reconciledDue = computeCustomerDueFromTransactions(customer.id, data.transactions);
+    if (Math.abs((customer.totalDue || 0) - reconciledDue) <= MONEY_EPSILON) return customer;
+    return { ...customer, totalDue: reconciledDue };
+  });
+
+  const changed = nextCustomers.some((customer, idx) => customer !== data.customers[idx]);
+  if (!changed) return data.customers;
+  nextCustomers.forEach((customer, idx) => {
+    if (customer === data.customers[idx]) return;
+    calcTrace('RECON', 'DUE_REBUILT', {
+      customerId: customer.id,
+      previousDue: data.customers[idx].totalDue,
+      newDue: customer.totalDue,
+      delta: customer.totalDue - data.customers[idx].totalDue,
+    });
+  });
+
+  if (!db) {
+    await saveData({ ...data, customers: nextCustomers }, { throwOnError: true, reason: 'reconcileCustomerDue_local', auditOperation: 'UPDATE' });
+    return nextCustomers;
+  }
+
+  const changedCustomers = nextCustomers.filter((customer, idx) => customer !== data.customers[idx]);
+  await Promise.all(changedCustomers.map(customer => upsertCustomerInSubcollection(customer, 'reconcileCustomerDue_subcollection')));
+
+  memoryState = { ...memoryState, customers: nextCustomers };
+  emitLocalStorageUpdate();
+  await writeAuditEvent('UPDATE', {
+    reason: 'reconcileCustomerDue_subcollection',
+    migrationPhase: CUSTOMERS_MIGRATION_PHASE,
+    customerIds: changedCustomers.map(customer => customer.id),
+    reconciledCount: changedCustomers.length,
+  });
+
+  return nextCustomers;
 };
 
 
@@ -2584,16 +2803,19 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
   }
 
   const merged = sortTransactionsDesc([...incoming, ...data.transactions]);
+  const affectedCustomerIds = Array.from(new Set(incoming.map(tx => tx.customerId).filter((id): id is string => Boolean(id))));
 
   if (!db) {
     await saveData({ ...data, transactions: merged }, { throwOnError: true, reason: 'addHistoricalTransactions_local_fallback', auditOperation: 'CREATE' });
-    return merged;
+    await reconcileCustomerDueFromTransactions(affectedCustomerIds);
+    return loadData().transactions;
   }
 
   await Promise.all(incoming.map(tx => upsertTransactionInSubcollection(tx, 'addHistoricalTransactions_subcollection')));
 
   memoryState = { ...memoryState, transactions: sortTransactionsDesc([...incoming, ...memoryState.transactions]) };
   emitLocalStorageUpdate();
+  await reconcileCustomerDueFromTransactions(affectedCustomerIds);
 
   void Promise.all([
     writeAuditEvent('CREATE', {
@@ -2612,44 +2834,54 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
 
 export const deleteTransaction = (transactionId: string): Transaction[] => {
   const data = loadData();
-  const next = data.transactions.filter(t => t.id !== transactionId);
-
-  if (!db) {
-    void saveData({ ...data, transactions: next }, { reason: 'deleteTransaction_local_fallback', auditOperation: 'DELETE' });
-    return next;
-  }
-
-  memoryState = { ...memoryState, transactions: next };
-  emitLocalStorageUpdate();
-
-  void deleteTransactionInSubcollection(transactionId, 'deleteTransaction')
-    .then(() => syncToCloud({ ...data }))
-    .then(() => writeAuditEvent('DELETE', {
-      reason: 'deleteTransaction_subcollection',
-      migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-      transactionId,
-      transactionsCount: next.length,
-    }))
-    .catch(error => {
-      console.error('[storage-transactions] failed to delete transaction', error);
-      memoryState = { ...memoryState, transactions: data.transactions };
-      emitLocalStorageUpdate();
-    });
-
-  return next;
+  void writeAuditEvent('BLOCKED_WRITE', {
+    reason: 'deleteTransaction_blocked_financial_integrity',
+    transactionId,
+    message: 'Financial transactions cannot be deleted. Use correction transaction instead.',
+  });
+  calcTrace('TX', 'DELETE_BLOCKED', { transactionId, reason: 'financial_integrity_protection' });
+  return data.transactions;
 };
 
 export const updateTransaction = async (updatedTransaction: Transaction): Promise<Transaction[]> => {
   const data = loadData();
-  const next = sortTransactionsDesc(data.transactions.map(t => t.id === updatedTransaction.id ? updatedTransaction : t));
+  const existing = data.transactions.find(t => t.id === updatedTransaction.id);
+  if (!existing) return data.transactions;
+
+  const onlyNotesChanged =
+    existing.id === updatedTransaction.id &&
+    existing.type === updatedTransaction.type &&
+    existing.total === updatedTransaction.total &&
+    existing.paymentMethod === updatedTransaction.paymentMethod &&
+    (existing.paymentDirection || 'collection') === (updatedTransaction.paymentDirection || 'collection') &&
+    (existing.returnSettlementMode || undefined) === (updatedTransaction.returnSettlementMode || undefined) &&
+    existing.customerId === updatedTransaction.customerId &&
+    existing.customerName === updatedTransaction.customerName &&
+    existing.date === updatedTransaction.date &&
+    JSON.stringify(existing.items) === JSON.stringify(updatedTransaction.items) &&
+    JSON.stringify(existing.subtotal) === JSON.stringify(updatedTransaction.subtotal) &&
+    JSON.stringify(existing.discount) === JSON.stringify(updatedTransaction.discount) &&
+    JSON.stringify(existing.tax) === JSON.stringify(updatedTransaction.tax) &&
+    JSON.stringify(existing.taxRate) === JSON.stringify(updatedTransaction.taxRate) &&
+    JSON.stringify(existing.taxLabel) === JSON.stringify(updatedTransaction.taxLabel) &&
+    !!existing.isCorrection === !!updatedTransaction.isCorrection &&
+    (existing.sourceTransactionId || '') === (updatedTransaction.sourceTransactionId || '');
+
+  if (!onlyNotesChanged) {
+    calcTrace('TX', 'EDIT_BLOCKED', { transactionId: updatedTransaction.id, reason: 'financial_integrity_protection' });
+    throw new Error('This transaction cannot be edited. Use correction instead.');
+  }
+
+  const next = sortTransactionsDesc(data.transactions.map(t => t.id === updatedTransaction.id ? { ...t, notes: updatedTransaction.notes } : t));
 
   if (!db) {
     await saveData({ ...data, transactions: next }, { throwOnError: true, reason: 'updateTransaction_local_fallback', auditOperation: 'UPDATE' });
     return next;
   }
 
-  await upsertTransactionInSubcollection(updatedTransaction, 'updateTransaction_subcollection');
-  memoryState = { ...memoryState, transactions: sortTransactionsDesc(memoryState.transactions.map(t => t.id === updatedTransaction.id ? updatedTransaction : t)) };
+  const safeUpdated = { ...existing, notes: updatedTransaction.notes };
+  await upsertTransactionInSubcollection(safeUpdated, 'updateTransaction_subcollection');
+  memoryState = { ...memoryState, transactions: sortTransactionsDesc(memoryState.transactions.map(t => t.id === updatedTransaction.id ? safeUpdated : t)) };
   emitLocalStorageUpdate();
 
   void Promise.all([

@@ -5,6 +5,7 @@ import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types'
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
+import { calcTraceError } from '../services/financialTrace';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
@@ -309,7 +310,7 @@ export default function BarcodeSales() {
               setCustomerSearch(finalCustomer.name);
               setCustomerTab('search');
           } catch (error) {
-              console.error('[barcode-sales] add customer failed', error);
+              calcTraceError('LEDGER', 'ADD_CUSTOMER_FAILED', { error: error instanceof Error ? error.message : 'unknown' });
               setCheckoutError(error instanceof Error ? error.message : 'Failed to create customer. Please try again.');
               return;
           }
@@ -340,7 +341,24 @@ export default function BarcodeSales() {
               currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
           }
       }
-      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
+      const tx: Transaction = {
+        id: Date.now().toString(),
+        items: [...cart],
+        total,
+        subtotal,
+        discount: totalDiscount,
+        tax: taxAmount,
+        taxRate: selectedTax.value,
+        taxLabel: selectedTax.label,
+        date: new Date().toISOString(),
+        type: isReturnMode ? 'return' : 'sale',
+        customerId: finalCustomer?.id,
+        customerName: finalCustomer?.name,
+        paymentMethod,
+        returnSettlementMode: isReturnMode
+          ? (paymentMethod === 'Credit' ? 'due_adjustment' : paymentMethod === 'Online' ? 'online_refund' : 'cash_refund')
+          : undefined,
+      };
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
       const newState = processTransaction(tx);
