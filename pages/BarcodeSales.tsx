@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
-import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
+import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
@@ -35,7 +35,7 @@ export default function BarcodeSales() {
 
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerTab, setCustomerTab] = useState<'search' | 'new'>('search');
-  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number }> }>({ open: false, product: null, rows: [] });
+  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number; sellPrice: number }> }>({ open: false, product: null, rows: [] });
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -173,10 +173,16 @@ export default function BarcodeSales() {
                 setTimeout(() => setScanMessage(null), 1500);
             }
         } else {
-            const rows = getProductStockRows(product).filter(r => r.stock > 0);
+            const rows = getProductStockRows(product)
+              .map(row => ({ ...row, sellPrice: getResolvedSellPriceForCombination(product, row.variant, row.color) }))
+              .filter(r => r.stock > 0);
         if (productHasCombinationStock(product)) {
             const selected = rows[0];
             if (!selected) { setCartError('Out of stock!'); return; }
+            if (rows.length > 1) {
+              setVariantPicker({ open: true, product, rows: rows.map(row => ({ ...row, qty: 0 })) });
+              return;
+            }
             addToCart(product, explicitQty, selected.variant, selected.color);
         } else {
             addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
@@ -197,7 +203,16 @@ export default function BarcodeSales() {
             return prev.map(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
+        return [...prev, {
+          ...product,
+          buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
+          sellPrice: getResolvedSellPriceForCombination(product, selectedVariant, selectedColor),
+          quantity: qty,
+          discountPercent: 0,
+          discountAmount: 0,
+          selectedVariant: selectedVariant || NO_VARIANT,
+          selectedColor: selectedColor || NO_COLOR
+        }];
     });
   };
 
@@ -409,6 +424,7 @@ export default function BarcodeSales() {
                           return (
                               <div key={`${row.variant}-${row.color}-${idx}`} className="flex items-center justify-between border rounded p-2">
                                   <div><div className="font-medium text-sm">{label}</div><div className="text-xs text-muted-foreground">Stock: {row.stock}</div></div>
+                                  <div className="text-sm font-semibold">₹{row.sellPrice}</div>
                                   <div className="flex items-center gap-2">
                                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
