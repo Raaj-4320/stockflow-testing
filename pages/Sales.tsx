@@ -157,6 +157,7 @@ export default function Sales() {
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('All');
+  const [selectedTransactionDate, setSelectedTransactionDate] = useState('');
   const [transactionSyncStatus, setTransactionSyncStatus] = useState<{ phase: 'idle' | 'pending' | 'committing' | 'success' | 'error'; message: string }>({ phase: 'idle', message: '' });
 
   const refreshData = () => {
@@ -382,8 +383,19 @@ export default function Sales() {
       if (cart.length === 0) return;
       if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
+      setSelectedTransactionDate('');
       if (isReturnMode) setPaymentMethod('Cash');
       setIsCustomerModalOpen(true);
+  };
+
+  const buildEffectiveTransactionDate = () => {
+      if (!selectedTransactionDate) return new Date().toISOString();
+      const [yyyy, mm, dd] = selectedTransactionDate.split('-').map(Number);
+      if (!yyyy || !mm || !dd) return new Date().toISOString();
+      const now = new Date();
+      const effective = new Date(now);
+      effective.setFullYear(yyyy, mm - 1, dd);
+      return effective.toISOString();
   };
 
   const completeCheckout = () => {
@@ -481,7 +493,7 @@ export default function Sales() {
 
       const tx: Transaction = {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
-          taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale',
+          taxRate: selectedTax.value, taxLabel: selectedTax.label, date: buildEffectiveTransactionDate(), type: isReturnMode ? 'return' : 'sale',
           customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod
       };
 
@@ -498,6 +510,7 @@ export default function Sales() {
       setNewCustomerPhone('');
       setCustomerSearch('');
       setCashReceived('');
+      setSelectedTransactionDate('');
       if(isReturnMode) setIsReturnMode(false);
   };
 
@@ -703,7 +716,22 @@ export default function Sales() {
           <Card className="w-full max-w-6xl h-[88vh] overflow-hidden">
             <CardHeader className="border-b py-3 px-5 flex flex-row items-center justify-between">
               <CardTitle>{isReturnMode ? 'Create Return Invoice' : 'Create Invoice'}</CardTitle>
-              <Button variant="outline" size="sm" onClick={() => setIsCustomerModalOpen(false)}><X className="w-4 h-4 mr-1" />Close</Button>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <Label className="text-xs text-muted-foreground">Transaction Date</Label>
+                  <Input
+                    type="date"
+                    value={selectedTransactionDate}
+                    max={new Date().toISOString().split('T')[0]}
+                    className="h-9 w-[170px]"
+                    onChange={(e) => {
+                      setSelectedTransactionDate(e.target.value);
+                      setCheckoutError(null);
+                    }}
+                  />
+                </div>
+                <Button variant="outline" size="sm" onClick={() => { setIsCustomerModalOpen(false); setSelectedTransactionDate(''); }}><X className="w-4 h-4 mr-1" />Close</Button>
+              </div>
             </CardHeader>
             <CardContent className="p-5 h-[calc(88vh-66px)] grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)] gap-4">
               <div className="border rounded-xl p-4 space-y-4 overflow-y-auto">
