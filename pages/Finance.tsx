@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { loadData, saveData, processTransaction } from '../services/storage';
+import { financeLog } from '../services/financeLogger';
 import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
@@ -59,7 +60,13 @@ const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], 
   const cashRefunds = cashTransactions.filter(t => t.type === 'return').reduce((sum, t) => sum + Math.abs(t.total), 0);
   const expenseTotal = windowExpenses.reduce((sum, e) => sum + e.amount, 0);
 
-  return { cashSales, cashRefunds, expenseTotal, systemCashTotal: cashSales - cashRefunds - expenseTotal };
+  const totals = { cashSales, cashRefunds, expenseTotal, systemCashTotal: cashSales - cashRefunds - expenseTotal };
+  financeLog.cash('SESSION_TOTALS', {
+    sessionStartIso,
+    sessionEndIso: sessionEndIso || null,
+    ...totals,
+  });
+  return totals;
 };
 
 const CLOSING_DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1] as const;
@@ -347,7 +354,9 @@ export default function Finance() {
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => isSameDay(e.createdAt, profitDate)).reduce((sum, e) => sum + e.amount, 0);
 
-    return { sales, cogs, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    const summary = { sales, cogs, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    financeLog.pnl('DAILY_SUMMARY', { date: profitDate, ...summary });
+    return summary;
   }, [data.transactions, expenses, profitDate]);
 
   const monthlyProfit = useMemo(() => {
@@ -357,7 +366,9 @@ export default function Finance() {
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => monthKeyOf(e.createdAt) === profitMonth).reduce((sum, e) => sum + e.amount, 0);
 
-    return { sales, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    const summary = { sales, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    financeLog.pnl('MONTHLY_SUMMARY', { month: profitMonth, ...summary });
+    return summary;
   }, [data.transactions, expenses, profitMonth]);
 
   const persistState = async (newState: AppState) => {
@@ -380,6 +391,7 @@ export default function Finance() {
     if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
     const session: CashSession = { id: buildCashSessionId(cashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
+    financeLog.shift('START', { openingCash: value });
     await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
@@ -396,6 +408,14 @@ export default function Finance() {
     const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, openSession.startTime, closedAt);
     const expectedClosing = openSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
+    financeLog.shift('CLOSE', {
+      opening: openSession.openingBalance,
+      inflow: systemCashTotal + expenseTotal,
+      outflow: expenseTotal,
+      expected: expectedClosing,
+      actual: counted,
+      variance: difference,
+    });
 
     const updated = (data.cashSessions || []).map(session => session.id === openSession.id ? {
       ...session,
@@ -486,6 +506,8 @@ export default function Finance() {
       note: expenseNote.trim() || undefined,
       createdAt: new Date().toISOString()
     };
+    financeLog.expense('CREATE', { amount, category: expense.category, affectsCash: true });
+    financeLog.cash('OUTFLOW', { txId: expense.id, amount, reason: expense.title, paymentMode: 'Cash', source: 'expense' });
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
     await persistState({
