@@ -4,7 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
-import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
+import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
@@ -13,12 +13,12 @@ import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
 import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, CreditCard, Wallet, Coins, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
 
-const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, onAdd }) => {
+const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
     const [flashMsg, setFlashMsg] = useState<string | null>(null);
 
     const isOutOfStock = !isReturnMode && product.stock <= 0;
-    const maxReturnable = product.totalSold || 0;
+    const maxReturnable = returnableQty;
     const canReturn = isReturnMode && maxReturnable > 0;
     const isLowStock = !isReturnMode && product.stock > 0 && product.stock < 5;
 
@@ -141,7 +141,7 @@ export default function Sales() {
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerTab, setCustomerTab] = useState<'search' | 'new'>('search');
   const [bulkModal, setBulkModal] = useState<{ isOpen: boolean, product: Product | null }>({ isOpen: false, product: null });
-  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number }> }>({ open: false, product: null, rows: [] });
+  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number; sellPrice: number }> }>({ open: false, product: null, rows: [] });
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -242,6 +242,13 @@ export default function Sales() {
     return Math.max(0, soldQty - returnedQty);
   };
 
+  const getProductReturnableQty = (product: Product, customerId?: string) => {
+    if (!productHasCombinationStock(product)) {
+      return getReturnableQty(product.id, NO_VARIANT, NO_COLOR, customerId);
+    }
+    return getProductStockRows(product).reduce((sum, row) => sum + getReturnableQty(product.id, row.variant, row.color, customerId), 0);
+  };
+
   const handleProductSelect = (scanValue: string, explicitQty: number = 1) => {
     let targetCode = scanValue;
     try { const p = JSON.parse(scanValue); if (p.sku) targetCode = p.sku; if(p.barcode) targetCode = p.barcode; } catch(e) {}
@@ -252,10 +259,12 @@ export default function Sales() {
     if (isReturnMode) {
       const currentCart = cartRef.current;
       const inCart = currentCart
-        .filter(c => lineKey(c.id, c.selectedVariant, c.selectedColor) === lineKey(product.id, NO_VARIANT, NO_COLOR))
+        .filter(c => c.id === product.id)
         .reduce((sum, c) => sum + c.quantity, 0);
-      const sold = getReturnableQty(product.id, NO_VARIANT, NO_COLOR);
-      if (sold === 0) error = "Item hasn't been sold yet.";
+      const sold = getProductReturnableQty(product);
+      if (sold === 0) error = productHasCombinationStock(product)
+        ? 'No returnable quantity left for this product variants.'
+        : "Item hasn't been sold yet.";
       else if (sold < (inCart + explicitQty)) error = `Return Limit (${sold}) Exceeded!`;
     } else if (!productHasCombinationStock(product)) {
       const inCart = cartRef.current
@@ -269,6 +278,7 @@ export default function Sales() {
     if (productHasCombinationStock(product)) {
       const rows = getProductStockRows(product).map(row => ({
         ...row,
+        sellPrice: getResolvedSellPriceForCombination(product, row.variant, row.color),
         stock: isReturnMode ? getReturnableQty(product.id, row.variant, row.color) : row.stock,
         qty: 0
       }));
@@ -288,7 +298,16 @@ export default function Sales() {
             return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
+        return [...prev, {
+          ...product,
+          buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
+          sellPrice: getResolvedSellPriceForCombination(product, selectedVariant, selectedColor),
+          quantity: qty,
+          discountPercent: 0,
+          discountAmount: 0,
+          selectedVariant: selectedVariant || NO_VARIANT,
+          selectedColor: selectedColor || NO_COLOR
+        }];
     });
   };
 
@@ -569,12 +588,14 @@ export default function Sales() {
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
             {filteredProducts.map(p => {
               const cartItem = cart.find(item => item.id === p.id);
+              const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
               return (
                 <ProductGridItem
                   key={p.id}
                   product={p}
                   isReturnMode={isReturnMode}
                   cartQty={cartItem?.quantity || 0}
+                  returnableQty={returnableQty}
                   onAdd={(qty) => handleProductSelect(`${p.id}`, qty)}
                 />
               );
@@ -599,7 +620,7 @@ export default function Sales() {
                   <div key={`${row.variant}-${row.color}-${idx}`} className={`grid grid-cols-[1fr_80px_90px_116px] items-center gap-3 border rounded-xl p-3 ${disabled ? 'opacity-60 bg-muted/40' : ''}`}>
                     <div className="font-semibold text-sm">{label}</div>
                     <div className="text-xs text-muted-foreground text-center">{isReturnMode ? 'Sold left' : 'Stock'}: {row.stock}</div>
-                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{variantPicker.product?.sellPrice}</div>
+                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{row.sellPrice}</div>
                     <div className="flex items-center gap-2 justify-end">
                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>

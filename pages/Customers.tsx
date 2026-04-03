@@ -265,12 +265,6 @@ export default function Customers() {
           return;
       }
 
-      // ADMIN RESTRICTION: Payment cannot exceed current outstanding due
-      if (amount > (viewingCustomer.totalDue + 0.01)) { // Tiny buffer for float precision
-          setPaymentError(`Cannot pay more than outstanding due (Max: ₹${viewingCustomer.totalDue.toFixed(2)})`);
-          return;
-      }
-
       const tx: Transaction = {
           id: Date.now().toString(),
           items: [],
@@ -289,6 +283,12 @@ export default function Customers() {
       setPaymentNote('');
       setPaymentError(null);
   };
+
+  const parsedPaymentAmount = Number(paymentAmount);
+  const paymentAmountValid = Number.isFinite(parsedPaymentAmount) && parsedPaymentAmount > 0;
+  const currentDue = Math.max(0, Number(viewingCustomer?.totalDue || 0));
+  const paymentAppliedToDue = paymentAmountValid ? Math.min(parsedPaymentAmount, currentDue) : 0;
+  const paymentExcessToCredit = paymentAmountValid ? Math.max(0, parsedPaymentAmount - currentDue) : 0;
 
   const handleAddCustomerSubmit = () => {
       setAddCustomerError(null);
@@ -736,6 +736,7 @@ export default function Customers() {
               <th className="p-3 text-left">Visits</th>
               <th className="p-3 text-left">Total Spend</th>
               <th className="p-3 text-left">Due</th>
+              <th className="p-3 text-left">Store Credit</th>
               <th className="p-3 text-left">Last Visit</th>
               <th className="p-3 text-left">Actions</th>
             </tr>
@@ -757,6 +758,7 @@ export default function Customers() {
                 <td className="p-3">{customer.visitCount}</td>
                 <td className="p-3">₹{customer.totalSpend.toLocaleString()}</td>
                 <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(2)}</td>
+                <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{(customer.storeCredit || 0).toFixed(2)}</td>
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
@@ -870,6 +872,10 @@ export default function Customers() {
                            <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomer.totalDue > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
                                <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
                                <div className={`text-2xl font-black ${viewingCustomer.totalDue > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{viewingCustomer.totalDue.toFixed(2)}</div>
+                           </div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomer.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
+                               <div className={`text-2xl font-black ${(viewingCustomer.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{(viewingCustomer.storeCredit || 0).toFixed(2)}</div>
                            </div>
                            <div className="flex flex-col gap-2">
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={viewingCustomer.totalDue <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
@@ -1020,7 +1026,14 @@ export default function Customers() {
                             autoFocus 
                           />
                         </div>
-                        <p className="text-[10px] text-muted-foreground font-bold">Limit: ₹{viewingCustomer.totalDue.toFixed(2)}</p>
+                        <p className="text-[10px] text-muted-foreground font-bold">Outstanding due: ₹{viewingCustomer.totalDue.toFixed(2)}</p>
+                        <p className="text-[10px] text-muted-foreground">Excess amount (if any) will be saved as store credit.</p>
+                        {paymentAmountValid && (
+                          <div className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-[10px]">
+                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{paymentAppliedToDue.toFixed(2)}</span></div>
+                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{paymentExcessToCredit.toFixed(2)}</span></div>
+                          </div>
+                        )}
                       </div>
                       <div className="space-y-2">
                         <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Method</Label>
