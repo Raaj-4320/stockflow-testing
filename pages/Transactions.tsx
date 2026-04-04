@@ -2,12 +2,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer } from '../types';
+import { Transaction, Customer, DeletedTransactionRecord } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { loadData, deleteTransaction, updateTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
-import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit } from 'lucide-react';
+import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -15,6 +15,7 @@ import { downloadTransactionsData, downloadTransactionsTemplate, importHistorica
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [deletedTransactions, setDeletedTransactions] = useState<DeletedTransactionRecord[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
@@ -36,12 +37,33 @@ export default function Transactions() {
   const [editingError, setEditingError] = useState<string | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [showBin, setShowBin] = useState(false);
+  const [selectedDeletedTx, setSelectedDeletedTx] = useState<DeletedTransactionRecord | null>(null);
+
+  const formatRoleLabel = (role?: string) => {
+    const source = (role || 'Admin').trim();
+    if (!source) return 'Admin';
+    return source.charAt(0).toUpperCase() + source.slice(1);
+  };
+
+  const looksLikeUid = (value?: string) => {
+    if (!value) return false;
+    return /^[A-Za-z0-9]{20,}$/.test(value);
+  };
+
+  const formatDeletedByName = (record: DeletedTransactionRecord) => {
+    const actor = (record.deletedBy || '').trim();
+    if (!actor || looksLikeUid(actor)) return 'Unknown User';
+    if (actor.includes('@')) return actor.split('@')[0];
+    return actor;
+  };
 
   useEffect(() => {
     const refreshData = () => {
       try {
         const data = loadData();
         setTransactions(data.transactions);
+        setDeletedTransactions(data.deletedTransactions || []);
         setCustomers(data.customers);
         setLoadError(null);
       } catch (error) {
@@ -232,7 +254,7 @@ export default function Transactions() {
                   const profit = (item.sellPrice - item.buyPrice) * item.quantity;
                   grossProfit += profit;
               });
-          } else {
+          } else if (tx.type === 'return') {
               totalReturns += amount;
               // Reverse Profit for returns
               tx.items.forEach(item => {
@@ -406,6 +428,10 @@ export default function Transactions() {
                 <Calendar className="w-3.5 h-3.5" />
                 {filteredTransactions.length} records
             </Badge>
+            <Button variant={showBin ? 'default' : 'outline'} onClick={() => setShowBin(prev => !prev)} className="h-9 text-sm">
+              <Trash2 className="w-4 h-4 mr-1" />
+              {showBin ? 'Back to Active' : `Bin (${deletedTransactions.length})`}
+            </Button>
 
             <Button onClick={() => { setExportType('summary'); setIsExportModalOpen(true); }} variant="outline" size="icon" title="Download Report">
                 <Download className="w-4 h-4" />
@@ -518,11 +544,61 @@ export default function Transactions() {
       {/* Responsive Transaction Grid */}
       <div className="space-y-4">
         <h2 className="text-lg font-semibold tracking-tight flex items-center gap-2">
-            <Clock className="w-5 h-5 text-muted-foreground" />
-            Transaction History
+            {showBin ? <Trash2 className="w-5 h-5 text-muted-foreground" /> : <Clock className="w-5 h-5 text-muted-foreground" />}
+            {showBin ? 'Deleted Transaction Bin' : 'Transaction History'}
         </h2>
-        
-        {filteredTransactions.length === 0 ? (
+
+        {showBin ? (
+            deletedTransactions.length === 0 ? (
+              <div className="flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-lg bg-muted/10 text-muted-foreground">
+                <div className="w-12 h-12 bg-muted rounded-full flex items-center justify-center mb-4">
+                  <Trash2 className="w-6 h-6 opacity-50" />
+                </div>
+                <p className="font-medium">Bin is empty</p>
+                <p className="text-sm">Deleted transactions will appear here for audit.</p>
+              </div>
+            ) : (
+              <Card className="overflow-hidden border-none shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead className="text-xs text-muted-foreground uppercase bg-muted/50 font-bold">
+                      <tr>
+                        <th className="px-4 py-3">Deleted At</th>
+                        <th className="px-4 py-3">Type</th>
+                        <th className="px-4 py-3">Customer</th>
+                        <th className="px-4 py-3">Method</th>
+                        <th className="px-4 py-3 text-right">Amount</th>
+                        <th className="px-4 py-3">Deleted By</th>
+                        <th className="px-4 py-3 text-center">View</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {deletedTransactions.map(record => (
+                        <tr key={record.id} className="hover:bg-muted/30 transition-colors">
+                          <td className="px-4 py-3">{new Date(record.deletedAt).toLocaleString()}</td>
+                          <td className="px-4 py-3 uppercase font-semibold text-xs">{record.type}</td>
+                          <td className="px-4 py-3">{record.customerName || 'Walk-in'}</td>
+                          <td className="px-4 py-3">{record.paymentMethod || 'N/A'}</td>
+                          <td className="px-4 py-3 text-right font-bold">₹{Math.abs(record.amount || 0).toLocaleString()}</td>
+                          <td className="px-4 py-3">
+                            <div className="text-xs">
+                              <div>{formatDeletedByName(record)}</div>
+                              <div className="text-muted-foreground">{formatRoleLabel(record.deletedByRole)}</div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedDeletedTx(record)}>
+                              <Eye className="w-3.5 h-3.5" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            )
+        ) : filteredTransactions.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-lg bg-muted/10 text-muted-foreground">
                 <div className="w-12 h-12 bg-muted rounded-full flex items-center justify-center mb-4">
                     <Calendar className="w-6 h-6 opacity-50" />
@@ -557,7 +633,12 @@ export default function Transactions() {
                         <tbody className="divide-y">
                             {filteredTransactions.map(tx => {
                                 const isSale = tx.type === 'sale';
+                                const isReturn = tx.type === 'return';
+                                const isPayment = tx.type === 'payment';
                                 const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+                                const typeLabel = isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT';
+                                const typeVariant = isSale ? 'success' : isReturn ? 'destructive' : 'secondary';
+                                const amountClass = isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700';
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
                                         <td className="px-4 py-3">
@@ -582,8 +663,8 @@ export default function Transactions() {
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
-                                            <Badge variant={isSale ? 'success' : 'destructive'} className="text-[9px] font-bold px-1.5 h-4">
-                                                {isSale ? 'SALE' : 'RETURN'}
+                                            <Badge variant={typeVariant} className="text-[9px] font-bold px-1.5 h-4">
+                                                {typeLabel}
                                             </Badge>
                                         </td>
                                         {viewMode === 'list-details' && (
@@ -608,7 +689,7 @@ export default function Transactions() {
                                         <td className="px-4 py-3">
                                             <span className="text-xs font-medium text-muted-foreground">{tx.paymentMethod || 'Cash'}</span>
                                         </td>
-                                        <td className={`px-4 py-3 text-right font-bold ${isSale ? 'text-green-600' : 'text-red-600'}`}>
+                                        <td className={`px-4 py-3 text-right font-bold ${amountClass}`}>
                                             ₹{Math.abs(tx.total).toLocaleString()}
                                         </td>
                                         <td className="px-4 py-3 text-center">
@@ -634,7 +715,13 @@ export default function Transactions() {
             }`}>
                 {filteredTransactions.map(tx => {
                     const isSale = tx.type === 'sale';
+                    const isReturn = tx.type === 'return';
+                    const isPayment = tx.type === 'payment';
                     const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+                    const cardBorder = isSale ? 'bg-green-500' : isReturn ? 'bg-red-500' : 'bg-emerald-500';
+                    const amountClass = isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700';
+                    const badgeVariant = isSale ? 'success' : isReturn ? 'destructive' : 'secondary';
+                    const badgeLabel = isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT';
                     
                     if (viewMode === 'medium') {
                         return (
@@ -644,7 +731,7 @@ export default function Transactions() {
                                 onClick={() => setSelectedTx(tx)}
                             >
                                 <CardContent className="p-0">
-                                    <div className={`h-1.5 w-full ${isSale ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                                    <div className={`h-1.5 w-full ${cardBorder}`}></div>
                                     <div className="p-4 space-y-3">
                                         <div className="flex justify-between items-center">
                                             <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{tx.id.slice(-6)}</Badge>
@@ -654,11 +741,11 @@ export default function Transactions() {
                                         <div className="flex justify-between items-end">
                                             <div>
                                                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-0.5">{tx.customerName || 'Walk-in'}</p>
-                                                <p className={`text-xl font-black ${isSale ? 'text-green-600' : 'text-red-600'}`}>₹{Math.abs(tx.total).toLocaleString()}</p>
+                                                <p className={`text-xl font-black ${amountClass}`}>₹{Math.abs(tx.total).toLocaleString()}</p>
                                             </div>
                                             <div className="text-right">
-                                                <Badge variant={isSale ? 'success' : 'destructive'} className="text-[8px] font-black h-4 px-1 mb-1">
-                                                    {isSale ? 'SALE' : 'RETURN'}
+                                                <Badge variant={badgeVariant} className="text-[8px] font-black h-4 px-1 mb-1">
+                                                    {badgeLabel}
                                                 </Badge>
                                                 <p className="text-[9px] text-muted-foreground font-bold">{tx.paymentMethod || 'Cash'}</p>
                                             </div>
@@ -688,7 +775,7 @@ export default function Transactions() {
                         <Card 
                             key={tx.id} 
                             className="group cursor-pointer hover:border-primary/50 hover:shadow-md transition-all duration-200 border-l-4"
-                            style={{ borderLeftColor: isSale ? '#22c55e' : '#ef4444' }}
+                            style={{ borderLeftColor: isSale ? '#22c55e' : isReturn ? '#ef4444' : '#10b981' }}
                             onClick={() => setSelectedTx(tx)}
                         >
                             <CardContent className="p-4 flex flex-col gap-4">
@@ -719,8 +806,8 @@ export default function Transactions() {
                                             >
                                                 <FileText className="w-3.5 h-3.5" />
                                             </Button>
-                                            <Badge variant={isSale ? 'success' : 'destructive'} className="text-[10px] font-bold uppercase tracking-wider px-2 h-5">
-                                                {isSale ? 'SALE' : 'RETURN'}
+                                            <Badge variant={badgeVariant} className="text-[10px] font-bold uppercase tracking-wider px-2 h-5">
+                                                {badgeLabel}
                                             </Badge>
                                         </div>
                                         <div className="text-[10px] font-medium text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
@@ -731,8 +818,8 @@ export default function Transactions() {
 
                                 {/* Main: Amount */}
                                 <div>
-                                    <div className={`text-2xl font-bold flex items-center ${isSale ? 'text-green-600' : 'text-red-600'}`}>
-                                        {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : <ArrowDownLeft className="w-5 h-5 mr-1" />}
+                                    <div className={`text-2xl font-bold flex items-center ${amountClass}`}>
+                                        {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : isReturn ? <ArrowDownLeft className="w-5 h-5 mr-1" /> : <CreditCard className="w-5 h-5 mr-1" />}
                                         ₹{Math.abs(tx.total).toLocaleString()}
                                     </div>
                                 </div>
@@ -879,8 +966,8 @@ export default function Transactions() {
 
                               <div className="border-t pt-2 mt-2 flex justify-between items-center font-bold text-xl">
                                   <span>Total</span>
-                                  <span className={selectedTx.type === 'sale' ? 'text-green-700' : 'text-red-700'}>
-                                      {selectedTx.type === 'sale' ? '' : '-'}₹{Math.abs(selectedTx.total).toFixed(2)}
+                                  <span className={selectedTx.type === 'sale' ? 'text-green-700' : selectedTx.type === 'return' ? 'text-red-700' : 'text-emerald-700'}>
+                                      {selectedTx.type === 'return' ? '-' : ''}₹{Math.abs(selectedTx.total).toFixed(2)}
                                   </span>
                               </div>
                           </div>
@@ -888,6 +975,114 @@ export default function Transactions() {
                   </CardContent>
               </Card>
           </div>
+      )}
+
+      {selectedDeletedTx && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <Card className="w-full max-w-2xl animate-in zoom-in duration-200 flex flex-col max-h-[90vh] shadow-2xl">
+            <CardHeader className="border-b pb-3 shrink-0 bg-muted/5">
+              <div className="flex justify-between items-center">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Trash2 className="w-5 h-5 text-muted-foreground" />
+                  Deleted Transaction Snapshot
+                </CardTitle>
+                <Button variant="ghost" size="icon" onClick={() => setSelectedDeletedTx(null)}>
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="overflow-auto space-y-4 p-4">
+              <div className="rounded-lg border p-3 space-y-2">
+                <p className="font-semibold text-sm">Deleted transaction metadata</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                  <div><span className="text-muted-foreground">Deleted at:</span> {new Date(selectedDeletedTx.deletedAt).toLocaleString()}</div>
+                  <div><span className="text-muted-foreground">Deleted by:</span> {formatDeletedByName(selectedDeletedTx)}</div>
+                  <div><span className="text-muted-foreground">Role:</span> {formatRoleLabel(selectedDeletedTx.deletedByRole)}</div>
+                  <div><span className="text-muted-foreground">Type:</span> {selectedDeletedTx.type.toUpperCase()}</div>
+                  <div><span className="text-muted-foreground">Customer:</span> {selectedDeletedTx.customerName || 'Walk-in'}</div>
+                  <div><span className="text-muted-foreground">Payment method:</span> {selectedDeletedTx.paymentMethod || 'N/A'}</div>
+                  <div><span className="text-muted-foreground">Amount:</span> ₹{Math.abs(selectedDeletedTx.amount || 0).toLocaleString()}</div>
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-3 bg-muted/10 space-y-3">
+                <p className="font-semibold text-sm">Before / After impact</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  <div className="rounded-md border bg-background p-2 space-y-1">
+                    <p className="font-semibold text-muted-foreground">Customer impact</p>
+                    <p>Due: ₹{selectedDeletedTx.beforeImpact.customerDue.toLocaleString()} → ₹{selectedDeletedTx.afterImpact.customerDue.toLocaleString()}</p>
+                    <p>Store credit: ₹{selectedDeletedTx.beforeImpact.customerStoreCredit.toLocaleString()} → ₹{selectedDeletedTx.afterImpact.customerStoreCredit.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-md border bg-background p-2 space-y-1">
+                    <p className="font-semibold text-muted-foreground">Activity impact</p>
+                    <p>Active transaction count: {selectedDeletedTx.beforeImpact.activeTransactionsCount} → {selectedDeletedTx.afterImpact.activeTransactionsCount}</p>
+                  </div>
+                  <div className="rounded-md border bg-background p-2 space-y-1">
+                    <p className="font-semibold text-muted-foreground">Cash impact</p>
+                    <p>Cash estimate: ₹{selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions.toLocaleString()} → ₹{selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions.toLocaleString()}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-3 space-y-2">
+                <p className="font-semibold text-sm">Original transaction summary</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                  <div><span className="text-muted-foreground">Transaction ID:</span> {selectedDeletedTx.originalTransactionId}</div>
+                  <div><span className="text-muted-foreground">Type:</span> {selectedDeletedTx.originalTransaction.type.toUpperCase()}</div>
+                  <div><span className="text-muted-foreground">Date:</span> {new Date(selectedDeletedTx.originalTransaction.date).toLocaleString()}</div>
+                  <div><span className="text-muted-foreground">Customer:</span> {selectedDeletedTx.originalTransaction.customerName || 'Walk-in'}</div>
+                  <div><span className="text-muted-foreground">Payment method:</span> {selectedDeletedTx.originalTransaction.paymentMethod || 'N/A'}</div>
+                  <div><span className="text-muted-foreground">Total:</span> ₹{Math.abs(selectedDeletedTx.originalTransaction.total || 0).toLocaleString()}</div>
+                  <div><span className="text-muted-foreground">Discount:</span> ₹{Math.abs(selectedDeletedTx.originalTransaction.discount || 0).toLocaleString()}</div>
+                  <div><span className="text-muted-foreground">Tax:</span> ₹{Math.abs(selectedDeletedTx.originalTransaction.tax || 0).toLocaleString()}</div>
+                  <div className="md:col-span-2"><span className="text-muted-foreground">Notes:</span> {selectedDeletedTx.originalTransaction.notes || '—'}</div>
+                </div>
+              </div>
+
+              {(selectedDeletedTx.itemSnapshot || selectedDeletedTx.originalTransaction.items || []).length > 0 && (
+                <div className="rounded-lg border p-3 space-y-2">
+                  <p className="font-semibold text-sm">Item summary</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="text-muted-foreground">
+                        <tr>
+                          <th className="text-left py-1 pr-2">Product</th>
+                          <th className="text-left py-1 pr-2">Qty</th>
+                          <th className="text-left py-1 pr-2">Variant</th>
+                          <th className="text-left py-1 pr-2">Color</th>
+                          <th className="text-left py-1 pr-2">Unit</th>
+                          <th className="text-right py-1">Subtotal</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(selectedDeletedTx.itemSnapshot || selectedDeletedTx.originalTransaction.items || []).map((item, index) => {
+                          const subtotal = (item.sellPrice || 0) * (item.quantity || 0) - (item.discountAmount || 0);
+                          return (
+                            <tr key={`${item.id}-${index}`} className="border-t">
+                              <td className="py-1 pr-2">{item.name} <span className="text-muted-foreground">({item.id})</span></td>
+                              <td className="py-1 pr-2">{item.quantity}</td>
+                              <td className="py-1 pr-2">{item.selectedVariant || NO_VARIANT}</td>
+                              <td className="py-1 pr-2">{item.selectedColor || NO_COLOR}</td>
+                              <td className="py-1 pr-2">₹{(item.sellPrice || 0).toLocaleString()}</td>
+                              <td className="py-1 text-right">₹{subtotal.toLocaleString()}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-lg border p-3">
+                <details>
+                  <summary className="cursor-pointer text-sm font-medium">Show raw snapshot</summary>
+                  <pre className="mt-2 text-xs whitespace-pre-wrap break-words">{JSON.stringify(selectedDeletedTx.originalTransaction, null, 2)}</pre>
+                </details>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       <UploadImportModal 
@@ -899,6 +1094,7 @@ export default function Transactions() {
           const result = await importHistoricalTransactionsFromFile(file);
           const data = loadData();
           setTransactions(data.transactions);
+          setDeletedTransactions(data.deletedTransactions || []);
           setCustomers(data.customers);
           return result;
         }}
