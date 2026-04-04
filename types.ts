@@ -51,6 +51,7 @@ export interface Customer {
   phone: string;
   totalSpend: number;
   totalDue: number;
+  storeCredit?: number;
   lastVisit: string;
   visitCount: number;
 }

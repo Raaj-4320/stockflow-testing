@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { loadData, saveData, processTransaction } from '../services/storage';
+import { financeLog } from '../services/financeLogger';
 import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
@@ -57,9 +58,16 @@ const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], 
 
   const cashSales = cashTransactions.filter(t => t.type === 'sale').reduce((sum, t) => sum + t.total, 0);
   const cashRefunds = cashTransactions.filter(t => t.type === 'return').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashCollections = cashTransactions.filter(t => t.type === 'payment').reduce((sum, t) => sum + Math.abs(t.total), 0);
   const expenseTotal = windowExpenses.reduce((sum, e) => sum + e.amount, 0);
 
-  return { cashSales, cashRefunds, expenseTotal, systemCashTotal: cashSales - cashRefunds - expenseTotal };
+  const totals = { cashSales, cashRefunds, cashCollections, expenseTotal, systemCashTotal: cashSales + cashCollections - cashRefunds - expenseTotal };
+  financeLog.cash('SESSION_TOTALS', {
+    sessionStartIso,
+    sessionEndIso: sessionEndIso || null,
+    ...totals,
+  });
+  return totals;
 };
 
 const CLOSING_DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1] as const;
@@ -342,22 +350,30 @@ export default function Finance() {
 
   const dailyProfit = useMemo(() => {
     const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
+    const returns = data.transactions.filter(t => t.type === 'return' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
+    const netSales = sales + returns;
     const cogs = data.transactions
       .filter(t => t.type === 'sale' && isSameDay(t.date, profitDate))
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => isSameDay(e.createdAt, profitDate)).reduce((sum, e) => sum + e.amount, 0);
 
-    return { sales, cogs, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    const summary = { sales: netSales, cogs, expenses: expenseSum, profit: netSales - cogs - expenseSum };
+    financeLog.pnl('DAILY_SUMMARY', { date: profitDate, ...summary });
+    return summary;
   }, [data.transactions, expenses, profitDate]);
 
   const monthlyProfit = useMemo(() => {
     const sales = data.transactions.filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
+    const returns = data.transactions.filter(t => t.type === 'return' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
+    const netSales = sales + returns;
     const cogs = data.transactions
       .filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth)
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => monthKeyOf(e.createdAt) === profitMonth).reduce((sum, e) => sum + e.amount, 0);
 
-    return { sales, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    const summary = { sales: netSales, expenses: expenseSum, profit: netSales - cogs - expenseSum };
+    financeLog.pnl('MONTHLY_SUMMARY', { month: profitMonth, ...summary });
+    return summary;
   }, [data.transactions, expenses, profitMonth]);
 
   const persistState = async (newState: AppState) => {
@@ -380,6 +396,7 @@ export default function Finance() {
     if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
     const session: CashSession = { id: buildCashSessionId(cashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
+    financeLog.shift('START', { openingCash: value });
     await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
@@ -396,6 +413,14 @@ export default function Finance() {
     const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, openSession.startTime, closedAt);
     const expectedClosing = openSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
+    financeLog.shift('CLOSE', {
+      opening: openSession.openingBalance,
+      inflow: systemCashTotal + expenseTotal,
+      outflow: expenseTotal,
+      expected: expectedClosing,
+      actual: counted,
+      variance: difference,
+    });
 
     const updated = (data.cashSessions || []).map(session => session.id === openSession.id ? {
       ...session,
@@ -486,6 +511,8 @@ export default function Finance() {
       note: expenseNote.trim() || undefined,
       createdAt: new Date().toISOString()
     };
+    financeLog.expense('CREATE', { amount, category: expense.category, affectsCash: true });
+    financeLog.cash('OUTFLOW', { txId: expense.id, amount, reason: expense.title, paymentMode: 'Cash', source: 'expense' });
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
     await persistState({
@@ -900,7 +927,7 @@ export default function Finance() {
                             <div className={`text-sm font-semibold ${session.status === 'open' ? 'text-slate-900' : isMatch ? 'text-emerald-700' : isShort ? 'text-rose-700' : 'text-slate-900'}`}>
                               {session.status === 'open' ? 'Session is ongoing' : isMatch ? 'Cash matched' : isShort ? `Short by ${formatINR(Math.abs(difference))}` : `Over by ${formatINR(difference)}`}
                             </div>
-                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales − Refunds − Expenses)</div>
+                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales + Collections − Refunds − Expenses)</div>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -985,7 +1012,7 @@ export default function Finance() {
                             <div className={`text-sm font-semibold ${activeHistorySession.status === 'open' ? 'text-slate-900' : isMatch ? 'text-emerald-700' : isShort ? 'text-rose-700' : 'text-slate-900'}`}>
                               {activeHistorySession.status === 'open' ? 'Session is ongoing' : isMatch ? 'Cash matched' : isShort ? `Short by ${formatINR(Math.abs(difference))}` : `Over by ${formatINR(difference)}`}
                             </div>
-                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales − Refunds − Expenses)</div>
+                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales + Collections − Refunds − Expenses)</div>
                           </div>
                         </div>
                         <Button type="button" variant="outline" size="sm" onClick={() => setActiveHistoryDetailSessionId(null)}>Hide details</Button>
