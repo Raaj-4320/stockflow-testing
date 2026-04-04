@@ -20,6 +20,7 @@ import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
+import { financeLog } from './financeLogger';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -273,9 +274,160 @@ const upsertTransactionInSubcollection = async (transaction: Transaction, reason
   await setDoc(doc(db!, 'stores', user.uid, 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
 };
 
-const deleteTransactionInSubcollection = async (transactionId: string, reason: string) => {
+const getDeleteReversalTransactionType = (type: Transaction['type']): Transaction['type'] | null => {
+  if (type === 'sale') return 'return';
+  if (type === 'return') return 'sale';
+  return null;
+};
+
+const toFiniteNonNegative = (value: unknown) => Number.isFinite(value) ? Math.max(0, Number(value)) : 0;
+
+const normalizeCustomerBalance = (totalDue: unknown, storeCredit: unknown): { totalDue: number; storeCredit: number } => {
+  const due = toFiniteNonNegative(totalDue);
+  const credit = toFiniteNonNegative(storeCredit);
+  const net = due - credit;
+  if (net >= 0) return { totalDue: net, storeCredit: 0 };
+  return { totalDue: 0, storeCredit: Math.abs(net) };
+};
+
+const applyCustomerBalanceDelta = (customer: Customer, dueDelta: number): { totalDue: number; storeCredit: number } => {
+  const baseDue = toFiniteNonNegative(customer.totalDue);
+  const baseCredit = toFiniteNonNegative(customer.storeCredit);
+  return normalizeCustomerBalance(baseDue + dueDelta, baseCredit);
+};
+
+const reconcileCustomerAfterDelete = (customer: Customer, transaction: Transaction): Customer => {
+  const amount = Math.abs(transaction.total || 0);
+  let nextTotalSpend = Number(customer.totalSpend || 0);
+  let nextVisitCount = Number(customer.visitCount || 0);
+  let dueDelta = 0;
+
+  if (transaction.type === 'sale') {
+    nextTotalSpend = Math.max(0, nextTotalSpend - amount);
+    nextVisitCount = Math.max(0, nextVisitCount - 1);
+    if (transaction.paymentMethod === 'Credit') dueDelta -= amount;
+  } else if (transaction.type === 'return') {
+    nextTotalSpend = Math.max(0, nextTotalSpend + amount);
+    if (transaction.paymentMethod === 'Credit') dueDelta += amount;
+  } else if (transaction.type === 'payment') {
+    dueDelta += amount;
+  }
+
+  const { totalDue, storeCredit } = applyCustomerBalanceDelta(customer, dueDelta);
+
+  return {
+    ...customer,
+    totalSpend: nextTotalSpend,
+    totalDue,
+    storeCredit,
+    visitCount: nextVisitCount,
+  };
+};
+
+const reconcileStateAfterDeleteTransaction = (state: AppState, transaction: Transaction): AppState => {
+  const nextTransactions = state.transactions.filter(t => t.id !== transaction.id);
+  const reversalType = getDeleteReversalTransactionType(transaction.type);
+
+  const nextProducts = reversalType
+    ? state.products.map(product => applyTransactionItemsToProduct(product, transaction.items || [], reversalType))
+    : [...state.products];
+
+  const nextCustomers = transaction.customerId
+    ? state.customers.map(customer => customer.id === transaction.customerId ? reconcileCustomerAfterDelete(customer, transaction) : customer)
+    : [...state.customers];
+
+  return {
+    ...state,
+    transactions: nextTransactions,
+    products: nextProducts,
+    customers: nextCustomers,
+  };
+};
+
+const deleteTransactionAndReconcileInSubcollection = async (transaction: Transaction, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await deleteDoc(doc(db!, 'stores', user.uid, 'transactions', transactionId));
+
+  await runFirestoreTransaction(db!, async (firestoreTx) => {
+    const transactionRef = doc(db!, 'stores', user.uid, 'transactions', transaction.id);
+    const transactionSnap = await firestoreTx.get(transactionRef);
+    if (!transactionSnap.exists()) return;
+
+    const reversalType = getDeleteReversalTransactionType(transaction.type);
+    const bucketedItems = reversalType ? aggregateCartItemsByStockBucket(transaction.items || []) : [];
+    const productIds = Array.from(new Set(bucketedItems.map(item => item.productId)));
+
+    const productSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
+    for (const productId of productIds) {
+      const productRef = doc(db!, 'stores', user.uid, 'products', productId);
+      const productSnap = await firestoreTx.get(productRef);
+      productSnapshots.set(productId, productSnap);
+    }
+
+    let customerSnap: Awaited<ReturnType<typeof firestoreTx.get>> | null = null;
+    if (transaction.customerId) {
+      const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
+      customerSnap = await firestoreTx.get(customerRef);
+    }
+
+    const statsSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
+    if (transaction.customerId && reversalType) {
+      for (const productId of productIds) {
+        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, productId);
+        const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
+        const statsSnap = await firestoreTx.get(statsRef);
+        statsSnapshots.set(statsDocId, statsSnap);
+      }
+    }
+
+    if (reversalType) {
+      for (const productId of productIds) {
+        const productRef = doc(db!, 'stores', user.uid, 'products', productId);
+        const productSnap = productSnapshots.get(productId);
+        if (!productSnap?.exists()) continue;
+        const currentProduct = { ...(productSnap.data() as Product), id: productSnap.id };
+        const reconciledProduct = applyTransactionItemsToProduct(currentProduct, transaction.items || [], reversalType);
+        firestoreTx.set(productRef, sanitizeData(reconciledProduct), { merge: true });
+      }
+    }
+
+    if (transaction.customerId && customerSnap?.exists()) {
+      const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
+      const currentCustomer = { ...(customerSnap.data() as Customer), id: customerSnap.id };
+      const reconciledCustomer = reconcileCustomerAfterDelete(currentCustomer, transaction);
+      firestoreTx.set(customerRef, sanitizeData(reconciledCustomer), { merge: true });
+    }
+
+    if (transaction.customerId && reversalType) {
+      for (const productId of productIds) {
+        const qty = bucketedItems
+          .filter(item => item.productId === productId)
+          .reduce((sum, item) => sum + item.quantity, 0);
+        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, productId);
+        const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
+        const statsSnap = statsSnapshots.get(statsDocId);
+        const stats = statsSnap?.exists()
+          ? (statsSnap.data() as { soldQty?: number; returnedQty?: number })
+          : { soldQty: 0, returnedQty: 0 };
+        const soldQty = Math.max(0, Number.isFinite(stats.soldQty) ? Number(stats.soldQty) : 0);
+        const returnedQty = Math.max(0, Number.isFinite(stats.returnedQty) ? Number(stats.returnedQty) : 0);
+
+        const nextStats = transaction.type === 'sale'
+          ? { soldQty: Math.max(0, soldQty - qty), returnedQty }
+          : { soldQty, returnedQty: Math.max(0, returnedQty - qty) };
+
+        firestoreTx.set(statsRef, sanitizeData({
+          customerId: transaction.customerId,
+          productId,
+          soldQty: nextStats.soldQty,
+          returnedQty: nextStats.returnedQty,
+          updatedAt: new Date().toISOString(),
+          migrationSource: statsSnap?.exists() ? 'transaction_delete_reconcile' : 'transaction_delete_bootstrap',
+        }), { merge: true });
+      }
+    }
+
+    firestoreTx.delete(transactionRef);
+  });
 };
 
 
@@ -381,34 +533,29 @@ const commitProcessTransactionAtomically = async ({
       const currentCustomer = { ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id };
       const amount = Math.abs(transaction.total);
       let newTotalSpend = currentCustomer.totalSpend;
-      let newTotalDue = currentCustomer.totalDue;
       let newVisitCount = currentCustomer.visitCount;
       let newLastVisit = currentCustomer.lastVisit;
+      let dueDelta = 0;
 
       if (transaction.type === 'sale') {
         newTotalSpend += amount;
         newVisitCount += 1;
         newLastVisit = new Date().toISOString();
-        if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
+        if (transaction.paymentMethod === 'Credit') dueDelta += amount;
       } else if (transaction.type === 'return') {
         newTotalSpend -= amount;
-        if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
+        if (transaction.paymentMethod === 'Credit') dueDelta -= amount;
       } else if (transaction.type === 'payment') {
-        newTotalDue -= amount;
+        dueDelta -= amount;
         newLastVisit = new Date().toISOString();
       }
-
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
-          customerId: currentCustomer.id,
-          resultingTotalDue: newTotalDue,
-        });
-      }
+      const { totalDue, storeCredit } = applyCustomerBalanceDelta(currentCustomer, dueDelta);
 
       committedCustomer = {
         ...currentCustomer,
         totalSpend: newTotalSpend,
-        totalDue: Math.max(0, newTotalDue),
+        totalDue,
+        storeCredit,
         visitCount: newVisitCount,
         lastVisit: newLastVisit,
       };
@@ -524,6 +671,42 @@ const initialData: AppState = {
   colorsMaster: []
 };
 
+const classifyTransactionEffects = (transaction: Transaction) => ({
+  type: transaction.type,
+  affectsCash: transaction.paymentMethod === 'Cash' || transaction.type === 'payment',
+  affectsDue: Boolean(transaction.customerId) && (transaction.type === 'sale' || transaction.type === 'return' || transaction.type === 'payment'),
+  affectsRevenue: transaction.type === 'sale' || transaction.type === 'return',
+  affectsStock: transaction.type === 'sale' || transaction.type === 'return',
+});
+
+const computeCashEstimateFromTransactions = (transactions: Transaction[]) => transactions.reduce((sum, tx) => {
+  if (tx.paymentMethod !== 'Cash') return sum;
+  const amount = Math.abs(tx.total);
+  if (tx.type === 'sale' || tx.type === 'payment') return sum + amount;
+  if (tx.type === 'return') return sum - amount;
+  return sum;
+}, 0);
+
+const logLoadedState = (state: AppState) => {
+  const openShift = (state.cashSessions || []).find(s => s.status === 'open');
+  financeLog.load('STATE', {
+    productsCount: state.products.length,
+    customersCount: state.customers.length,
+    transactionsCount: state.transactions.length,
+    totalDue: state.customers.reduce((sum, c) => sum + (c.totalDue || 0), 0),
+    totalCashEstimate: computeCashEstimateFromTransactions(state.transactions) - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0),
+    openShift: openShift ? { id: openShift.id, openingBalance: openShift.openingBalance, startTime: openShift.startTime } : null,
+  });
+  state.customers.slice(0, 5).forEach((customer) => {
+    const transactionsCount = state.transactions.filter((t) => t.customerId === customer.id).length;
+    financeLog.load('CUSTOMER_SUMMARY', {
+      customerId: customer.id,
+      due: customer.totalDue || 0,
+      transactionsCount,
+    });
+  });
+};
+
 let memoryState: AppState = { ...initialData };
 let hasInitialSynced = false;
 let unsubscribeSnapshot: any = null;
@@ -624,7 +807,7 @@ const syncFromCloud = async () => {
               .filter(p => !((p as any).isDeleted));
 
             memoryState = { ...memoryState, products };
-            console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length });
+            logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to product subcollection:', error);
@@ -636,7 +819,7 @@ const syncFromCloud = async () => {
               .filter(c => !((c as any).isDeleted));
 
             memoryState = { ...memoryState, customers };
-            console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length });
+            logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to customer subcollection:', error);
@@ -649,7 +832,7 @@ const syncFromCloud = async () => {
 
             const sortedTransactions = sortTransactionsDesc(transactions);
             memoryState = { ...memoryState, transactions: sortedTransactions };
-            console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: sortedTransactions.length });
+            logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to transaction subcollection:', error);
@@ -671,14 +854,6 @@ const syncFromCloud = async () => {
                 const hydratedProducts = subcollectionProducts;
                 const hydratedCustomers = subcollectionCustomers;
                 const hydratedTransactions = subcollectionTransactions;
-                console.debug('[migration-trace] root hydration merge', {
-                  subProducts: subcollectionProducts.length,
-                  subCustomers: subcollectionCustomers.length,
-                  subTransactions: subcollectionTransactions.length,
-                  finalProducts: hydratedProducts.length,
-                  finalCustomers: hydratedCustomers.length,
-                  finalTransactions: hydratedTransactions.length,
-                });
                 memoryState = {
                     ...initialData,
                     ...cloudData,
@@ -709,6 +884,7 @@ const syncFromCloud = async () => {
                 if (!memoryState.profile.invoiceFormat) {
                     memoryState.profile.invoiceFormat = 'standard';
                 }
+                logLoadedState(memoryState);
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
                 emitCloudSyncStatus(CLOUD_SYNC_STATUSES.READY);
@@ -999,7 +1175,6 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
     for (const endpoint of endpoints) {
       try {
-        console.debug('[cloudinary] signature fetch start', { endpoint, attempt });
 
         const response = await withTimeout(
           fetch(endpoint, {
@@ -1037,7 +1212,6 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
           continue;
         }
 
-        console.debug('[cloudinary] signature fetch success', { endpoint, attempt });
         return body;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1068,11 +1242,6 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
 
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
     try {
-      console.debug('[cloudinary] upload request start', {
-        attempt,
-        endpoint: uploadEndpoint
-      });
-
       const formData = new FormData();
       formData.append('file', dataUrl);
       formData.append('timestamp', String(signedParams.timestamp));
@@ -1124,11 +1293,6 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
           console.error('[cloudinary] upload failure', error);
           lastError = error;
         } else {
-          console.debug('[cloudinary] upload request success', {
-            attempt,
-            endpoint: uploadEndpoint,
-            imageUrl: uploadBody.secure_url
-          });
           return uploadBody.secure_url as string;
         }
       }
@@ -1159,17 +1323,7 @@ const uploadProductImageIfNeeded = async (product: Product): Promise<Product> =>
   }
 
   try {
-    console.debug('[cloudinary] Product image upload start', {
-      productId: product.id
-    });
-
     const secureUrl = await uploadDataUrlToCloudinary(product.image);
-
-    console.debug('[cloudinary] Product image upload success', {
-      productId: product.id,
-      imageUrl: secureUrl
-    });
-
     return { ...product, image: secureUrl };
   } catch (error) {
     console.error('[cloudinary] Product image upload failure', {
@@ -1209,10 +1363,6 @@ const syncToCloud = async (data: AppState) => {
           return;
         }
         await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
-        console.debug('[firestore] Store sync successful', {
-          uid: user.uid,
-          productsCount: Array.isArray(data.products) ? data.products.length : 0
-        });
     } catch (e) {
         console.error('[firestore] Error syncing to cloud', {
           uid: user.uid,
@@ -1232,9 +1382,12 @@ export const loadData = (): AppState => {
     emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
     // strict online-first guard: until we have hydrated once from cloud, do not treat local memory defaults as authoritative
     if (!hasCompletedInitialCloudLoad) {
-      return { ...initialData };
+      const bootState = { ...initialData };
+      logLoadedState(bootState);
+      return bootState;
     }
   }
+  logLoadedState(memoryState);
   return memoryState;
 };
 
@@ -1272,6 +1425,12 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
   }
 
   emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: options?.reason || 'saveData', entity: 'state', message: 'Saving changes…' });
+  financeLog.tx('SAVE_DATA', {
+    reason: options?.reason || 'saveData',
+    transactionsCount: data.transactions.length,
+    customersCount: data.customers.length,
+    expensesCount: data.expenses.length,
+  });
   const previousState = memoryState;
   const suspicious = isSuspiciousDrop(previousState, data);
   if (suspicious.suspicious && !options?.allowDestructive) {
@@ -1291,6 +1450,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
 
   if (!db) {
     memoryState = data;
+    logLoadedState(memoryState);
     emitLocalStorageUpdate();
     emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
     return;
@@ -1299,6 +1459,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
   try {
     await syncToCloud(data);
     memoryState = data;
+    logLoadedState(memoryState);
     emitLocalStorageUpdate();
     await writeAuditEvent(options?.auditOperation || 'UPDATE', {
       routeContext: options?.reason || 'saveData',
@@ -1734,11 +1895,13 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
 export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers);
+    const { totalDue, storeCredit } = normalizeCustomerBalance(customer.totalDue, customer.storeCredit);
 
     const newCustomer = {
       ...customer,
       totalSpend: Number.isFinite(customer.totalSpend) ? Math.max(0, customer.totalSpend) : 0,
-      totalDue: Number.isFinite(customer.totalDue) ? Math.max(0, customer.totalDue) : 0,
+      totalDue,
+      storeCredit,
       visitCount: Number.isFinite(customer.visitCount) ? Math.max(0, Math.floor(customer.visitCount)) : 0,
       lastVisit: customer.lastVisit || new Date().toISOString(),
     };
@@ -1772,19 +1935,25 @@ export const addCustomer = (customer: Customer): Customer[] => {
 export const updateCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers.filter(c => c.id !== customer.id));
-    const newCustomers = data.customers.map(c => c.id === customer.id ? customer : c);
+    const { totalDue, storeCredit } = normalizeCustomerBalance(customer.totalDue, customer.storeCredit);
+    const normalizedCustomer: Customer = {
+      ...customer,
+      totalDue,
+      storeCredit,
+    };
+    const newCustomers = data.customers.map(c => c.id === customer.id ? normalizedCustomer : c);
 
     if (!db) {
       void saveData({ ...data, customers: newCustomers }, { reason: 'updateCustomer_local_fallback', auditOperation: 'UPDATE' });
       return newCustomers;
     }
 
-    void upsertCustomerInSubcollection(customer, 'updateCustomer')
+    void upsertCustomerInSubcollection(normalizedCustomer, 'updateCustomer')
       .then(() => syncToCloud({ ...data }))
       .then(() => writeAuditEvent('UPDATE', {
         reason: 'updateCustomer_subcollection',
         migrationPhase: CUSTOMERS_MIGRATION_PHASE,
-        customerId: customer.id,
+        customerId: normalizedCustomer.id,
         customersCount: newCustomers.length,
       }))
       .then(() => {
@@ -2385,7 +2554,17 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
-
+  const txAmount = Math.abs(transaction?.total || 0);
+  financeLog.tx('START', {
+    txId: transaction?.id,
+    type: transaction?.type,
+    customerId: transaction?.customerId || null,
+    paymentMethod: transaction?.paymentMethod || null,
+    amount: txAmount,
+    items: Array.isArray(transaction?.items)
+      ? transaction.items.map((item) => ({ id: item.id, quantity: item.quantity, sellPrice: item.sellPrice, buyPrice: item.buyPrice }))
+      : [],
+  });
   if (!transaction || typeof transaction !== 'object') {
     failValidation('INVALID_TRANSACTION_PAYLOAD', 'Transaction payload is invalid.');
   }
@@ -2407,6 +2586,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   assertPaymentMethodByType(transaction.type, transaction.paymentMethod);
   assertTransactionFinancials(transaction);
   assertTransactionInventoryRules(transaction, data.products, data.transactions);
+  financeLog.tx('CLASSIFIED', classifyTransactionEffects(transaction));
 
   const newTransactions = [transaction, ...data.transactions];
   let newProducts = [...data.products];
@@ -2422,37 +2602,54 @@ export const processTransaction = (transaction: Transaction): AppState => {
 
       const c = newCustomers[customerIndex];
       let newTotalSpend = c.totalSpend;
-      let newTotalDue = c.totalDue;
       let newVisitCount = c.visitCount;
       let newLastVisit = c.lastVisit;
+      let dueDelta = 0;
       const amount = Math.abs(transaction.total);
       if (transaction.type === 'sale') {
           newTotalSpend += amount;
           newVisitCount += 1;
           newLastVisit = new Date().toISOString();
-          if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
+          if (transaction.paymentMethod === 'Credit') dueDelta += amount;
+          if (transaction.paymentMethod === 'Cash') {
+            financeLog.cash('INFLOW', { txId: transaction.id, amount, reason: 'cash sale received', paymentMode: 'Cash', source: 'sale' });
+          }
       } else if (transaction.type === 'return') {
           newTotalSpend -= amount;
-          if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
+          if (transaction.paymentMethod === 'Credit') dueDelta -= amount;
+          if (transaction.paymentMethod === 'Cash') {
+            financeLog.cash('OUTFLOW', { txId: transaction.id, amount, reason: 'cash return refunded', paymentMode: 'Cash', source: 'return_refund' });
+          }
       } else if (transaction.type === 'payment') {
-          newTotalDue -= amount;
+          dueDelta -= amount;
           newLastVisit = new Date().toISOString();
+          financeLog.cash('INFLOW', { txId: transaction.id, amount, reason: 'customer payment collected', paymentMode: transaction.paymentMethod, source: 'payment' });
       }
-
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
-          customerId: c.id,
-          resultingTotalDue: newTotalDue
-        });
-      }
+      const { totalDue, storeCredit } = applyCustomerBalanceDelta(c, dueDelta);
 
       newCustomers[customerIndex] = {
         ...c,
         totalSpend: newTotalSpend,
-        totalDue: Math.max(0, newTotalDue),
+        totalDue,
+        storeCredit,
         visitCount: newVisitCount,
         lastVisit: newLastVisit
       };
+      financeLog.ledger('DUE_CHANGE', {
+        txId: transaction.id,
+        customerId: c.id,
+        previousDue: c.totalDue,
+        delta: totalDue - c.totalDue,
+        newDue: totalDue,
+        reason: transaction.type === 'payment' ? 'payment' : transaction.type,
+      });
+  }
+  if (transaction.type === 'sale') {
+    const gross = transaction.items.reduce((sum, item) => sum + (item.sellPrice * item.quantity), 0);
+    const net = Math.abs(transaction.total);
+    financeLog.pnl('SALE', { txId: transaction.id, gross, discount: Math.max(0, gross - net), tax: 0, net });
+  } else if (transaction.type === 'return') {
+    financeLog.pnl('RETURN', { txId: transaction.id, returnAmount: txAmount, affectsRevenue: true });
   }
   const touchedProductIds = transaction.type !== 'payment'
     ? Array.from(new Set(transaction.items.map(item => item.id)))
@@ -2481,12 +2678,6 @@ export const processTransaction = (transaction: Transaction): AppState => {
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
     })
       .then(({ created, committedProducts, committedCustomer }) => {
-        console.debug('[migration-trace] processTransaction commit result', {
-          transactionId: transaction.id,
-          created,
-          committedProducts: committedProducts.length,
-          committedCustomer: committedCustomer?.id || null,
-        });
         if (!created) {
           emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.', transactionId: transaction.id });
           void writeAuditEvent('BLOCKED_WRITE', {
@@ -2612,18 +2803,26 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
 
 export const deleteTransaction = (transactionId: string): Transaction[] => {
   const data = loadData();
-  const next = data.transactions.filter(t => t.id !== transactionId);
+  const target = data.transactions.find(t => t.id === transactionId);
+  if (!target) return data.transactions;
+  const reconciledState = reconcileStateAfterDeleteTransaction(data, target);
+  const next = reconciledState.transactions;
 
   if (!db) {
-    void saveData({ ...data, transactions: next }, { reason: 'deleteTransaction_local_fallback', auditOperation: 'DELETE' });
+    void saveData(reconciledState, { reason: 'deleteTransaction_local_fallback', auditOperation: 'DELETE' });
     return next;
   }
 
-  memoryState = { ...memoryState, transactions: next };
+  memoryState = {
+    ...memoryState,
+    transactions: next,
+    products: reconciledState.products,
+    customers: reconciledState.customers,
+  };
   emitLocalStorageUpdate();
 
-  void deleteTransactionInSubcollection(transactionId, 'deleteTransaction')
-    .then(() => syncToCloud({ ...data }))
+  void deleteTransactionAndReconcileInSubcollection(target, 'deleteTransaction')
+    .then(() => syncToCloud({ ...reconciledState }))
     .then(() => writeAuditEvent('DELETE', {
       reason: 'deleteTransaction_subcollection',
       migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
@@ -2632,7 +2831,7 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
     }))
     .catch(error => {
       console.error('[storage-transactions] failed to delete transaction', error);
-      memoryState = { ...memoryState, transactions: data.transactions };
+      memoryState = { ...memoryState, transactions: data.transactions, products: data.products, customers: data.customers };
       emitLocalStorageUpdate();
     });
 
