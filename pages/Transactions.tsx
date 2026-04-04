@@ -232,7 +232,7 @@ export default function Transactions() {
                   const profit = (item.sellPrice - item.buyPrice) * item.quantity;
                   grossProfit += profit;
               });
-          } else {
+          } else if (tx.type === 'return') {
               totalReturns += amount;
               // Reverse Profit for returns
               tx.items.forEach(item => {
@@ -557,7 +557,12 @@ export default function Transactions() {
                         <tbody className="divide-y">
                             {filteredTransactions.map(tx => {
                                 const isSale = tx.type === 'sale';
+                                const isReturn = tx.type === 'return';
+                                const isPayment = tx.type === 'payment';
                                 const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+                                const typeLabel = isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT';
+                                const typeVariant = isSale ? 'success' : isReturn ? 'destructive' : 'secondary';
+                                const amountClass = isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700';
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
                                         <td className="px-4 py-3">
@@ -582,8 +587,8 @@ export default function Transactions() {
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
-                                            <Badge variant={isSale ? 'success' : 'destructive'} className="text-[9px] font-bold px-1.5 h-4">
-                                                {isSale ? 'SALE' : 'RETURN'}
+                                            <Badge variant={typeVariant} className="text-[9px] font-bold px-1.5 h-4">
+                                                {typeLabel}
                                             </Badge>
                                         </td>
                                         {viewMode === 'list-details' && (
@@ -608,7 +613,7 @@ export default function Transactions() {
                                         <td className="px-4 py-3">
                                             <span className="text-xs font-medium text-muted-foreground">{tx.paymentMethod || 'Cash'}</span>
                                         </td>
-                                        <td className={`px-4 py-3 text-right font-bold ${isSale ? 'text-green-600' : 'text-red-600'}`}>
+                                        <td className={`px-4 py-3 text-right font-bold ${amountClass}`}>
                                             ₹{Math.abs(tx.total).toLocaleString()}
                                         </td>
                                         <td className="px-4 py-3 text-center">
@@ -634,7 +639,13 @@ export default function Transactions() {
             }`}>
                 {filteredTransactions.map(tx => {
                     const isSale = tx.type === 'sale';
+                    const isReturn = tx.type === 'return';
+                    const isPayment = tx.type === 'payment';
                     const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+                    const cardBorder = isSale ? 'bg-green-500' : isReturn ? 'bg-red-500' : 'bg-emerald-500';
+                    const amountClass = isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700';
+                    const badgeVariant = isSale ? 'success' : isReturn ? 'destructive' : 'secondary';
+                    const badgeLabel = isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT';
                     
                     if (viewMode === 'medium') {
                         return (
@@ -644,7 +655,7 @@ export default function Transactions() {
                                 onClick={() => setSelectedTx(tx)}
                             >
                                 <CardContent className="p-0">
-                                    <div className={`h-1.5 w-full ${isSale ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                                    <div className={`h-1.5 w-full ${cardBorder}`}></div>
                                     <div className="p-4 space-y-3">
                                         <div className="flex justify-between items-center">
                                             <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{tx.id.slice(-6)}</Badge>
@@ -654,11 +665,11 @@ export default function Transactions() {
                                         <div className="flex justify-between items-end">
                                             <div>
                                                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-0.5">{tx.customerName || 'Walk-in'}</p>
-                                                <p className={`text-xl font-black ${isSale ? 'text-green-600' : 'text-red-600'}`}>₹{Math.abs(tx.total).toLocaleString()}</p>
+                                                <p className={`text-xl font-black ${amountClass}`}>₹{Math.abs(tx.total).toLocaleString()}</p>
                                             </div>
                                             <div className="text-right">
-                                                <Badge variant={isSale ? 'success' : 'destructive'} className="text-[8px] font-black h-4 px-1 mb-1">
-                                                    {isSale ? 'SALE' : 'RETURN'}
+                                                <Badge variant={badgeVariant} className="text-[8px] font-black h-4 px-1 mb-1">
+                                                    {badgeLabel}
                                                 </Badge>
                                                 <p className="text-[9px] text-muted-foreground font-bold">{tx.paymentMethod || 'Cash'}</p>
                                             </div>
@@ -688,7 +699,7 @@ export default function Transactions() {
                         <Card 
                             key={tx.id} 
                             className="group cursor-pointer hover:border-primary/50 hover:shadow-md transition-all duration-200 border-l-4"
-                            style={{ borderLeftColor: isSale ? '#22c55e' : '#ef4444' }}
+                            style={{ borderLeftColor: isSale ? '#22c55e' : isReturn ? '#ef4444' : '#10b981' }}
                             onClick={() => setSelectedTx(tx)}
                         >
                             <CardContent className="p-4 flex flex-col gap-4">
@@ -719,8 +730,8 @@ export default function Transactions() {
                                             >
                                                 <FileText className="w-3.5 h-3.5" />
                                             </Button>
-                                            <Badge variant={isSale ? 'success' : 'destructive'} className="text-[10px] font-bold uppercase tracking-wider px-2 h-5">
-                                                {isSale ? 'SALE' : 'RETURN'}
+                                            <Badge variant={badgeVariant} className="text-[10px] font-bold uppercase tracking-wider px-2 h-5">
+                                                {badgeLabel}
                                             </Badge>
                                         </div>
                                         <div className="text-[10px] font-medium text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
@@ -731,8 +742,8 @@ export default function Transactions() {
 
                                 {/* Main: Amount */}
                                 <div>
-                                    <div className={`text-2xl font-bold flex items-center ${isSale ? 'text-green-600' : 'text-red-600'}`}>
-                                        {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : <ArrowDownLeft className="w-5 h-5 mr-1" />}
+                                    <div className={`text-2xl font-bold flex items-center ${amountClass}`}>
+                                        {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : isReturn ? <ArrowDownLeft className="w-5 h-5 mr-1" /> : <CreditCard className="w-5 h-5 mr-1" />}
                                         ₹{Math.abs(tx.total).toLocaleString()}
                                     </div>
                                 </div>
@@ -879,8 +890,8 @@ export default function Transactions() {
 
                               <div className="border-t pt-2 mt-2 flex justify-between items-center font-bold text-xl">
                                   <span>Total</span>
-                                  <span className={selectedTx.type === 'sale' ? 'text-green-700' : 'text-red-700'}>
-                                      {selectedTx.type === 'sale' ? '' : '-'}₹{Math.abs(selectedTx.total).toFixed(2)}
+                                  <span className={selectedTx.type === 'sale' ? 'text-green-700' : selectedTx.type === 'return' ? 'text-red-700' : 'text-emerald-700'}>
+                                      {selectedTx.type === 'return' ? '-' : ''}₹{Math.abs(selectedTx.total).toFixed(2)}
                                   </span>
                               </div>
                           </div>
