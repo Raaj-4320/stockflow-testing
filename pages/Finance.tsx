@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { loadData, saveData, processTransaction } from '../services/storage';
+import { financeLog } from '../services/financeLogger';
 import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
@@ -39,6 +40,52 @@ const monthKeyOf = (iso: string) => {
 
 const formatINR = (value: number) => `₹${value.toFixed(2)}`;
 
+const financeShiftDiag = (tag: string, payload: Record<string, unknown>) => {
+  console.log(tag, payload);
+};
+
+const getStorageKeysSafely = (storageKind: 'local' | 'session') => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const target = storageKind === 'local' ? window.localStorage : window.sessionStorage;
+    return Object.keys(target).slice(0, 20);
+  } catch (error) {
+    return [`unavailable:${error instanceof Error ? error.message : String(error)}`];
+  }
+};
+
+const getStateEntityCounts = (state: AppState) => ({
+  products: state.products.length,
+  customers: state.customers.length,
+  transactions: state.transactions.length,
+  categories: state.categories.length,
+  upfrontOrders: state.upfrontOrders.length,
+  expenses: state.expenses.length,
+  cashSessions: state.cashSessions.length,
+});
+
+const scanSessionHistory = (sessions: CashSession[]) => {
+  const sorted = [...sessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+  const skippedInvalidClosed = sorted.filter(session => session.status === 'closed' && !Number.isFinite(session.closingBalance)).length;
+  const skippedInvalidStartTime = sorted.filter(session => !Number.isFinite(new Date(session.startTime).getTime())).length;
+  const topCandidates = sorted.slice(0, 5).map(session => ({
+    id: session.id,
+    status: session.status,
+    startTime: session.startTime,
+    startTimeValid: Number.isFinite(new Date(session.startTime).getTime()),
+    closingBalance: session.closingBalance ?? null,
+    closingBalanceFinite: Number.isFinite(session.closingBalance),
+  }));
+
+  return {
+    totalSessions: sessions.length,
+    closedSessions: sessions.filter(session => session.status === 'closed').length,
+    skippedInvalidClosed,
+    skippedInvalidStartTime,
+    topCandidates,
+  };
+};
+
 
 const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], sessionStartIso: string, sessionEndIso?: string) => {
   const start = new Date(sessionStartIso).getTime();
@@ -57,9 +104,16 @@ const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], 
 
   const cashSales = cashTransactions.filter(t => t.type === 'sale').reduce((sum, t) => sum + t.total, 0);
   const cashRefunds = cashTransactions.filter(t => t.type === 'return').reduce((sum, t) => sum + Math.abs(t.total), 0);
+  const cashCollections = cashTransactions.filter(t => t.type === 'payment').reduce((sum, t) => sum + Math.abs(t.total), 0);
   const expenseTotal = windowExpenses.reduce((sum, e) => sum + e.amount, 0);
 
-  return { cashSales, cashRefunds, expenseTotal, systemCashTotal: cashSales - cashRefunds - expenseTotal };
+  const totals = { cashSales, cashRefunds, cashCollections, expenseTotal, systemCashTotal: cashSales + cashCollections - cashRefunds - expenseTotal };
+  financeLog.cash('SESSION_TOTALS', {
+    sessionStartIso,
+    sessionEndIso: sessionEndIso || null,
+    ...totals,
+  });
+  return totals;
 };
 
 const CLOSING_DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1] as const;
@@ -247,14 +301,100 @@ export default function Finance() {
   }, [cashHistory]);
 
   useEffect(() => {
+    const fresh = loadData();
+    financeShiftDiag('[FIN][SHIFT][LOAD]', {
+      mountedAt: new Date().toISOString(),
+      route: typeof window !== 'undefined' ? window.location.hash || window.location.pathname : 'unknown',
+      online: typeof navigator !== 'undefined' ? navigator.onLine : null,
+      counts: getStateEntityCounts(fresh),
+      openSessionId: fresh.cashSessions.find(s => s.status === 'open')?.id || null,
+      hasLatestClosedSession: Boolean([...fresh.cashSessions]
+        .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
+        .find(session => session.status === 'closed' && Number.isFinite(session.closingBalance))),
+      latestClosedBalance: ([...fresh.cashSessions]
+        .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
+        .find(session => session.status === 'closed' && Number.isFinite(session.closingBalance))?.closingBalance ?? null),
+      openingFieldValue: openingBalance || '',
+      openingFieldMode: openingBalance.trim() ? 'manual_or_prefilled' : 'blank',
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    financeShiftDiag('[FIN][SHIFT][SESSION_SCAN]', {
+      scannedAt: new Date().toISOString(),
+      ...scanSessionHistory(cashSessions),
+      latestClosedSessionId: latestClosedSession?.id ?? null,
+      latestClosedBalance: latestClosedSession?.closingBalance ?? null,
+      openSessionId: openSession?.id ?? null,
+    });
+  }, [cashSessions, latestClosedSession, openSession]);
+
+  useEffect(() => {
+    const handleStorageEvent = (event: Event) => {
+      const fresh = loadData();
+      financeShiftDiag('[FIN][SHIFT][STORAGE_EVENT]', {
+        type: event.type,
+        firedAt: new Date().toISOString(),
+        route: typeof window !== 'undefined' ? window.location.hash || window.location.pathname : 'unknown',
+        localCounts: getStateEntityCounts(data),
+        freshCounts: getStateEntityCounts(fresh),
+        localCashSessions: (data.cashSessions || []).length,
+        freshCashSessions: (fresh.cashSessions || []).length,
+      });
+      financeShiftDiag('[FIN][SHIFT][FRESHNESS_CHECK]', {
+        source: `event:${event.type}`,
+        staleProducts: data.products.length !== fresh.products.length,
+        staleCustomers: data.customers.length !== fresh.customers.length,
+        staleTransactions: data.transactions.length !== fresh.transactions.length,
+        staleCashSessions: (data.cashSessions || []).length !== (fresh.cashSessions || []).length,
+      });
+    };
+
+    const handleCloudSyncStatus = (event: Event) => {
+      const detail = (event as CustomEvent<{ status: string; message?: string }>).detail;
+      financeShiftDiag('[FIN][SHIFT][STORAGE_EVENT]', {
+        type: 'cloud-sync-status',
+        firedAt: new Date().toISOString(),
+        status: detail?.status || null,
+        message: detail?.message || null,
+      });
+    };
+
+    window.addEventListener('storage', handleStorageEvent);
+    window.addEventListener('local-storage-update', handleStorageEvent);
+    window.addEventListener('cloud-sync-status', handleCloudSyncStatus as EventListener);
+    return () => {
+      window.removeEventListener('storage', handleStorageEvent);
+      window.removeEventListener('local-storage-update', handleStorageEvent);
+      window.removeEventListener('cloud-sync-status', handleCloudSyncStatus as EventListener);
+    };
+  }, [data]);
+
+  useEffect(() => {
     if (openSession || openingBalance.trim() || editingOpeningBalance) return;
 
     if (latestClosedSession?.closingBalance !== undefined) {
+      financeShiftDiag('[FIN][SHIFT][AUTOFILL]', {
+        updatedAt: new Date().toISOString(),
+        mode: 'autofill-last-closing',
+        latestClosedSessionId: latestClosedSession.id,
+        latestClosedBalance: latestClosedSession.closingBalance,
+        previousOpeningField: openingBalance || '',
+      });
       setOpeningBalance(latestClosedSession.closingBalance.toFixed(2));
       setOpeningBalanceAutoFilled(true);
       return;
     }
 
+    financeShiftDiag('[FIN][SHIFT][AUTOFILL]', {
+      updatedAt: new Date().toISOString(),
+      mode: 'no-latest-closed-session',
+      latestClosedSessionId: null,
+      latestClosedBalance: null,
+      openingFieldValue: openingBalance || '',
+      fallbackPreview: (latestClosedSession?.closingBalance ?? 0).toFixed(0),
+    });
     setOpeningBalanceAutoFilled(false);
   }, [openSession, openingBalance, latestClosedSession, editingOpeningBalance]);
 
@@ -342,27 +482,35 @@ export default function Finance() {
 
   const dailyProfit = useMemo(() => {
     const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
+    const returns = data.transactions.filter(t => t.type === 'return' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
+    const netSales = sales + returns;
     const cogs = data.transactions
       .filter(t => t.type === 'sale' && isSameDay(t.date, profitDate))
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => isSameDay(e.createdAt, profitDate)).reduce((sum, e) => sum + e.amount, 0);
 
-    return { sales, cogs, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    const summary = { sales: netSales, cogs, expenses: expenseSum, profit: netSales - cogs - expenseSum };
+    financeLog.pnl('DAILY_SUMMARY', { date: profitDate, ...summary });
+    return summary;
   }, [data.transactions, expenses, profitDate]);
 
   const monthlyProfit = useMemo(() => {
     const sales = data.transactions.filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
+    const returns = data.transactions.filter(t => t.type === 'return' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
+    const netSales = sales + returns;
     const cogs = data.transactions
       .filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth)
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => monthKeyOf(e.createdAt) === profitMonth).reduce((sum, e) => sum + e.amount, 0);
 
-    return { sales, expenses: expenseSum, profit: sales - cogs - expenseSum };
+    const summary = { sales: netSales, expenses: expenseSum, profit: netSales - cogs - expenseSum };
+    financeLog.pnl('MONTHLY_SUMMARY', { month: profitMonth, ...summary });
+    return summary;
   }, [data.transactions, expenses, profitMonth]);
 
   const persistState = async (newState: AppState) => {
     try {
-      await saveData(newState, { throwOnError: true });
+      await saveData(newState, { throwOnError: true, reason: 'finance.persistState' });
       refreshData();
       setErrors(null);
     } catch (error) {
@@ -375,12 +523,63 @@ export default function Finance() {
     if (!isAdmin) return setErrors('Only admin can start or close shifts.');
     if (openSession) return setErrors('An open cash session already exists.');
 
+    const fresh = loadData();
+    const freshCashSessions = Array.isArray(fresh.cashSessions) ? fresh.cashSessions : [];
+    const freshOpenSession = freshCashSessions.find(session => session.status === 'open');
+    if (freshOpenSession) return setErrors('An open cash session already exists.');
+    const freshLatestClosedSession = [...freshCashSessions]
+      .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
+      .find(session => session.status === 'closed' && Number.isFinite(session.closingBalance));
+
+    const parsedOpeningBalance = openingBalance.trim() ? Number(openingBalance) : Number.NaN;
     const autoCarryBalance = latestClosedSession?.closingBalance;
-    const value = openingBalance.trim() ? Number(openingBalance) : (autoCarryBalance !== undefined ? autoCarryBalance : Number.NaN);
+    const freshAutoCarryBalance = freshLatestClosedSession?.closingBalance;
+    const value = Number.isFinite(parsedOpeningBalance) ? parsedOpeningBalance : (freshAutoCarryBalance !== undefined ? freshAutoCarryBalance : Number.NaN);
+    const freshDerivedValue = value;
+    financeShiftDiag('[FIN][SHIFT][START_CLICK]', {
+      clickedAt: new Date().toISOString(),
+      uiOpeningFieldRaw: openingBalance,
+      uiOpeningFieldTrimmed: openingBalance.trim(),
+      localLatestClosedSessionId: latestClosedSession?.id ?? null,
+      localLatestClosedBalance: autoCarryBalance ?? null,
+      freshLatestClosedSessionId: freshLatestClosedSession?.id ?? null,
+      freshLatestClosedBalance: freshAutoCarryBalance ?? null,
+      submitValueFromLocalSnapshot: Number.isFinite(value) ? value : null,
+      submitValueFromFreshRead: Number.isFinite(freshDerivedValue) ? freshDerivedValue : null,
+      localCounts: getStateEntityCounts(data),
+      freshCounts: getStateEntityCounts(fresh),
+      freshnessMismatch: {
+        products: data.products.length !== fresh.products.length,
+        customers: data.customers.length !== fresh.customers.length,
+        transactions: data.transactions.length !== fresh.transactions.length,
+        cashSessions: (data.cashSessions || []).length !== freshCashSessions.length,
+      },
+      route: typeof window !== 'undefined' ? window.location.hash || window.location.pathname : 'unknown',
+      online: typeof navigator !== 'undefined' ? navigator.onLine : null,
+      storageHints: {
+        localStorageKeys: getStorageKeysSafely('local'),
+        sessionStorageKeys: getStorageKeysSafely('session'),
+      },
+    });
+    financeShiftDiag('[FIN][SHIFT][FRESHNESS_CHECK]', {
+      source: 'start_shift_click',
+      localCounts: getStateEntityCounts(data),
+      freshCounts: getStateEntityCounts(fresh),
+      sessionScanLocal: scanSessionHistory(cashSessions),
+      sessionScanFresh: scanSessionHistory(freshCashSessions),
+    });
     if (!Number.isFinite(value) || value < 0) return setErrors('Please enter a valid opening balance.');
 
-    const session: CashSession = { id: buildCashSessionId(cashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
-    await persistState({ ...data, cashSessions: [session, ...(data.cashSessions || [])] });
+    financeShiftDiag('[FIN][SHIFT][FIX_APPLIED]', {
+      usedFreshData: true,
+      openingBalanceInput: openingBalance,
+      finalOpeningBalance: value,
+      freshSessionCount: freshCashSessions.length,
+      localSessionCount: cashSessions.length,
+    });
+    const session: CashSession = { id: buildCashSessionId(freshCashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
+    financeLog.shift('START', { openingCash: value });
+    await persistState({ ...fresh, cashSessions: [session, ...freshCashSessions] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
@@ -396,6 +595,14 @@ export default function Finance() {
     const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, openSession.startTime, closedAt);
     const expectedClosing = openSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
+    financeLog.shift('CLOSE', {
+      opening: openSession.openingBalance,
+      inflow: systemCashTotal + expenseTotal,
+      outflow: expenseTotal,
+      expected: expectedClosing,
+      actual: counted,
+      variance: difference,
+    });
 
     const updated = (data.cashSessions || []).map(session => session.id === openSession.id ? {
       ...session,
@@ -486,6 +693,8 @@ export default function Finance() {
       note: expenseNote.trim() || undefined,
       createdAt: new Date().toISOString()
     };
+    financeLog.expense('CREATE', { amount, category: expense.category, affectsCash: true });
+    financeLog.cash('OUTFLOW', { txId: expense.id, amount, reason: expense.title, paymentMode: 'Cash', source: 'expense' });
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
     await persistState({
@@ -900,7 +1109,7 @@ export default function Finance() {
                             <div className={`text-sm font-semibold ${session.status === 'open' ? 'text-slate-900' : isMatch ? 'text-emerald-700' : isShort ? 'text-rose-700' : 'text-slate-900'}`}>
                               {session.status === 'open' ? 'Session is ongoing' : isMatch ? 'Cash matched' : isShort ? `Short by ${formatINR(Math.abs(difference))}` : `Over by ${formatINR(difference)}`}
                             </div>
-                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales − Refunds − Expenses)</div>
+                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales + Collections − Refunds − Expenses)</div>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -985,7 +1194,7 @@ export default function Finance() {
                             <div className={`text-sm font-semibold ${activeHistorySession.status === 'open' ? 'text-slate-900' : isMatch ? 'text-emerald-700' : isShort ? 'text-rose-700' : 'text-slate-900'}`}>
                               {activeHistorySession.status === 'open' ? 'Session is ongoing' : isMatch ? 'Cash matched' : isShort ? `Short by ${formatINR(Math.abs(difference))}` : `Over by ${formatINR(difference)}`}
                             </div>
-                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales − Refunds − Expenses)</div>
+                            <div className="mt-0.5 text-xs text-slate-600">Difference = Counted cash − (Sales + Collections − Refunds − Expenses)</div>
                           </div>
                         </div>
                         <Button type="button" variant="outline" size="sm" onClick={() => setActiveHistoryDetailSessionId(null)}>Hide details</Button>
