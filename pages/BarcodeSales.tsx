@@ -2,14 +2,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
-import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
+import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
-import { ShoppingCart, Trash2, Scan, RotateCcw, X, Plus, Minus, Search, Camera, AlertCircle, CheckCircle, Printer, Layers, Package, FileText, Keyboard, CreditCard, Wallet, Coins, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
+import { ShoppingCart, Trash2, Scan, RotateCcw, X, Plus, Minus, Search, Camera, AlertCircle, CheckCircle, Printer, Layers, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
 export default function BarcodeSales() {
@@ -35,7 +35,7 @@ export default function BarcodeSales() {
 
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerTab, setCustomerTab] = useState<'search' | 'new'>('search');
-  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number }> }>({ open: false, product: null, rows: [] });
+  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number; sellPrice: number }> }>({ open: false, product: null, rows: [] });
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -44,8 +44,8 @@ export default function BarcodeSales() {
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
-  const [cashReceived, setCashReceived] = useState('');
+  const [cashPaidInput, setCashPaidInput] = useState('');
+  const [onlinePaidInput, setOnlinePaidInput] = useState('');
   const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -136,6 +136,29 @@ export default function BarcodeSales() {
       ? getAvailableStockForCombination(product, variant, color)
       : Math.max(0, product.stock || 0);
 
+  const lineKey = (id: string, variant?: string, color?: string) => getStockBucketKey(id, variant, color);
+  const getReturnableQty = (id: string, variant?: string, color?: string, customerId?: string) => {
+    const key = lineKey(id, variant, color);
+    const soldQty = transactions
+      .filter((tx) => tx.type === 'sale' && (!customerId || tx.customerId === customerId))
+      .reduce((sum, tx) => sum + tx.items
+        .filter((line) => lineKey(line.id, line.selectedVariant, line.selectedColor) === key)
+        .reduce((lineSum, line) => lineSum + (line.quantity || 0), 0), 0);
+    const returnedQty = transactions
+      .filter((tx) => tx.type === 'return' && (!customerId || tx.customerId === customerId))
+      .reduce((sum, tx) => sum + tx.items
+        .filter((line) => lineKey(line.id, line.selectedVariant, line.selectedColor) === key)
+        .reduce((lineSum, line) => lineSum + (line.quantity || 0), 0), 0);
+    return Math.max(0, soldQty - returnedQty);
+  };
+
+  const getProductReturnableQty = (product: Product, customerId?: string) => {
+    if (!productHasCombinationStock(product)) {
+      return getReturnableQty(product.id, NO_VARIANT, NO_COLOR, customerId);
+    }
+    return getProductStockRows(product).reduce((sum, row) => sum + getReturnableQty(product.id, row.variant, row.color, customerId), 0);
+  };
+
   const handleProductSelect = (scanValue: string, isScan = false, explicitQty: number = 1) => {
     if (isScan && isScanLocked.current) return;
     let targetCode = scanValue;
@@ -146,8 +169,10 @@ export default function BarcodeSales() {
         if (isReturnMode) {
             const currentCart = cartRef.current;
             const inCart = currentCart.filter(c => c.id === product.id).reduce((sum, c) => sum + c.quantity, 0);
-            const sold = product.totalSold || 0;
-            if (sold === 0) error = "Item hasn't been sold yet.";
+            const sold = getProductReturnableQty(product);
+            if (sold === 0) error = productHasCombinationStock(product)
+              ? 'No returnable quantity left for this product variants.'
+              : "Item hasn't been sold yet.";
             else if (sold < (inCart + explicitQty)) error = `Return Limit (${sold}) Exceeded!`;
         } else if (!productHasCombinationStock(product)) {
             const inCart = cartRef.current
@@ -173,10 +198,16 @@ export default function BarcodeSales() {
                 setTimeout(() => setScanMessage(null), 1500);
             }
         } else {
-            const rows = getProductStockRows(product).filter(r => r.stock > 0);
+            const rows = getProductStockRows(product)
+              .map(row => ({ ...row, sellPrice: getResolvedSellPriceForCombination(product, row.variant, row.color) }))
+              .filter(r => r.stock > 0);
         if (productHasCombinationStock(product)) {
             const selected = rows[0];
             if (!selected) { setCartError('Out of stock!'); return; }
+            if (rows.length > 1) {
+              setVariantPicker({ open: true, product, rows: rows.map(row => ({ ...row, qty: 0 })) });
+              return;
+            }
             addToCart(product, explicitQty, selected.variant, selected.color);
         } else {
             addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
@@ -185,8 +216,6 @@ export default function BarcodeSales() {
         }
     } else if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'error', text: "Unknown Product" }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 2000); }
   };
-
-  const lineKey = (id: string, variant?: string, color?: string) => getStockBucketKey(id, variant, color);
 
   const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
     setCart(prev => {
@@ -197,7 +226,16 @@ export default function BarcodeSales() {
             return prev.map(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
+        return [...prev, {
+          ...product,
+          buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
+          sellPrice: getResolvedSellPriceForCombination(product, selectedVariant, selectedColor),
+          quantity: qty,
+          discountPercent: 0,
+          discountAmount: 0,
+          selectedVariant: selectedVariant || NO_VARIANT,
+          selectedColor: selectedColor || NO_COLOR
+        }];
     });
   };
 
@@ -209,7 +247,10 @@ export default function BarcodeSales() {
       const newQty = item.quantity + delta;
       if (newQty <= 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (delta > 0) {
-          if (isReturnMode) { const sold = product.totalSold || 0; if (sold < newQty) { setCartError(`Max return: ${sold}`); return; } }
+          if (isReturnMode) {
+            const sold = getReturnableQty(id, variant, color);
+            if (sold < newQty) { setCartError(`Max return: ${sold}`); return; }
+          }
           else {
             const availableStock = getLineAvailableStock(product, variant, color);
             if (availableStock < newQty) { setCartError(`Stock limit: ${availableStock}`); return; }
@@ -227,7 +268,7 @@ export default function BarcodeSales() {
       if (num < 0) return;
       if (num === 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (isReturnMode) {
-          const sold = product.totalSold || 0;
+          const sold = getReturnableQty(id, variant, color);
           if (sold < num) { setCartError(`Max return: ${sold}`); return; }
       } else {
           const availableStock = getLineAvailableStock(product, variant, color);
@@ -285,7 +326,8 @@ export default function BarcodeSales() {
       if (cart.length === 0) return;
       if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
-      if (isReturnMode) setPaymentMethod('Cash');
+      setCashPaidInput('');
+      setOnlinePaidInput('');
       setIsCustomerModalOpen(true);
   };
 
@@ -316,36 +358,73 @@ export default function BarcodeSales() {
       }
       if (isReturnMode && finalCustomer) {
           for (const item of cart) {
-              const bought = transactions
-                .filter(t => t.customerId === finalCustomer?.id && t.type === 'sale')
-                .reduce((acc, t) => acc + t.items.filter(i => i.id === item.id).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
-              const returned = transactions
-                .filter(t => t.customerId === finalCustomer?.id && t.type === 'return')
-                .reduce((acc, t) => acc + t.items.filter(i => i.id === item.id).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
-              if ((bought - returned) < item.quantity) { setCheckoutError(`${finalCustomer.name} has only bought ${bought - returned} available to return.`); return; }
+              const returnableForCustomer = getReturnableQty(item.id, item.selectedVariant, item.selectedColor, finalCustomer.id);
+              if (returnableForCustomer < item.quantity) {
+                const label = formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor);
+                setCheckoutError(`${finalCustomer.name} can return only ${returnableForCustomer} of ${label}.`);
+                return;
+              }
           }
       }
-      if (paymentMethod === 'Credit' && !finalCustomer) { setCheckoutError("Credit requires a customer."); return; }
       const subtotal = cart.reduce((acc, item) => acc + (item.sellPrice * item.quantity), 0);
       const totalDiscount = cart.reduce((acc, item) => acc + (item.discountAmount || 0), 0);
       const taxableAmount = subtotal - totalDiscount;
       const taxAmount = (taxableAmount * (selectedTax.value / 100));
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
-      let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
-      if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedValue = cashReceived.trim();
-          if (receivedValue) {
-              const receivedAmount = Number(receivedValue);
-              if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
-              currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+      const payableAmount = Math.max(0, Math.abs(total));
+      const cashPaid = Number(cashPaidInput || 0);
+      const onlinePaid = Number(onlinePaidInput || 0);
+      if (!isReturnMode) {
+          if (!Number.isFinite(cashPaid) || cashPaid < 0 || !Number.isFinite(onlinePaid) || onlinePaid < 0) {
+              setCheckoutError('Cash/Online paid values must be valid non-negative numbers.');
+              return;
+          }
+          if ((cashPaid + onlinePaid) > (payableAmount + 0.0001)) {
+              setCheckoutError('Cash + Online paid cannot exceed payable amount.');
+              return;
           }
       }
-      const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
+      const creditDue = isReturnMode ? 0 : Math.max(0, payableAmount - cashPaid - onlinePaid);
+      if (!isReturnMode && creditDue > 0 && !finalCustomer) {
+          setCheckoutError("Customer is required when credit due is created.");
+          return;
+      }
+      const resolvedPaymentMethod: 'Cash' | 'Credit' | 'Online' = isReturnMode
+        ? 'Cash'
+        : creditDue > 0
+          ? 'Credit'
+          : onlinePaid > 0 && cashPaid === 0
+            ? 'Online'
+            : 'Cash';
+      let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
+      if (!isReturnMode && cashPaid > 0) {
+          currentCashDetails = { cashReceived: cashPaid, changeReturned: 0 };
+      }
+      const tx: Transaction = {
+          id: Date.now().toString(),
+          items: [...cart],
+          total,
+          subtotal,
+          discount: totalDiscount,
+          tax: taxAmount,
+          taxRate: selectedTax.value,
+          taxLabel: selectedTax.label,
+          date: new Date().toISOString(),
+          type: isReturnMode ? 'return' : 'sale',
+          customerId: finalCustomer?.id,
+          customerName: finalCustomer?.name,
+          paymentMethod: resolvedPaymentMethod,
+          saleSettlement: isReturnMode ? undefined : {
+            cashPaid,
+            onlinePaid,
+            creditDue,
+          },
+      };
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
       const newState = processTransaction(tx);
       setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
-      setIsCustomerModalOpen(false); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashReceived('');
+      setIsCustomerModalOpen(false); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashPaidInput(''); setOnlinePaidInput('');
   };
 
   const handlePrintReceipt = () => {
@@ -367,6 +446,12 @@ export default function BarcodeSales() {
   const taxable = subtotal - totalDiscount;
   const taxVal = (taxable * (selectedTax.value / 100));
   const grandTotal = isReturnMode ? -(taxable + taxVal) : (taxable + taxVal);
+  const payableAmountPreview = Math.max(0, Math.abs(grandTotal));
+  const cashPaidValue = Math.max(0, Number(cashPaidInput || 0));
+  const onlinePaidValue = Math.max(0, Number(onlinePaidInput || 0));
+  const settlementPaidNow = cashPaidValue + onlinePaidValue;
+  const settlementOverpay = settlementPaidNow - payableAmountPreview;
+  const creditDuePreview = Math.max(0, payableAmountPreview - settlementPaidNow);
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
 
   return (
@@ -409,6 +494,7 @@ export default function BarcodeSales() {
                           return (
                               <div key={`${row.variant}-${row.color}-${idx}`} className="flex items-center justify-between border rounded p-2">
                                   <div><div className="font-medium text-sm">{label}</div><div className="text-xs text-muted-foreground">Stock: {row.stock}</div></div>
+                                  <div className="text-sm font-semibold">₹{row.sellPrice}</div>
                                   <div className="flex items-center gap-2">
                                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
@@ -523,20 +609,22 @@ export default function BarcodeSales() {
                   <CardHeader className="border-b pb-4">
                       <div className="flex justify-between items-center mb-4"><CardTitle>Checkout</CardTitle><Button variant="ghost" size="icon" onClick={() => setIsCustomerModalOpen(false)}><X className="w-4 h-4" /></Button></div>
                       {!isReturnMode && (
-                        <div className="flex gap-2 mb-4">
-                            <Button variant={paymentMethod === 'Cash' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => setPaymentMethod('Cash')}><Coins className="w-3.5 h-3.5 mr-1.5" /> Cash</Button>
-                            <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => { setPaymentMethod('Online'); setCashReceived(''); }}><Wallet className="w-3.5 h-3.5 mr-1.5" /> Online</Button>
-                            <Button variant={paymentMethod === 'Credit' ? 'default' : 'outline'} className="flex-1 h-9 text-xs" onClick={() => { setPaymentMethod('Credit'); setCashReceived(''); }}><CreditCard className="w-3.5 h-3.5 mr-1.5" /> Credit</Button>
-                        </div>
-                      )}
-
-                      {!isReturnMode && paymentMethod === 'Cash' && (
-                        <div className="space-y-1.5 mb-3">
-                          <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Received</Label>
-                          <Input type="number" min="0" step="0.01" placeholder="Enter received amount" value={cashReceived} onChange={e => { setCashReceived(e.target.value); setCheckoutError(null); }} />
-                          {Number(cashReceived) >= grandTotal && grandTotal > 0 && (
-                            <p className="text-xs font-bold text-green-700">₹{(Number(cashReceived) - grandTotal).toFixed(2)} change to be given</p>
-                          )}
+                        <div className="space-y-2.5 rounded-lg border p-3 bg-muted/10 mb-3">
+                          <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
+                          <div className="space-y-1.5">
+                            <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
+                            <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} onChange={e => { setCashPaidInput(e.target.value); setCheckoutError(null); }} />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online Paid</Label>
+                            <Input type="number" min="0" step="0.01" placeholder="0.00" value={onlinePaidInput} onChange={e => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
+                          </div>
+                          <div className="text-xs space-y-1 border-t pt-2">
+                            <div className="flex justify-between"><span>Invoice Total</span><span>₹{payableAmountPreview.toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{settlementPaidNow.toFixed(2)}</span></div>
+                            <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{creditDuePreview.toFixed(2)}</span></div>
+                            {settlementOverpay > 0.0001 && <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{settlementOverpay.toFixed(2)}</p>}
+                          </div>
                         </div>
                       )}
                       <div className="flex p-1 bg-muted rounded-lg w-full mb-2">
@@ -596,6 +684,7 @@ export default function BarcodeSales() {
                       <div className="h-16 w-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto"><CheckCircle className="w-10 h-10" /></div>
                       <h2 className="text-2xl font-bold">Successful!</h2>
                       <p className="text-muted-foreground text-sm">Receipt #{transactionComplete.id.slice(-6)} has been generated.</p>{transactionCashDetails && (<div className="text-sm bg-muted rounded-lg p-3 space-y-1"><p>Total: ₹{transactionComplete.total.toFixed(2)}</p><p>Cash Received: ₹{transactionCashDetails.cashReceived.toFixed(2)}</p><p className="font-bold text-green-700">Change Returned: ₹{transactionCashDetails.changeReturned.toFixed(2)}</p></div>)}
+                      {transactionComplete.type === 'sale' && (<div className="text-sm bg-muted rounded-lg p-3 space-y-1 text-left"><p className="font-semibold">Settlement Breakdown</p><p>Total Invoice: ₹{Math.abs(transactionComplete.total).toFixed(2)}</p><p>Cash Paid: ₹{Number(transactionComplete.saleSettlement?.cashPaid || 0).toFixed(2)}</p><p>Online Paid: ₹{Number(transactionComplete.saleSettlement?.onlinePaid || 0).toFixed(2)}</p><p>Credit Due: ₹{Number(transactionComplete.saleSettlement?.creditDue || 0).toFixed(2)}</p></div>)}
                       <div className="flex gap-3 pt-4">
                           <Button variant="outline" className="flex-1" onClick={() => { setTransactionComplete(null); setTransactionCashDetails(null); }}>Close</Button>
                           <Button className="flex-1" onClick={handlePrintReceipt}><Printer className="w-4 h-4 mr-2" /> Download</Button>
