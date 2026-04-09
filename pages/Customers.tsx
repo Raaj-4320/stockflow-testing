@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
+import { getSaleSettlementBreakdown, getResolvedReturnHandlingMode, getReturnCashRefundAmount, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -270,6 +270,16 @@ export default function Customers() {
 
       return combined.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [transactions, upfrontOrders, viewingCustomer]);
+  const customerLedgerRows = useMemo(() => {
+      if (!viewingCustomer) return [];
+      const txHistory = transactions
+        .filter(tx => tx.customerId === viewingCustomer.id)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      return buildCustomerLedgerRows(txHistory);
+  }, [transactions, viewingCustomer]);
+  const ledgerRowByTxId = useMemo(() => {
+      return new Map(customerLedgerRows.map(row => [row.tx.id, row]));
+  }, [customerLedgerRows]);
 
   const customerOrderSummary = useMemo(() => {
       if (!viewingCustomer) return { totalOrders: 0, openOrders: 0, totalValue: 0, paidSoFar: 0, remaining: 0 };
@@ -505,9 +515,9 @@ export default function Customers() {
       doc.text(profile.storeName?.toUpperCase() || "STOCKFLOW ERP", pageWidth / 2, 10, { align: "center" });
 
       // Period Section
-      const history = [...customerHistory].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-      const startDate = history.length > 0 ? new Date(history[0].date).toLocaleDateString() : "N/A";
-      const endDate = history.length > 0 ? new Date(history[history.length - 1].date).toLocaleDateString() : new Date().toLocaleDateString();
+      const txRows = [...customerLedgerRows];
+      const startDate = txRows.length > 0 ? new Date(txRows[0].tx.date).toLocaleDateString() : "N/A";
+      const endDate = txRows.length > 0 ? new Date(txRows[txRows.length - 1].tx.date).toLocaleDateString() : new Date().toLocaleDateString();
 
       doc.setDrawColor(15, 48, 87);
       doc.setFillColor(211, 227, 245);
@@ -536,47 +546,20 @@ export default function Customers() {
       doc.text(`GSTIN: ${profile.gstin || "-"}`, pageWidth - 14, 51, { align: "right" });
 
       // Ledger Logic (Correcting the running balance bug)
-      let runningBalance = 0;
       let totalSalesAmount = 0;
-      let totalReceiptsAmount = 0;
-
-      const bodyData = history.map((tx) => {
-          const isSale = tx.type === 'sale';
-          const isPayment = tx.type === 'payment';
-          const isReturn = tx.type === 'return';
-          const settlement = isSale ? getSaleSettlementBreakdown(tx) : null;
-          
-          const amount = Math.abs(tx.total);
-          
-          // DEBIT logic: Sale total is recorded as invoice debit
-          const debit = isSale ? amount : 0;
-          
-          // CREDIT logic: 
-          // 1. Payments and returns are always credits
-          // 2. For sale rows, settled-now amount offsets debit immediately; only creditDue stays in running due.
-          let credit = (isPayment || isReturn) ? amount : 0;
-          if (isSale && settlement) {
-              credit += Math.max(0, settlement.cashPaid + settlement.onlinePaid + Math.max(0, Number(tx.storeCreditUsed || 0)));
-          }
-          
-          if (isSale) totalSalesAmount += debit;
-          if (isPayment || isReturn) totalReceiptsAmount += (isPayment ? amount : 0);
-          
-          runningBalance += (debit - credit);
-
-          const statusLabel = runningBalance >= 0 ? "Dr" : "Cr";
-          const description = isSale ? `Invoice #${tx.id.slice(-6)}${settlement ? ` (Paid ₹${(settlement.cashPaid + settlement.onlinePaid).toFixed(0)}, Due ₹${settlement.creditDue.toFixed(0)})` : ''}` : 
-                             (isReturn ? `Return #${tx.id.slice(-6)}` : `Payment #${tx.id.slice(-6)}`);
-
+      let totalPaymentsAmount = 0;
+      const bodyData = txRows.map((row) => {
+          if (row.tx.type === 'sale') totalSalesAmount += row.saleTotal;
+          if (row.tx.type === 'payment') totalPaymentsAmount += row.paymentAmount;
+          const statusLabel = row.netAfter >= 0 ? "Dr" : "Cr";
           return {
-              date: new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }),
-              desc: description,
-              debit: debit > 0 ? `${debit.toFixed(2)}` : "",
-              credit: credit > 0 ? `${credit.toFixed(2)}` : "",
+              date: new Date(row.tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }),
+              desc: row.statementDescription,
+              debit: row.debit > 0 ? `${row.debit.toFixed(2)}` : "",
+              credit: row.credit > 0 ? `${row.credit.toFixed(2)}` : "",
               type: statusLabel,
-              balance: `${Math.abs(runningBalance).toFixed(2)}`,
-              rawType: tx.type,
-              pm: tx.paymentMethod
+              balance: `${Math.abs(row.netAfter).toFixed(2)}`,
+              rawType: row.tx.type
           };
       });
 
@@ -615,12 +598,7 @@ export default function Customers() {
                   
                   // Color Debit Column
                   if (data.column.index === 2 && rowMeta.debit !== "") {
-                      // Sale: Green if Paid, Red if Unpaid (Credit)
-                      if (rowMeta.pm === 'Cash' || rowMeta.pm === 'Online') {
-                          data.cell.styles.textColor = [21, 128, 61]; // Green
-                      } else {
-                          data.cell.styles.textColor = [185, 28, 28]; // Red
-                      }
+                      data.cell.styles.textColor = [185, 28, 28]; // Customer due increased
                   }
                   
                   // Color Credit Column
@@ -648,11 +626,12 @@ export default function Customers() {
       
       doc.setFontSize(8);
       doc.text(`Total Sales: Rs. ${totalSalesAmount.toLocaleString()}`, pageWidth - 80, finalY + 15);
-      doc.text(`Total Receipts: Rs. ${totalReceiptsAmount.toLocaleString()}`, pageWidth - 80, finalY + 20);
+      doc.text(`Total Payments: Rs. ${totalPaymentsAmount.toLocaleString()}`, pageWidth - 80, finalY + 20);
       
       doc.setFontSize(10);
       doc.setFont("helvetica", "bold");
-      doc.text(`Final Due: Rs. ${Math.abs(runningBalance).toLocaleString()}`, pageWidth - 80, finalY + 27);
+      const finalNet = txRows.length ? txRows[txRows.length - 1].netAfter : 0;
+      doc.text(`Final Balance: ${finalNet >= 0 ? 'Dr' : 'Cr'} Rs. ${Math.abs(finalNet).toLocaleString()}`, pageWidth - 80, finalY + 27);
 
       doc.save(`Statement_${viewingCustomer.name.replace(/\s+/g, '_')}.pdf`);
   };
@@ -955,6 +934,7 @@ export default function Customers() {
                                 if (item.historyType === 'transaction') {
                                   const tx = item as Transaction;
                                   const saleSettlement = getSaleSettlementView(tx);
+                                  const ledgerRow = ledgerRowByTxId.get(tx.id);
                                   const hasDue = (saleSettlement?.creditDue || 0) > 0.0001;
                                   const hasPaidNow = (saleSettlement?.paidNow || 0) > 0.0001;
                                   const isSplitSale = Boolean(saleSettlement) && hasDue && hasPaidNow;
@@ -978,6 +958,11 @@ export default function Customers() {
                                                 {saleSettlement && (
                                                   <div className="text-[10px] text-muted-foreground font-medium mt-1">
                                                     • Paid Now ₹{saleSettlement.paidNow.toFixed(2)} • Credit Due ₹{saleSettlement.creditDue.toFixed(2)}{saleSettlement.storeCreditUsed > 0 ? ` • Used SC ₹${saleSettlement.storeCreditUsed.toFixed(2)}` : ''}
+                                                  </div>
+                                                )}
+                                                {!saleSettlement && ledgerRow && (
+                                                  <div className="text-[10px] text-muted-foreground font-medium mt-1">
+                                                    • {ledgerRow.listDescription}
                                                   </div>
                                                 )}
                                             </div>
@@ -1411,11 +1396,98 @@ export default function Customers() {
     </div>
   );
 }
-  const getSaleSettlementView = (tx: Transaction) => {
-    if (tx.type !== 'sale') return null;
-    const settlement = getSaleSettlementBreakdown(tx);
-    const total = Math.abs(Number(tx.total || 0));
-    const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
-    const paidNow = settlement.cashPaid + settlement.onlinePaid;
-    return { total, storeCreditUsed, cashPaid: settlement.cashPaid, onlinePaid: settlement.onlinePaid, creditDue: settlement.creditDue, paidNow };
-  };
+const getSaleSettlementView = (tx: Transaction) => {
+  if (tx.type !== 'sale') return null;
+  const settlement = getSaleSettlementBreakdown(tx);
+  const total = Math.abs(Number(tx.total || 0));
+  const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+  const paidNow = settlement.cashPaid + settlement.onlinePaid;
+  return { total, storeCreditUsed, cashPaid: settlement.cashPaid, onlinePaid: settlement.onlinePaid, creditDue: settlement.creditDue, paidNow };
+};
+
+type CustomerLedgerRow = {
+  tx: Transaction;
+  debit: number;
+  credit: number;
+  saleTotal: number;
+  paymentAmount: number;
+  netAfter: number;
+  statementDescription: string;
+  listDescription: string;
+};
+
+const buildCustomerLedgerRows = (transactions: Transaction[]): CustomerLedgerRow[] => {
+  const sorted = [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const rows: CustomerLedgerRow[] = [];
+  let runningDue = 0;
+  let runningStoreCredit = 0;
+  const processed: Transaction[] = [];
+
+  sorted.forEach((tx) => {
+    const amount = Math.abs(Number(tx.total || 0));
+    const dueBefore = runningDue;
+    const storeCreditBefore = runningStoreCredit;
+    const netBefore = dueBefore - storeCreditBefore;
+    let statementDescription = '';
+    let listDescription = '';
+    let saleTotal = 0;
+    let paymentAmount = 0;
+
+    if (tx.type === 'sale') {
+      const settlement = getSaleSettlementBreakdown(tx);
+      const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+      runningDue = Math.max(0, runningDue + settlement.creditDue);
+      runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
+      saleTotal = amount;
+      statementDescription = `Invoice #${tx.id.slice(-6)} (Total ₹${amount.toFixed(2)}, Paid ₹${(settlement.cashPaid + settlement.onlinePaid).toFixed(2)}, Due +₹${settlement.creditDue.toFixed(2)}${storeCreditUsed > 0 ? `, Used SC ₹${storeCreditUsed.toFixed(2)}` : ''})`;
+      listDescription = `Sale ₹${amount.toFixed(2)} • Paid now ₹${(settlement.cashPaid + settlement.onlinePaid).toFixed(2)} • Due +₹${settlement.creditDue.toFixed(2)}${storeCreditUsed > 0 ? ` • Used SC ₹${storeCreditUsed.toFixed(2)}` : ''}`;
+    } else if (tx.type === 'payment') {
+      const dueReduced = Math.min(runningDue, amount);
+      const storeCreditAdded = Math.max(0, amount - dueReduced);
+      runningDue = Math.max(0, runningDue - dueReduced);
+      runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
+      paymentAmount = amount;
+      statementDescription = `Payment #${tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ₹${amount.toFixed(2)}, Due -₹${dueReduced.toFixed(2)}${storeCreditAdded > 0 ? `, SC +₹${storeCreditAdded.toFixed(2)}` : ''})`;
+      listDescription = `${tx.paymentMethod || 'Cash'} payment ₹${amount.toFixed(2)} • Due -₹${dueReduced.toFixed(2)}${storeCreditAdded > 0 ? ` • Store credit +₹${storeCreditAdded.toFixed(2)}` : ''}`;
+    } else {
+      const mode = getResolvedReturnHandlingMode(tx);
+      let cashRefund = 0;
+      let onlineRefund = 0;
+      let dueReduced = 0;
+      let storeCreditAdded = 0;
+      if (mode === 'refund_cash') {
+        cashRefund = getReturnCashRefundAmount(tx, processed);
+        const remaining = Math.max(0, amount - cashRefund);
+        dueReduced = Math.min(runningDue, remaining);
+        storeCreditAdded = Math.max(0, remaining - dueReduced);
+      } else if (mode === 'refund_online') {
+        onlineRefund = amount;
+      } else if (mode === 'reduce_due') {
+        dueReduced = Math.min(runningDue, amount);
+        storeCreditAdded = Math.max(0, amount - dueReduced);
+      } else {
+        storeCreditAdded = amount;
+      }
+      runningDue = Math.max(0, runningDue - dueReduced);
+      runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
+      statementDescription = `Return #${tx.id.slice(-6)} (${mode.replace('_', ' ')}: Cash ₹${cashRefund.toFixed(2)}, Online ₹${onlineRefund.toFixed(2)}, Due -₹${dueReduced.toFixed(2)}, SC +₹${storeCreditAdded.toFixed(2)})`;
+      listDescription = `Return ${mode.replace('_', ' ')} • Cash ₹${cashRefund.toFixed(2)} • Online ₹${onlineRefund.toFixed(2)} • Due -₹${dueReduced.toFixed(2)}${storeCreditAdded > 0 ? ` • SC +₹${storeCreditAdded.toFixed(2)}` : ''}`;
+    }
+
+    const netAfter = runningDue - runningStoreCredit;
+    const netDelta = netAfter - netBefore;
+    rows.push({
+      tx,
+      debit: netDelta > 0 ? netDelta : 0,
+      credit: netDelta < 0 ? Math.abs(netDelta) : 0,
+      saleTotal,
+      paymentAmount,
+      netAfter,
+      statementDescription,
+      listDescription,
+    });
+    processed.push(tx);
+  });
+
+  return rows;
+};

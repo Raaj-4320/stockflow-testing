@@ -551,22 +551,87 @@ export default function Finance() {
     });
     const sales = scopedTransactions.filter(t => t.type === 'sale');
     const returns = scopedTransactions.filter(t => t.type === 'return');
+    const sortedTransactionsAsc = [...data.transactions]
+      .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
     const saleSettlementTotals = aggregateSaleSettlementContributions(sales);
-    const cashSales = saleSettlementTotals.cashPaid;
+    const saleCashReceipts = saleSettlementTotals.cashPaid;
     const cashCollections = scopedTransactions
       .filter(t => t.type === 'payment' && t.paymentMethod === 'Cash')
       .reduce((s, t) => s + Math.abs(t.total), 0);
+    const onlineCollections = scopedTransactions
+      .filter(t => t.type === 'payment' && t.paymentMethod === 'Online')
+      .reduce((s, t) => s + Math.abs(t.total), 0);
     const creditSales = saleSettlementTotals.creditDue;
     const onlineSales = saleSettlementTotals.onlinePaid;
-    const returnTotal = returns.reduce((s, t) => s + Math.abs(t.total), 0);
-    const totalSales = saleSettlementTotals.totalSales;
-    const cogs = sales.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+    const salesReturns = returns.reduce((s, t) => s + Math.abs(t.total), 0);
+    const scopedReturnIds = new Set(returns.map(t => t.id));
+    let runningDue = 0;
+    let runningStoreCredit = 0;
+    const returnEffects = sortedTransactionsAsc.reduce((acc, tx, index) => {
+      const amount = Math.abs(tx.total || 0);
+      const historical = sortedTransactionsAsc.slice(0, index);
+      if (tx.type === 'sale') {
+        const settlement = getSaleSettlementBreakdown(tx);
+        const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+        runningDue = Math.max(0, runningDue + settlement.creditDue);
+        runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
+        return acc;
+      }
+      if (tx.type === 'payment') {
+        const paymentToDue = Math.min(runningDue, amount);
+        runningDue = Math.max(0, runningDue - paymentToDue);
+        runningStoreCredit = Math.max(0, runningStoreCredit + Math.max(0, amount - paymentToDue));
+        return acc;
+      }
+      const mode = getResolvedReturnHandlingMode(tx);
+      let cashRefund = 0;
+      let onlineRefund = 0;
+      let dueReduction = 0;
+      let storeCreditCreated = 0;
+
+      if (mode === 'refund_cash') {
+        cashRefund = getReturnCashRefundAmount(tx, historical);
+        const remaining = Math.max(0, amount - cashRefund);
+        dueReduction = Math.min(runningDue, remaining);
+        storeCreditCreated = Math.max(0, remaining - dueReduction);
+      } else if (mode === 'refund_online') {
+        onlineRefund = amount;
+      } else if (mode === 'reduce_due') {
+        dueReduction = Math.min(runningDue, amount);
+        storeCreditCreated = Math.max(0, amount - dueReduction);
+      } else {
+        storeCreditCreated = amount;
+      }
+
+      runningDue = Math.max(0, runningDue - dueReduction);
+      runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditCreated);
+
+      if (scopedReturnIds.has(tx.id)) {
+        acc.cashRefunds += cashRefund;
+        acc.onlineRefunds += onlineRefund;
+        acc.dueReductionFromReturns += dueReduction;
+        acc.storeCreditCreatedFromReturns += storeCreditCreated;
+      }
+      return acc;
+    }, {
+      cashRefunds: 0,
+      onlineRefunds: 0,
+      dueReductionFromReturns: 0,
+      storeCreditCreatedFromReturns: 0,
+    });
+    const grossSales = saleSettlementTotals.totalSales;
+    const cogsFromSales = sales.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+    const cogsReversalFromReturns = returns.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+    const netSales = grossSales - salesReturns;
+    const cogs = cogsFromSales - cogsReversalFromReturns;
+    const grossProfit = netSales - cogs;
     const todayExpenses = expenses.filter(e => {
       const expenseTime = new Date(e.createdAt).getTime();
       return Number.isFinite(expenseTime) && expenseTime >= windowStart && expenseTime <= windowEnd;
     }).reduce((s, e) => s + e.amount, 0);
-    const profit = totalSales - returnTotal - cogs - todayExpenses;
-    const systemCashSale = cashSales + cashCollections;
+    const netProfit = grossProfit - todayExpenses;
+    const cashInflowOperational = saleCashReceipts + cashCollections;
+    const cashMovementAfterExpenses = cashInflowOperational - returnEffects.cashRefunds - todayExpenses;
 
     financeShiftDiag('[FIN][KPI][WINDOW]', {
       windowType,
@@ -580,16 +645,44 @@ export default function Finance() {
     });
     financeShiftDiag('[FIN][KPI][SCOPED_TOTALS]', {
       windowType,
-      cashSales: systemCashSale,
-      creditSales,
-      onlineSales,
-      returns: returnTotal,
-      totalSales,
-      profitBeforeClose: profit,
+      grossSales,
+      salesReturns,
+      netSales,
+      creditSalesCreated: creditSales,
+      onlineSalesAtSale: onlineSales,
+      cogs,
+      grossProfit,
+      netProfit,
+      saleCashReceipts,
+      cashCollections,
+      onlineCollections,
+      cashRefunds: returnEffects.cashRefunds,
+      onlineRefunds: returnEffects.onlineRefunds,
+      dueReductionFromReturns: returnEffects.dueReductionFromReturns,
+      storeCreditCreatedFromReturns: returnEffects.storeCreditCreatedFromReturns,
+      netCashMovementOperational: cashMovementAfterExpenses,
       expenses: todayExpenses,
     });
 
-    return { cashSales: systemCashSale, creditSales, onlineSales, returnTotal, totalSales, todayExpenses, profit };
+    return {
+      grossSales,
+      salesReturns,
+      netSales,
+      creditSalesCreated: creditSales,
+      onlineSalesAtSale: onlineSales,
+      cogs,
+      grossProfit,
+      netProfit,
+      saleCashReceipts,
+      cashCollections,
+      onlineCollections,
+      cashRefunds: returnEffects.cashRefunds,
+      onlineRefunds: returnEffects.onlineRefunds,
+      dueReductionFromReturns: returnEffects.dueReductionFromReturns,
+      storeCreditCreatedFromReturns: returnEffects.storeCreditCreatedFromReturns,
+      cashMovementAfterExpenses,
+      todayExpenses,
+    };
   }, [data.transactions, expenses, openSession]);
 
   const expenseActivities: ExpenseActivity[] = useMemo(() => (Array.isArray(data.expenseActivities) ? data.expenseActivities : []), [data]);
@@ -1070,16 +1163,49 @@ export default function Finance() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <StatCard label="Cash Inflow (Sales + Collections)" value={formatINR(todayFinanceBreakdown.cashSales)} />
-                    <StatCard label="Credit Sale" value={formatINR(todayFinanceBreakdown.creditSales)} />
-                    <StatCard label="Online Sale" value={formatINR(todayFinanceBreakdown.onlineSales)} />
-                    <StatCard label="Returns / Refunds" value={formatINR(todayFinanceBreakdown.returnTotal)} tone={todayFinanceBreakdown.returnTotal > 0 ? 'bad' : 'neutral'} />
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
+                      <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
+                      <StatCard label="Credit Sales Created" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
+                      <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
+                    </div>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Total Sales" value={formatINR(todayFinanceBreakdown.totalSales)} />
-                    <StatCard label="Expense" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Profit (before close)" value={formatINR(todayFinanceBreakdown.profit)} tone={todayFinanceBreakdown.profit >= 0 ? 'good' : 'bad'} />
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
+                      <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement (operational)</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
+                      <StatCard label="Cash Collections (payments)" value={formatINR(todayFinanceBreakdown.cashCollections)} />
+                      <StatCard label="Online Collections (payments)" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
+                      <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Expense (cash outflow)" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Cash Movement (after expenses)" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects by handling mode (operational)</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Online Refunds" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Due Reduction (returns)" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
+                      <StatCard label="Store Credit Created" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
+                    </div>
                   </div>
                   <div className="rounded-2xl border bg-muted/20 p-4">
                     <div className="flex items-start justify-between gap-3">

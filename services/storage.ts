@@ -325,6 +325,15 @@ const getSaleScenarioClass = (settlement: { cashPaid: number; onlinePaid: number
   return 'sale_cash';
 };
 const getPaymentScenarioClass = (paymentMethod?: Transaction['paymentMethod']) => paymentMethod === 'Online' ? 'payment_online' : 'payment_cash';
+const getTransactionScenarioClass = (transaction: Transaction) => {
+  if (transaction.type === 'sale') {
+    return getSaleScenarioClass(getSaleSettlementBreakdown(transaction));
+  }
+  if (transaction.type === 'payment') {
+    return getPaymentScenarioClass(transaction.paymentMethod);
+  }
+  return `return_${getResolvedReturnHandlingMode(transaction)}`;
+};
 const getTimestampHintFromTransactionId = (transactionId: string) => {
   const asNumber = Number(transactionId);
   if (!Number.isFinite(asNumber)) return Number.NaN;
@@ -1101,14 +1110,27 @@ const buildKpiSnapshotPayload = (state: AppState, windowType: 'init' | 'after_tx
     .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
   const returns = returnTransactions.reduce((sum, tx) => sum + Math.abs(tx.total), 0);
   const expenses = (state.expenses || []).reduce((sum, expense) => sum + (expense.amount || 0), 0);
-  const cogs = saleTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const saleCogs = saleTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const returnCogs = returnTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const cogs = saleCogs - returnCogs;
+  const grossSales = saleSettlementTotals.totalSales;
+  const salesReturns = returns;
+  const netSales = grossSales - salesReturns;
+  const grossProfit = netSales - cogs;
+  const netProfit = grossProfit - expenses;
   const currentDueTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.totalDue), 0);
   const currentStoreCreditTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.storeCredit), 0);
   const sessionCashTotal = saleSettlementTotals.cashPaid + cashCollections - cashRefunds - expenses;
-  const profitBeforeClose = saleSettlementTotals.totalSales - returns - cogs - expenses;
+  const profitBeforeClose = netProfit;
 
   return {
     windowType,
+    grossSales: logMoney(grossSales),
+    salesReturns: logMoney(salesReturns),
+    netSales: logMoney(netSales),
+    cogs: logMoney(cogs),
+    grossProfit: logMoney(grossProfit),
+    netProfit: logMoney(netProfit),
     cashInflow: logMoney(saleSettlementTotals.cashPaid + cashCollections),
     creditSales: logMoney(saleSettlementTotals.creditDue),
     onlineSales: logMoney(saleSettlementTotals.onlinePaid),
@@ -1132,6 +1154,8 @@ const logKpiSnapshot = (checkpoint: 'INIT' | 'AFTER_TX_CREATE' | 'AFTER_TX_UPDAT
   };
   console.info(`[FIN][KPI][SNAPSHOT][${checkpoint}]`, buildKpiSnapshotPayload(state, windowTypeMap[checkpoint]));
 };
+
+const FINANCE_RECON_TRACE_ENABLED = String((import.meta as any).env?.VITE_FINANCE_RECON_TRACE || '').toLowerCase() === 'true';
 
 let memoryState: AppState = { ...initialData };
 let hasInitialSynced = false;
@@ -3251,6 +3275,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       net,
       cogs,
       profitContribution: logMoney(net - cogs),
+      scenarioClass: getTransactionScenarioClass(effectiveTransaction),
     });
   } else if (effectiveTransaction.type === 'return') {
     const returnEffects = getReturnFinancialEffects(effectiveTransaction);
@@ -3264,7 +3289,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       net: logMoney(-txAmount),
       cogs,
       profitContribution: logMoney(-(Math.abs(effectiveTransaction.total) - cogs)),
-      scenarioClass: `return_${returnEffects.mode}`,
+      scenarioClass: getTransactionScenarioClass(effectiveTransaction),
     });
   }
   const touchedProductIds = effectiveTransaction.type !== 'payment'
@@ -3323,6 +3348,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
           txId: effectiveTransaction.id,
           customerId: effectiveTransaction.customerId || null,
           transactionType: effectiveTransaction.type,
+          scenarioClass: getTransactionScenarioClass(effectiveTransaction),
           returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
           source: 'processTransaction_atomic_commit',
         });
@@ -3386,6 +3412,7 @@ syncToCloud({ ...data }),
     txId: effectiveTransaction.id,
     customerId: effectiveTransaction.customerId || null,
     transactionType: effectiveTransaction.type,
+    scenarioClass: getTransactionScenarioClass(effectiveTransaction),
     returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
     source: 'processTransaction_local_fallback',
   });
@@ -3441,16 +3468,18 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
   if (!target) return data.transactions;
   const reconciledState = reconcileStateAfterDeleteTransaction(data, target);
   const deletedRecord = buildDeletedTransactionRecord({ transaction: target, beforeState: data, afterState: reconciledState });
-  console.info('[FIN][RECONCILE][DELETE]', {
-    txId: transactionId,
-    type: target.type,
-    stockAffected: target.type !== 'payment',
-    customerAffected: Boolean(target.customerId),
-    dueBefore: logMoney(deletedRecord.beforeImpact.customerDue),
-    dueAfter: logMoney(deletedRecord.afterImpact.customerDue),
-    storeCreditBefore: logMoney(deletedRecord.beforeImpact.customerStoreCredit),
-    storeCreditAfter: logMoney(deletedRecord.afterImpact.customerStoreCredit),
-  });
+  if (FINANCE_RECON_TRACE_ENABLED) {
+    console.info('[FIN][RECONCILE][DELETE]', {
+      txId: transactionId,
+      type: target.type,
+      stockAffected: target.type !== 'payment',
+      customerAffected: Boolean(target.customerId),
+      dueBefore: logMoney(deletedRecord.beforeImpact.customerDue),
+      dueAfter: logMoney(deletedRecord.afterImpact.customerDue),
+      storeCreditBefore: logMoney(deletedRecord.beforeImpact.customerStoreCredit),
+      storeCreditAfter: logMoney(deletedRecord.afterImpact.customerStoreCredit),
+    });
+  }
   if (target.customerId) {
     console.info('[FIN][LEDGER][RESULT]', {
       txId: transactionId,
@@ -3669,18 +3698,20 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
     console.error('[storage-transactions] failed to update transaction with reconciliation', error);
   });
 
-  console.info('[FIN][RECONCILE][UPDATE]', {
-    txId: effectiveUpdatedTransaction.id,
-    originalType: originalTransaction.type,
-    updatedType: effectiveUpdatedTransaction.type,
-    stockAffected: originalTransaction.type !== 'payment' || effectiveUpdatedTransaction.type !== 'payment',
-    settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
-    customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
-    dueBefore: logMoney(dueBefore),
-    dueAfter: logMoney(dueAfter),
-    storeCreditBefore: logMoney(storeCreditBefore),
-    storeCreditAfter: logMoney(storeCreditAfter),
-  });
+  if (FINANCE_RECON_TRACE_ENABLED) {
+    console.info('[FIN][RECONCILE][UPDATE]', {
+      txId: effectiveUpdatedTransaction.id,
+      originalType: originalTransaction.type,
+      updatedType: effectiveUpdatedTransaction.type,
+      stockAffected: originalTransaction.type !== 'payment' || effectiveUpdatedTransaction.type !== 'payment',
+      settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+      customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
+      dueBefore: logMoney(dueBefore),
+      dueAfter: logMoney(dueAfter),
+      storeCreditBefore: logMoney(storeCreditBefore),
+      storeCreditAfter: logMoney(storeCreditAfter),
+    });
+  }
   affectedCustomerIds.forEach((customerId) => {
     const customer = nextCustomers.find(c => c.id === customerId);
     if (!customer) return;
