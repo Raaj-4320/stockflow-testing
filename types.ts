@@ -431,6 +431,8 @@ export interface DeletedTransactionRecord {
   originalTransactionId: string;
   originalTransaction: Transaction;
   deletedAt: string;
+  deleteReason?: string;
+  deleteReasonNote?: string;
   deletedBy?: string;
   deletedByRole?: string;
   type: Transaction['type'];
