@@ -12,6 +12,7 @@ import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
+import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -40,6 +41,14 @@ export default function Transactions() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showBin, setShowBin] = useState(false);
   const [selectedDeletedTx, setSelectedDeletedTx] = useState<DeletedTransactionRecord | null>(null);
+  const [isExcelFilterModalOpen, setIsExcelFilterModalOpen] = useState(false);
+  const [excelFilterFrom, setExcelFilterFrom] = useState('');
+  const [excelFilterTo, setExcelFilterTo] = useState('');
+  const [excelFilterSearch, setExcelFilterSearch] = useState('');
+  const [excelFilterPayment, setExcelFilterPayment] = useState<'all' | 'cash' | 'credit' | 'online'>('all');
+  const [excelFilterType, setExcelFilterType] = useState<'all' | 'sale' | 'return'>('all');
+  const [excelAmountMoreThan, setExcelAmountMoreThan] = useState('');
+  const [excelAmountLessThan, setExcelAmountLessThan] = useState('');
 
   const formatRoleLabel = (role?: string) => {
     const source = (role || 'Admin').trim();
@@ -136,6 +145,57 @@ export default function Transactions() {
           }
       }).sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions, filterType, customStart, customEnd]);
+  const customerPhoneById = useMemo(
+    () => new Map(customers.map(customer => [customer.id, customer.phone || ''])),
+    [customers]
+  );
+  const excelExportFilteredTransactions = useMemo(() => {
+    const search = excelFilterSearch.trim().toLowerCase();
+    const fromTime = excelFilterFrom ? new Date(`${excelFilterFrom}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
+    const toTime = excelFilterTo ? new Date(`${excelFilterTo}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+    const moreThan = Number(excelAmountMoreThan);
+    const lessThan = Number(excelAmountLessThan);
+    const hasMoreThan = Number.isFinite(moreThan);
+    const hasLessThan = Number.isFinite(lessThan);
+
+    return filteredTransactions.filter((tx) => {
+      const txTime = new Date(tx.date).getTime();
+      if (!Number.isFinite(txTime) || txTime < fromTime || txTime > toTime) return false;
+
+      if (excelFilterType !== 'all' && tx.type !== excelFilterType) return false;
+
+      if (search) {
+        const billNumber = `bill-${tx.id.slice(-6)}`;
+        const phone = tx.customerId ? (customerPhoneById.get(tx.customerId) || '') : '';
+        const haystack = `${tx.customerName || ''} ${phone} ${tx.id} ${billNumber}`.toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+
+      const amountAbs = Math.abs(Number(tx.total || 0));
+      if (hasMoreThan && !(amountAbs > moreThan)) return false;
+      if (hasLessThan && !(amountAbs < lessThan)) return false;
+
+      if (excelFilterPayment === 'all') return true;
+      const settlement = tx.type === 'sale' ? getSaleSettlementBreakdown(tx) : { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
+      if (excelFilterPayment === 'cash') {
+        return settlement.cashPaid > 0 || (tx.type === 'payment' && tx.paymentMethod === 'Cash') || (tx.type === 'return' && tx.paymentMethod === 'Cash');
+      }
+      if (excelFilterPayment === 'online') {
+        return settlement.onlinePaid > 0 || (tx.type === 'payment' && tx.paymentMethod === 'Online') || (tx.type === 'return' && tx.paymentMethod === 'Online');
+      }
+      return settlement.creditDue > 0 || tx.paymentMethod === 'Credit';
+    });
+  }, [
+    filteredTransactions,
+    customerPhoneById,
+    excelFilterFrom,
+    excelFilterTo,
+    excelFilterSearch,
+    excelFilterPayment,
+    excelFilterType,
+    excelAmountMoreThan,
+    excelAmountLessThan
+  ]);
   const selectedTransactions = useMemo(
     () => transactions.filter(tx => selectedTransactionIds.includes(tx.id)),
     [transactions, selectedTransactionIds]
@@ -282,7 +342,7 @@ export default function Transactions() {
     if (tx.type !== 'sale') return null;
     const settlement = getSaleSettlementBreakdown(tx);
     const used = Math.max(0, Number(tx.storeCreditUsed || 0));
-    return `Cash ₹${settlement.cashPaid.toFixed(2)} • Online ₹${settlement.onlinePaid.toFixed(2)} • Due ₹${settlement.creditDue.toFixed(2)}${used > 0 ? ` • SC ₹${used.toFixed(2)}` : ''}`;
+    return `Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` • SC ${formatINRPrecise(used)}` : ''}`;
   };
 
   const handleDownloadPDF = () => {
@@ -311,7 +371,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(22, 163, 74); // Green
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${stats.totalRevenue.toLocaleString()}`, 20, 62);
+    doc.text(`Rs. ${formatMoneyWhole(stats.totalRevenue)}`, 20, 62);
 
     doc.setFontSize(9);
     doc.setTextColor(100);
@@ -320,7 +380,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(220, 38, 38); // Red
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${stats.totalReturns.toLocaleString()}`, 65, 62);
+    doc.text(`Rs. ${formatMoneyWhole(stats.totalReturns)}`, 65, 62);
 
     doc.setFontSize(9);
     doc.setTextColor(100);
@@ -329,7 +389,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(16, 185, 129); // Emerald
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${stats.totalDiscount.toLocaleString()}`, 110, 62);
+    doc.text(`Rs. ${formatMoneyWhole(stats.totalDiscount)}`, 110, 62);
 
     doc.setFontSize(9);
     doc.setTextColor(100);
@@ -338,7 +398,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(30, 41, 59); // Dark
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${stats.grossProfit.toLocaleString()}`, 155, 62);
+    doc.text(`Rs. ${formatMoneyWhole(stats.grossProfit)}`, 155, 62);
 
     // Table
     const tableBody = filteredTransactions.map(tx => [
@@ -347,7 +407,7 @@ export default function Transactions() {
         tx.type.toUpperCase(),
         tx.customerName || 'Walk-in',
         tx.paymentMethod || '-',
-        `Rs. ${Math.abs(tx.total).toFixed(2)}`
+        `Rs. ${formatMoneyPrecise(Math.abs(tx.total))}`
     ]);
 
     autoTable(doc, {
@@ -376,7 +436,8 @@ export default function Transactions() {
           if (format === 'pdf') {
               handleDownloadPDF();
           } else {
-              exportTransactionsToExcel(filteredTransactions);
+              setIsExportModalOpen(false);
+              setIsExcelFilterModalOpen(true);
           }
       } else if (exportType === 'invoice' && txToExport) {
           if (format === 'pdf') {
@@ -385,6 +446,11 @@ export default function Transactions() {
               exportInvoiceToExcel(txToExport);
           }
       }
+  };
+  const handleRunExcelExport = () => {
+    exportTransactionsToExcel(excelExportFilteredTransactions);
+    setIsExcelFilterModalOpen(false);
+    setIsExportModalOpen(false);
   };
 
   return (
@@ -481,8 +547,8 @@ export default function Transactions() {
                    <p className="text-[10px] md:text-xs font-bold text-green-700/70 uppercase tracking-wider">Total Revenue</p>
                    <div className="mt-2 flex items-baseline gap-1">
                       <span className="text-sm md:text-lg font-bold text-green-700">₹</span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-green-800 tracking-tight truncate w-full" title={`₹${stats.totalRevenue.toLocaleString()}`}>
-                          {stats.totalRevenue.toLocaleString()}
+                      <span className="text-lg sm:text-2xl font-extrabold text-green-800 tracking-tight truncate w-full" title={formatINRWhole(stats.totalRevenue)}>
+                          {formatMoneyWhole(stats.totalRevenue)}
                       </span>
                    </div>
               </CardContent>
@@ -497,8 +563,8 @@ export default function Transactions() {
                    <p className="text-[10px] md:text-xs font-bold text-red-700/70 uppercase tracking-wider">Returns</p>
                    <div className="mt-2 flex items-baseline gap-1">
                       <span className="text-sm md:text-lg font-bold text-red-700">₹</span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-red-800 tracking-tight truncate w-full" title={`₹${stats.totalReturns.toLocaleString()}`}>
-                          {stats.totalReturns.toLocaleString()}
+                      <span className="text-lg sm:text-2xl font-extrabold text-red-800 tracking-tight truncate w-full" title={formatINRWhole(stats.totalReturns)}>
+                          {formatMoneyWhole(stats.totalReturns)}
                       </span>
                    </div>
               </CardContent>
@@ -513,8 +579,8 @@ export default function Transactions() {
                    <p className="text-[10px] md:text-xs font-bold text-emerald-700/70 uppercase tracking-wider">Total Discount</p>
                    <div className="mt-2 flex items-baseline gap-1">
                       <span className="text-sm md:text-lg font-bold text-emerald-700">₹</span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-emerald-800 tracking-tight truncate w-full" title={`₹${stats.totalDiscount.toLocaleString()}`}>
-                          {stats.totalDiscount.toLocaleString()}
+                      <span className="text-lg sm:text-2xl font-extrabold text-emerald-800 tracking-tight truncate w-full" title={formatINRWhole(stats.totalDiscount)}>
+                          {formatMoneyWhole(stats.totalDiscount)}
                       </span>
                    </div>
               </CardContent>
@@ -529,8 +595,8 @@ export default function Transactions() {
                    <p className="text-[10px] md:text-xs font-bold text-blue-700/70 uppercase tracking-wider">Net Sales</p>
                    <div className="mt-2 flex items-baseline gap-1">
                       <span className="text-sm md:text-lg font-bold text-blue-700">₹</span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-blue-800 tracking-tight truncate w-full" title={`₹${stats.netSales.toLocaleString()}`}>
-                          {stats.netSales.toLocaleString()}
+                      <span className="text-lg sm:text-2xl font-extrabold text-blue-800 tracking-tight truncate w-full" title={formatINRWhole(stats.netSales)}>
+                          {formatMoneyWhole(stats.netSales)}
                       </span>
                    </div>
               </CardContent>
@@ -545,8 +611,8 @@ export default function Transactions() {
                    <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Gross Profit</p>
                    <div className="mt-2 flex items-baseline gap-1">
                       <span className="text-sm md:text-lg font-bold text-amber-700">₹</span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={`₹${stats.grossProfit.toLocaleString()}`}>
-                          {stats.grossProfit.toLocaleString()}
+                      <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(stats.grossProfit)}>
+                          {formatMoneyWhole(stats.grossProfit)}
                       </span>
                    </div>
               </CardContent>
@@ -591,7 +657,7 @@ export default function Transactions() {
                           <td className="px-4 py-3 uppercase font-semibold text-xs">{record.type}</td>
                           <td className="px-4 py-3">{record.customerName || 'Walk-in'}</td>
                           <td className="px-4 py-3">{record.paymentMethod || 'N/A'}</td>
-                          <td className="px-4 py-3 text-right font-bold">₹{Math.abs(record.amount || 0).toLocaleString()}</td>
+                          <td className="px-4 py-3 text-right font-bold">₹{formatMoneyWhole(Math.abs(record.amount || 0))}</td>
                           <td className="px-4 py-3">
                             <div className="text-xs">
                               <div>{formatDeletedByName(record)}</div>
@@ -702,7 +768,7 @@ export default function Transactions() {
                                             <span className="text-xs font-medium text-muted-foreground">{tx.paymentMethod || 'Cash'}</span>
                                         </td>
                                         <td className={`px-4 py-3 text-right font-bold ${amountClass}`}>
-                                            <div>₹{Math.abs(tx.total).toLocaleString()}</div>
+                                            <div>₹{formatMoneyWhole(Math.abs(tx.total))}</div>
                                             {getSaleSettlementText(tx) && (
                                               <div className="text-[10px] font-medium text-muted-foreground">{getSaleSettlementText(tx)}</div>
                                             )}
@@ -756,7 +822,7 @@ export default function Transactions() {
                                         <div className="flex justify-between items-end">
                                             <div>
                                                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-0.5">{tx.customerName || 'Walk-in'}</p>
-                                                <p className={`text-xl font-black ${amountClass}`}>₹{Math.abs(tx.total).toLocaleString()}</p>
+                                                <p className={`text-xl font-black ${amountClass}`}>₹{formatMoneyWhole(Math.abs(tx.total))}</p>
                                             </div>
                                             <div className="text-right">
                                                 <Badge variant={badgeVariant} className="text-[8px] font-black h-4 px-1 mb-1">
@@ -835,7 +901,7 @@ export default function Transactions() {
                                 <div>
                                     <div className={`text-2xl font-bold flex items-center ${amountClass}`}>
                                         {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : isReturn ? <ArrowDownLeft className="w-5 h-5 mr-1" /> : <CreditCard className="w-5 h-5 mr-1" />}
-                                        ₹{Math.abs(tx.total).toLocaleString()}
+                                        ₹{formatMoneyWhole(Math.abs(tx.total))}
                                     </div>
                                 </div>
 
@@ -1180,6 +1246,77 @@ export default function Transactions() {
                   {isSavingTransaction ? 'Saving…' : remainingBatchTransactions > 0 ? `Update & Next (${remainingBatchTransactions} left)` : 'Update & Next'}
                 </Button>
                 <Button onClick={() => void handleSaveTransaction(false)} disabled={isSavingTransaction}>{isSavingTransaction ? 'Saving…' : 'Save'}</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {isExcelFilterModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-2xl">
+            <CardHeader>
+              <CardTitle>Filter Transaction Excel Export</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">From Date</label>
+                  <Input type="date" value={excelFilterFrom} onChange={e => setExcelFilterFrom(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">To Date</label>
+                  <Input type="date" value={excelFilterTo} onChange={e => setExcelFilterTo(e.target.value)} />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Search customer / bill</label>
+                <Input
+                  value={excelFilterSearch}
+                  onChange={e => setExcelFilterSearch(e.target.value)}
+                  placeholder="Customer name, phone, bill no., or transaction no."
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment / Settlement</label>
+                  <Select value={excelFilterPayment} onChange={(e) => setExcelFilterPayment(e.target.value as 'all' | 'cash' | 'credit' | 'online')}>
+                    <option value="all">All</option>
+                    <option value="cash">Cash only</option>
+                    <option value="credit">Credit only</option>
+                    <option value="online">Online only</option>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Transaction Type</label>
+                  <Select value={excelFilterType} onChange={(e) => setExcelFilterType(e.target.value as 'all' | 'sale' | 'return')}>
+                    <option value="all">All (incl. payments)</option>
+                    <option value="sale">Sales only</option>
+                    <option value="return">Return only</option>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Amount more than (abs total)</label>
+                  <Input type="number" min="0" value={excelAmountMoreThan} onChange={e => setExcelAmountMoreThan(e.target.value)} placeholder="e.g. 500" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Amount less than (abs total)</label>
+                  <Input type="number" min="0" value={excelAmountLessThan} onChange={e => setExcelAmountLessThan(e.target.value)} placeholder="e.g. 5000" />
+                </div>
+              </div>
+
+              <div className="rounded-lg border bg-muted/20 p-3 text-sm">
+                Matching transactions: <span className="font-bold">{excelExportFilteredTransactions.length}</span>
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <Button variant="outline" onClick={() => setIsExcelFilterModalOpen(false)}>Cancel</Button>
+                <Button onClick={handleRunExcelExport}>Download Excel</Button>
               </div>
             </CardContent>
           </Card>
