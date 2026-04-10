@@ -325,6 +325,15 @@ const getSaleScenarioClass = (settlement: { cashPaid: number; onlinePaid: number
   return 'sale_cash';
 };
 const getPaymentScenarioClass = (paymentMethod?: Transaction['paymentMethod']) => paymentMethod === 'Online' ? 'payment_online' : 'payment_cash';
+const getTransactionScenarioClass = (transaction: Transaction) => {
+  if (transaction.type === 'sale') {
+    return getSaleScenarioClass(getSaleSettlementBreakdown(transaction));
+  }
+  if (transaction.type === 'payment') {
+    return getPaymentScenarioClass(transaction.paymentMethod);
+  }
+  return `return_${getResolvedReturnHandlingMode(transaction)}`;
+};
 const getTimestampHintFromTransactionId = (transactionId: string) => {
   const asNumber = Number(transactionId);
   if (!Number.isFinite(asNumber)) return Number.NaN;
@@ -527,6 +536,25 @@ const getReturnReconciliationAmounts = (
   const remainder = roundCurrency(Math.max(0, afterCash - dueReduction));
   return { validReturnValue, cashRefund, onlineRefund: 0, dueReduction, storeCreditIncrease: remainder };
 };
+export const getCanonicalReturnAllocation = (
+  transaction: Transaction,
+  historicalTransactions: Transaction[],
+  dueBefore: number
+): {
+  mode: ReturnHandlingMode;
+  validReturnValue: number;
+  cashRefund: number;
+  onlineRefund: number;
+  dueReduction: number;
+  storeCreditIncrease: number;
+} => {
+  const mode = getResolvedReturnHandlingMode(transaction);
+  const reconciliation = getReturnReconciliationAmounts(transaction, historicalTransactions, dueBefore);
+  return {
+    mode,
+    ...reconciliation,
+  };
+};
 const getClampedStoreCreditUsed = (transaction: Transaction, customer: Customer) => {
   if (transaction.type !== 'sale') return 0;
   const requested = toFiniteNonNegative(transaction.storeCreditUsed);
@@ -583,6 +611,35 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
   const totalDue = roundCurrency(Math.max(0, runningDue));
   const storeCredit = roundCurrency(Math.max(0, runningStoreCredit));
   return { totalDue, storeCredit, activeSalesTotal, activePaymentsTotal, activeReturnsTotal };
+};
+
+export const getCanonicalCustomerBalanceSnapshot = (customers: Customer[], transactions: Transaction[]) => {
+  const customersWithLedger = new Set(transactions.filter(tx => Boolean(tx.customerId)).map(tx => tx.customerId as string));
+  let totalDue = 0;
+  let totalStoreCredit = 0;
+  const balances = new Map<string, { totalDue: number; storeCredit: number }>();
+
+  customers.forEach(customer => {
+    if (customersWithLedger.has(customer.id)) {
+      const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, transactions);
+      balances.set(customer.id, { totalDue: rebuilt.totalDue, storeCredit: rebuilt.storeCredit });
+      totalDue += rebuilt.totalDue;
+      totalStoreCredit += rebuilt.storeCredit;
+      return;
+    }
+    const normalizedDue = Math.max(0, toFiniteNumber(customer.totalDue, 0));
+    const normalizedStoreCredit = Math.max(0, toFiniteNumber(customer.storeCredit, 0));
+    balances.set(customer.id, { totalDue: normalizedDue, storeCredit: normalizedStoreCredit });
+    totalDue += normalizedDue;
+    totalStoreCredit += normalizedStoreCredit;
+  });
+
+  return {
+    balances,
+    totalDue: roundCurrency(totalDue),
+    totalStoreCredit: roundCurrency(totalStoreCredit),
+    customersWithLedger: customersWithLedger.size,
+  };
 };
 
 const normalizeCustomerBalance = (totalDue: unknown, storeCredit: unknown): { totalDue: number; storeCredit: number } => {
@@ -1101,14 +1158,27 @@ const buildKpiSnapshotPayload = (state: AppState, windowType: 'init' | 'after_tx
     .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
   const returns = returnTransactions.reduce((sum, tx) => sum + Math.abs(tx.total), 0);
   const expenses = (state.expenses || []).reduce((sum, expense) => sum + (expense.amount || 0), 0);
-  const cogs = saleTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const saleCogs = saleTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const returnCogs = returnTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const cogs = saleCogs - returnCogs;
+  const grossSales = saleSettlementTotals.totalSales;
+  const salesReturns = returns;
+  const netSales = grossSales - salesReturns;
+  const grossProfit = netSales - cogs;
+  const netProfit = grossProfit - expenses;
   const currentDueTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.totalDue), 0);
   const currentStoreCreditTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.storeCredit), 0);
   const sessionCashTotal = saleSettlementTotals.cashPaid + cashCollections - cashRefunds - expenses;
-  const profitBeforeClose = saleSettlementTotals.totalSales - returns - cogs - expenses;
+  const profitBeforeClose = netProfit;
 
   return {
     windowType,
+    grossSales: logMoney(grossSales),
+    salesReturns: logMoney(salesReturns),
+    netSales: logMoney(netSales),
+    cogs: logMoney(cogs),
+    grossProfit: logMoney(grossProfit),
+    netProfit: logMoney(netProfit),
     cashInflow: logMoney(saleSettlementTotals.cashPaid + cashCollections),
     creditSales: logMoney(saleSettlementTotals.creditDue),
     onlineSales: logMoney(saleSettlementTotals.onlinePaid),
@@ -1132,6 +1202,9 @@ const logKpiSnapshot = (checkpoint: 'INIT' | 'AFTER_TX_CREATE' | 'AFTER_TX_UPDAT
   };
   console.info(`[FIN][KPI][SNAPSHOT][${checkpoint}]`, buildKpiSnapshotPayload(state, windowTypeMap[checkpoint]));
 };
+
+const FINANCE_RECON_TRACE_ENABLED = String((import.meta as any).env?.VITE_FINANCE_RECON_TRACE || '').toLowerCase() === 'true';
+const FINANCE_ACTION_TRACE_ENABLED = String((import.meta as any).env?.VITE_FINANCE_ACTION_TRACE || '').toLowerCase() === 'true';
 
 let memoryState: AppState = { ...initialData };
 let hasInitialSynced = false;
@@ -3251,6 +3324,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       net,
       cogs,
       profitContribution: logMoney(net - cogs),
+      scenarioClass: getTransactionScenarioClass(effectiveTransaction),
     });
   } else if (effectiveTransaction.type === 'return') {
     const returnEffects = getReturnFinancialEffects(effectiveTransaction);
@@ -3264,7 +3338,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
       net: logMoney(-txAmount),
       cogs,
       profitContribution: logMoney(-(Math.abs(effectiveTransaction.total) - cogs)),
-      scenarioClass: `return_${returnEffects.mode}`,
+      scenarioClass: getTransactionScenarioClass(effectiveTransaction),
     });
   }
   const touchedProductIds = effectiveTransaction.type !== 'payment'
@@ -3318,14 +3392,17 @@ export const processTransaction = (transaction: Transaction): AppState => {
           transactions: nextTransactions,
         };
         emitLocalStorageUpdate();
-        console.info('[FIN][ACTION][TX_CREATE]', {
-          actionType: 'TX_CREATE',
-          txId: effectiveTransaction.id,
-          customerId: effectiveTransaction.customerId || null,
-          transactionType: effectiveTransaction.type,
-          returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
-          source: 'processTransaction_atomic_commit',
-        });
+        if (FINANCE_ACTION_TRACE_ENABLED) {
+          console.info('[FIN][ACTION][TX_CREATE]', {
+            actionType: 'TX_CREATE',
+            txId: effectiveTransaction.id,
+            customerId: effectiveTransaction.customerId || null,
+            transactionType: effectiveTransaction.type,
+            scenarioClass: getTransactionScenarioClass(effectiveTransaction),
+            returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
+            source: 'processTransaction_atomic_commit',
+          });
+        }
         logKpiSnapshot('AFTER_TX_CREATE', memoryState);
         emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.', transactionId: effectiveTransaction.id });
         emitBehaviorStateChange({ type: effectiveTransaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: effectiveTransaction.id, to: 'committed', metadata: { transactionType: effectiveTransaction.type, paymentMethod: effectiveTransaction.paymentMethod, total: effectiveTransaction.total } });
@@ -3381,14 +3458,17 @@ syncToCloud({ ...data }),
 
   const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
-  console.info('[FIN][ACTION][TX_CREATE]', {
-    actionType: 'TX_CREATE',
-    txId: effectiveTransaction.id,
-    customerId: effectiveTransaction.customerId || null,
-    transactionType: effectiveTransaction.type,
-    returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
-    source: 'processTransaction_local_fallback',
-  });
+  if (FINANCE_ACTION_TRACE_ENABLED) {
+    console.info('[FIN][ACTION][TX_CREATE]', {
+      actionType: 'TX_CREATE',
+      txId: effectiveTransaction.id,
+      customerId: effectiveTransaction.customerId || null,
+      transactionType: effectiveTransaction.type,
+      scenarioClass: getTransactionScenarioClass(effectiveTransaction),
+      returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
+      source: 'processTransaction_local_fallback',
+    });
+  }
   logKpiSnapshot('AFTER_TX_CREATE', fallbackState);
   emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: effectiveTransaction.id });
   emitBehaviorStateChange({ type: effectiveTransaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: effectiveTransaction.id, to: 'local_saved', metadata: { transactionType: effectiveTransaction.type, paymentMethod: effectiveTransaction.paymentMethod, total: effectiveTransaction.total } });
@@ -3409,15 +3489,43 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
   }
 
   const merged = sortTransactionsDesc([...incoming, ...data.transactions]);
+  const affectedCustomerIds = new Set(incoming.map(tx => tx.customerId).filter((id): id is string => Boolean(id)));
+  const mergedCustomers = data.customers.map(customer => {
+    if (!affectedCustomerIds.has(customer.id)) return customer;
+    const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, merged);
+    return {
+      ...customer,
+      totalDue: rebuilt.totalDue,
+      storeCredit: rebuilt.storeCredit,
+    };
+  });
+  const nextState = { ...data, transactions: merged, customers: mergedCustomers };
+  if (affectedCustomerIds.size > 0) {
+    const affectedSummary = mergedCustomers
+      .filter(customer => affectedCustomerIds.has(customer.id))
+      .map(customer => ({ id: customer.id, totalDue: logMoney(customer.totalDue), storeCredit: logMoney(customer.storeCredit) }));
+    console.info('[FIN][HISTORICAL][REBALANCE]', {
+      importedTransactions: incoming.length,
+      affectedCustomers: affectedCustomerIds.size,
+      affectedSummary,
+    });
+  }
 
   if (!db) {
-    await saveData({ ...data, transactions: merged }, { throwOnError: true, reason: 'addHistoricalTransactions_local_fallback', auditOperation: 'CREATE' });
+    await saveData(nextState, { throwOnError: true, reason: 'addHistoricalTransactions_local_fallback', auditOperation: 'CREATE' });
     return merged;
   }
 
   await Promise.all(incoming.map(tx => upsertTransactionInSubcollection(tx, 'addHistoricalTransactions_subcollection')));
+  if (affectedCustomerIds.size > 0) {
+    await Promise.all(
+      mergedCustomers
+        .filter(customer => affectedCustomerIds.has(customer.id))
+        .map(customer => upsertCustomerInSubcollection(customer, 'addHistoricalTransactions_customer_rebalance'))
+    );
+  }
 
-  memoryState = { ...memoryState, transactions: sortTransactionsDesc([...incoming, ...memoryState.transactions]) };
+  memoryState = { ...memoryState, transactions: merged, customers: mergedCustomers };
   emitLocalStorageUpdate();
 
   void Promise.all([
@@ -3427,7 +3535,7 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
       transactionIds: incoming.map(tx => tx.id),
       transactionsCount: incoming.length,
     }),
-    syncToCloud({ ...data }),
+    syncToCloud(nextState),
   ]).catch(error => {
     console.error('[storage-transactions] addHistoricalTransactions side effects failed', error);
   });
@@ -3441,16 +3549,18 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
   if (!target) return data.transactions;
   const reconciledState = reconcileStateAfterDeleteTransaction(data, target);
   const deletedRecord = buildDeletedTransactionRecord({ transaction: target, beforeState: data, afterState: reconciledState });
-  console.info('[FIN][RECONCILE][DELETE]', {
-    txId: transactionId,
-    type: target.type,
-    stockAffected: target.type !== 'payment',
-    customerAffected: Boolean(target.customerId),
-    dueBefore: logMoney(deletedRecord.beforeImpact.customerDue),
-    dueAfter: logMoney(deletedRecord.afterImpact.customerDue),
-    storeCreditBefore: logMoney(deletedRecord.beforeImpact.customerStoreCredit),
-    storeCreditAfter: logMoney(deletedRecord.afterImpact.customerStoreCredit),
-  });
+  if (FINANCE_RECON_TRACE_ENABLED) {
+    console.info('[FIN][RECONCILE][DELETE]', {
+      txId: transactionId,
+      type: target.type,
+      stockAffected: target.type !== 'payment',
+      customerAffected: Boolean(target.customerId),
+      dueBefore: logMoney(deletedRecord.beforeImpact.customerDue),
+      dueAfter: logMoney(deletedRecord.afterImpact.customerDue),
+      storeCreditBefore: logMoney(deletedRecord.beforeImpact.customerStoreCredit),
+      storeCreditAfter: logMoney(deletedRecord.afterImpact.customerStoreCredit),
+    });
+  }
   if (target.customerId) {
     console.info('[FIN][LEDGER][RESULT]', {
       txId: transactionId,
@@ -3468,13 +3578,15 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
 
   if (!db) {
     void saveData(reconciledWithBin, { reason: 'deleteTransaction_local_fallback', auditOperation: 'DELETE' });
-    console.info('[FIN][ACTION][TX_DELETE]', {
-      actionType: 'TX_DELETE',
-      txId: transactionId,
-      customerId: target.customerId || null,
-      transactionType: target.type,
-      source: 'deleteTransaction_local_fallback',
-    });
+    if (FINANCE_ACTION_TRACE_ENABLED) {
+      console.info('[FIN][ACTION][TX_DELETE]', {
+        actionType: 'TX_DELETE',
+        txId: transactionId,
+        customerId: target.customerId || null,
+        transactionType: target.type,
+        source: 'deleteTransaction_local_fallback',
+      });
+    }
     logKpiSnapshot('AFTER_TX_DELETE', reconciledWithBin);
     return next;
   }
@@ -3487,13 +3599,15 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
     customers: reconciledState.customers,
   };
   emitLocalStorageUpdate();
-  console.info('[FIN][ACTION][TX_DELETE]', {
-    actionType: 'TX_DELETE',
-    txId: transactionId,
-    customerId: target.customerId || null,
-    transactionType: target.type,
-    source: 'deleteTransaction_reconcile',
-  });
+  if (FINANCE_ACTION_TRACE_ENABLED) {
+    console.info('[FIN][ACTION][TX_DELETE]', {
+      actionType: 'TX_DELETE',
+      txId: transactionId,
+      customerId: target.customerId || null,
+      transactionType: target.type,
+      source: 'deleteTransaction_reconcile',
+    });
+  }
   logKpiSnapshot('AFTER_TX_DELETE', memoryState);
 
   void deleteTransactionAndReconcileInSubcollection(target, deletedRecord, 'deleteTransaction')
@@ -3574,15 +3688,17 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
 
   if (!db) {
     await saveData(reconciledState, { throwOnError: true, reason: 'updateTransaction_local_reconcile', auditOperation: 'UPDATE' });
-    console.info('[FIN][ACTION][TX_UPDATE]', {
-      actionType: 'TX_UPDATE',
-      txId: effectiveUpdatedTransaction.id,
-      customerId: effectiveUpdatedTransaction.customerId || null,
-      originalType: originalTransaction.type,
-      updatedType: effectiveUpdatedTransaction.type,
-      settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
-      source: 'updateTransaction_local_reconcile',
-    });
+    if (FINANCE_ACTION_TRACE_ENABLED) {
+      console.info('[FIN][ACTION][TX_UPDATE]', {
+        actionType: 'TX_UPDATE',
+        txId: effectiveUpdatedTransaction.id,
+        customerId: effectiveUpdatedTransaction.customerId || null,
+        originalType: originalTransaction.type,
+        updatedType: effectiveUpdatedTransaction.type,
+        settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+        source: 'updateTransaction_local_reconcile',
+      });
+    }
     logKpiSnapshot('AFTER_TX_UPDATE', reconciledState);
     return reconciledState.transactions;
   }
@@ -3669,18 +3785,20 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
     console.error('[storage-transactions] failed to update transaction with reconciliation', error);
   });
 
-  console.info('[FIN][RECONCILE][UPDATE]', {
-    txId: effectiveUpdatedTransaction.id,
-    originalType: originalTransaction.type,
-    updatedType: effectiveUpdatedTransaction.type,
-    stockAffected: originalTransaction.type !== 'payment' || effectiveUpdatedTransaction.type !== 'payment',
-    settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
-    customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
-    dueBefore: logMoney(dueBefore),
-    dueAfter: logMoney(dueAfter),
-    storeCreditBefore: logMoney(storeCreditBefore),
-    storeCreditAfter: logMoney(storeCreditAfter),
-  });
+  if (FINANCE_RECON_TRACE_ENABLED) {
+    console.info('[FIN][RECONCILE][UPDATE]', {
+      txId: effectiveUpdatedTransaction.id,
+      originalType: originalTransaction.type,
+      updatedType: effectiveUpdatedTransaction.type,
+      stockAffected: originalTransaction.type !== 'payment' || effectiveUpdatedTransaction.type !== 'payment',
+      settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+      customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
+      dueBefore: logMoney(dueBefore),
+      dueAfter: logMoney(dueAfter),
+      storeCreditBefore: logMoney(storeCreditBefore),
+      storeCreditAfter: logMoney(storeCreditAfter),
+    });
+  }
   affectedCustomerIds.forEach((customerId) => {
     const customer = nextCustomers.find(c => c.id === customerId);
     if (!customer) return;
@@ -3693,15 +3811,17 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
       runningNet: logMoney(toFiniteNonNegative(customer.totalDue) - toFiniteNonNegative(customer.storeCredit)),
     });
   });
-  console.info('[FIN][ACTION][TX_UPDATE]', {
-    actionType: 'TX_UPDATE',
-    txId: effectiveUpdatedTransaction.id,
-    customerId: effectiveUpdatedTransaction.customerId || null,
-    originalType: originalTransaction.type,
-    updatedType: effectiveUpdatedTransaction.type,
-    settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
-    source: 'updateTransaction_reconciled',
-  });
+  if (FINANCE_ACTION_TRACE_ENABLED) {
+    console.info('[FIN][ACTION][TX_UPDATE]', {
+      actionType: 'TX_UPDATE',
+      txId: effectiveUpdatedTransaction.id,
+      customerId: effectiveUpdatedTransaction.customerId || null,
+      originalType: originalTransaction.type,
+      updatedType: effectiveUpdatedTransaction.type,
+      settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+      source: 'updateTransaction_reconciled',
+    });
+  }
   logKpiSnapshot('AFTER_TX_UPDATE', memoryState);
 
   return reconciledState.transactions;

@@ -12,6 +12,7 @@ import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
 import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
+import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 
 const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
@@ -90,7 +91,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 )}
 
                 <div className="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm text-white text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded-full shadow-sm">
-                    ₹{product.sellPrice}
+                    ₹{formatMoneyPrecise(product.sellPrice)}
                 </div>
                 <div className="absolute top-2 right-2">
                     {isReturnMode ? (
@@ -689,7 +690,7 @@ export default function Sales() {
                   <div key={`${row.variant}-${row.color}-${idx}`} className={`grid grid-cols-[1fr_80px_90px_116px] items-center gap-3 border rounded-xl p-3 ${disabled ? 'opacity-60 bg-muted/40' : ''}`}>
                     <div className="font-semibold text-sm">{label}</div>
                     <div className="text-xs text-muted-foreground text-center">{isReturnMode ? 'Sold left' : 'Stock'}: {row.stock}</div>
-                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{row.sellPrice}</div>
+                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{formatMoneyPrecise(row.sellPrice)}</div>
                     <div className="flex items-center gap-2 justify-end">
                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
@@ -733,7 +734,7 @@ export default function Sales() {
               <div className="space-y-1 min-w-0">
                 <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                 <p className="text-[11px] text-muted-foreground">
-                  Stock left: {Math.max(0, getLineAvailableStock(item, item.selectedVariant, item.selectedColor) + (isReturnMode ? item.quantity : -item.quantity))} · Buy: ₹{item.buyPrice}
+                  Stock left: {Math.max(0, getLineAvailableStock(item, item.selectedVariant, item.selectedColor) + (isReturnMode ? item.quantity : -item.quantity))} · Buy: ₹{formatMoneyPrecise(item.buyPrice)}
                 </p>
                 <div className="grid grid-cols-[92px_80px_1fr] gap-2 items-center">
                   <div className="flex items-center border rounded-md h-7 overflow-hidden">
@@ -742,7 +743,7 @@ export default function Sales() {
                     <button className="px-1.5 h-full border-l" onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)}><Plus className="w-3 h-3" /></button>
                   </div>
                   <Input className="h-7 text-xs" value={item.sellPrice ?? ''} type="number" onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)} />
-                  <p className="text-right font-bold text-sm">₹{(item.sellPrice * item.quantity).toFixed(2)}</p>
+                  <p className="text-right font-bold text-sm">₹{formatMoneyPrecise(item.sellPrice * item.quantity)}</p>
                 </div>
               </div>
               <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)}>
@@ -760,14 +761,14 @@ export default function Sales() {
               {transactionSyncStatus.phase === 'pending' ? 'Pending:' : transactionSyncStatus.phase === 'committing' ? 'Committing:' : transactionSyncStatus.phase === 'success' ? 'Committed:' : 'Commit failed:'} {transactionSyncStatus.message}
             </div>
           )}
-          <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span>₹{subtotal.toFixed(2)}</span></div>
-          {totalDiscount > 0 && <div className="flex justify-between text-sm text-green-600"><span>Discount</span><span>-₹{totalDiscount.toFixed(2)}</span></div>}
+          <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span>₹{formatMoneyPrecise(subtotal)}</span></div>
+          {totalDiscount > 0 && <div className="flex justify-between text-sm text-green-600"><span>Discount</span><span>-₹{formatMoneyPrecise(totalDiscount)}</span></div>}
           <button className="w-full flex justify-between text-sm p-1 rounded hover:bg-muted" onClick={() => setIsTaxModalOpen(true)}>
             <span className="text-muted-foreground">Tax ({selectedTax.label})</span>
-            <span>₹{taxVal.toFixed(2)}</span>
+            <span>₹{formatMoneyPrecise(taxVal)}</span>
           </button>
           <div className="h-px bg-border" />
-          <div className="flex justify-between items-center"><span className="text-lg font-bold">Total</span><span className={`text-xl font-extrabold ${isReturnMode ? 'text-orange-600' : ''}`}>{isReturnMode ? '-' : ''}₹{Math.abs(grandTotal).toFixed(2)}</span></div>
+          <div className="flex justify-between items-center"><span className="text-lg font-bold">Total</span><span className={`text-xl font-extrabold ${isReturnMode ? 'text-orange-600' : ''}`}>{isReturnMode ? '-' : ''}₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
           <Button className={`w-full h-10 font-semibold ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} disabled={cart.length === 0} onClick={() => initiateCheckout()}>
             {isReturnMode ? 'Create Return Invoice' : 'Create Invoice'}
           </Button>
@@ -837,10 +838,10 @@ export default function Sales() {
                       <Input type="number" min="0" step="0.01" placeholder="0.00" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
-                      <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{settlementPaidNow.toFixed(2)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{creditDuePreview.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyPrecise(settlementPaidNow)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{formatMoneyPrecise(creditDuePreview)}</span></div>
                       {settlementOverpay > 0.0001 && (
-                        <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{settlementOverpay.toFixed(2)}</p>
+                        <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyPrecise(settlementOverpay)}</p>
                       )}
                     </div>
                   </div>
@@ -916,7 +917,7 @@ export default function Sales() {
                   <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
                     <div className="flex items-center justify-between text-xs">
                       <span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span>
-                      <span className="font-bold">₹{availableStoreCredit.toFixed(2)}</span>
+                      <span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span>
                     </div>
                     <div className="grid grid-cols-3 gap-2">
                       <Button size="sm" variant={storeCreditMode === 'none' ? 'default' : 'outline'} onClick={() => { setStoreCreditMode('none'); setCustomStoreCreditUse(''); }}>No Use</Button>
@@ -937,16 +938,16 @@ export default function Sales() {
                           }}
                           placeholder="Enter amount"
                         />
-                        <p className="text-[11px] text-muted-foreground">Max usable: ₹{maxApplicableStoreCredit.toFixed(2)} (auto-applied)</p>
+                        <p className="text-[11px] text-muted-foreground">Max usable: ₹{formatMoneyPrecise(maxApplicableStoreCredit)} (auto-applied)</p>
                       </div>
                     )}
                     <div className="text-xs space-y-1 border-t pt-2">
-                      <div className="flex justify-between"><span>Invoice Total</span><span>₹{Math.abs(grandTotal).toFixed(2)}</span></div>
-                      <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{storeCreditUsed.toFixed(2)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{remainingPayable.toFixed(2)}</span></div>
-                      <div className="flex justify-between"><span>Cash Paid</span><span>₹{cashPaidValue.toFixed(2)}</span></div>
-                      <div className="flex justify-between"><span>Online Paid</span><span>₹{onlinePaidValue.toFixed(2)}</span></div>
-                      <div className="flex justify-between text-muted-foreground"><span>Credit Due to Create</span><span>₹{creditDuePreview.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                      <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyPrecise(remainingPayable)}</span></div>
+                      <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyPrecise(cashPaidValue)}</span></div>
+                      <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyPrecise(onlinePaidValue)}</span></div>
+                      <div className="flex justify-between text-muted-foreground"><span>Credit Due to Create</span><span>₹{formatMoneyPrecise(creditDuePreview)}</span></div>
                     </div>
                   </div>
                 )}
@@ -990,16 +991,16 @@ export default function Sales() {
                       </div>
                       <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                       <p className="text-center text-sm">{item.quantity}</p>
-                      <p className="text-right text-sm">₹{item.sellPrice.toFixed(2)}</p>
-                      <p className={`text-right font-bold text-sm ${isReturnMode ? 'text-orange-600' : ''}`}>₹{(item.sellPrice * item.quantity).toFixed(2)}</p>
+                      <p className="text-right text-sm">₹{formatMoneyPrecise(item.sellPrice)}</p>
+                      <p className={`text-right font-bold text-sm ${isReturnMode ? 'text-orange-600' : ''}`}>₹{formatMoneyPrecise(item.sellPrice * item.quantity)}</p>
                     </div>
                   ))}
                 </div>
                 <div className="px-4 py-3 border-t bg-muted/20 space-y-1.5">
-                  <div className="flex justify-between text-sm"><span>Sub Total</span><span>₹{subtotal.toFixed(2)}</span></div>
-                  <div className="flex justify-between text-sm"><span>Tax ({selectedTax.label})</span><span>₹{taxVal.toFixed(2)}</span></div>
+                  <div className="flex justify-between text-sm"><span>Sub Total</span><span>₹{formatMoneyPrecise(subtotal)}</span></div>
+                  <div className="flex justify-between text-sm"><span>Tax ({selectedTax.label})</span><span>₹{formatMoneyPrecise(taxVal)}</span></div>
                   <div className="h-px bg-border my-1" />
-                  <div className="flex justify-between text-base font-bold"><span>Total</span><span>{isReturnMode ? '-' : ''}₹{Math.abs(grandTotal).toFixed(2)}</span></div>
+                  <div className="flex justify-between text-base font-bold"><span>Total</span><span>{isReturnMode ? '-' : ''}₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
                 </div>
               </div>
             </CardContent>
@@ -1019,19 +1020,19 @@ export default function Sales() {
                       <p className="text-muted-foreground text-sm">Receipt #{transactionComplete.id.slice(-6)} has been generated.</p>
                       {transactionCashDetails && (
                         <div className="text-sm bg-muted rounded-lg p-3 space-y-1">
-                          <p>Total: ₹{transactionComplete.total.toFixed(2)}</p>
-                          <p>Cash Received: ₹{transactionCashDetails.cashReceived.toFixed(2)}</p>
-                          <p className="font-bold text-green-700">Change Returned: ₹{transactionCashDetails.changeReturned.toFixed(2)}</p>
+                          <p>Total: {formatINRWhole(transactionComplete.total)}</p>
+                          <p>Cash Received: {formatINRPrecise(transactionCashDetails.cashReceived)}</p>
+                          <p className="font-bold text-green-700">Change Returned: {formatINRPrecise(transactionCashDetails.changeReturned)}</p>
                         </div>
                       )}
                       {transactionComplete.type === 'sale' && (
                         <div className="text-sm bg-muted rounded-lg p-3 space-y-1 text-left">
                           <p className="font-semibold">Settlement Breakdown</p>
-                          <p>Total Invoice: ₹{Math.abs(transactionComplete.total).toFixed(2)}</p>
-                          <p>Store Credit Used: ₹{Number(transactionComplete.storeCreditUsed || 0).toFixed(2)}</p>
-                          <p>Cash Paid: ₹{Number(transactionComplete.saleSettlement?.cashPaid || 0).toFixed(2)}</p>
-                          <p>Online Paid: ₹{Number(transactionComplete.saleSettlement?.onlinePaid || 0).toFixed(2)}</p>
-                          <p>Credit Due: ₹{Number(transactionComplete.saleSettlement?.creditDue || 0).toFixed(2)}</p>
+                          <p>Total Invoice: {formatINRWhole(Math.abs(transactionComplete.total))}</p>
+                          <p>Store Credit Used: {formatINRPrecise(Number(transactionComplete.storeCreditUsed || 0))}</p>
+                          <p>Cash Paid: {formatINRPrecise(Number(transactionComplete.saleSettlement?.cashPaid || 0))}</p>
+                          <p>Online Paid: {formatINRPrecise(Number(transactionComplete.saleSettlement?.onlinePaid || 0))}</p>
+                          <p>Credit Due: {formatINRPrecise(Number(transactionComplete.saleSettlement?.creditDue || 0))}</p>
                         </div>
                       )}
                       <div className="flex gap-3 pt-4">
