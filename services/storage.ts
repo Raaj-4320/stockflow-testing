@@ -402,6 +402,12 @@ const getMatchingQuantityForBucket = (transaction: Transaction, productId: strin
     .filter(bucket => bucket.productId === productId && bucket.variant === targetVariant && bucket.color === targetColor)
     .reduce((sum, bucket) => sum + bucket.quantity, 0);
 };
+const getSourceLineCompositeKeyForItem = (item: Pick<CartItem, 'id' | 'selectedVariant' | 'selectedColor' | 'sellPrice'>) => {
+  const variant = normalizeStockBucketVariant(item.selectedVariant);
+  const color = normalizeStockBucketColor(item.selectedColor);
+  const sellPrice = toFiniteNonNegative(item.sellPrice);
+  return `${item.id}__${variant}__${color}__${sellPrice}`;
+};
 const getCustomerReturnCaps = (transaction: Transaction, historicalTransactions: Transaction[]): {
   maxReturnValue: number;
   maxCashRefund: number;
@@ -519,6 +525,7 @@ const getReturnReconciliationAmounts = (
     };
   const validReturnValue = roundCurrency(Math.min(requestedValue, caps.maxReturnValue));
   const mode = getResolvedReturnHandlingMode(transaction);
+  const mixedPaidCreditReturn = caps.maxDueReduction > 0 && (caps.maxCashRefund > 0 || caps.maxOnlineRefund > 0);
 
   if (mode === 'store_credit') {
     return { validReturnValue, cashRefund: 0, onlineRefund: 0, dueReduction: 0, storeCreditIncrease: validReturnValue };
@@ -531,11 +538,26 @@ const getReturnReconciliationAmounts = (
   }
 
   if (mode === 'refund_online') {
+    if (mixedPaidCreditReturn) {
+      const dueReduction = roundCurrency(Math.min(toFiniteNonNegative(dueBefore), caps.maxDueReduction, validReturnValue));
+      const afterDue = roundCurrency(Math.max(0, validReturnValue - dueReduction));
+      const onlineRefund = roundCurrency(Math.min(afterDue, caps.maxOnlineRefund));
+      const remainder = roundCurrency(Math.max(0, afterDue - onlineRefund));
+      return { validReturnValue, cashRefund: 0, onlineRefund, dueReduction, storeCreditIncrease: remainder };
+    }
     const onlineRefund = roundCurrency(Math.min(validReturnValue, caps.maxOnlineRefund));
     const afterOnline = roundCurrency(Math.max(0, validReturnValue - onlineRefund));
     const dueReduction = roundCurrency(Math.min(toFiniteNonNegative(dueBefore), caps.maxDueReduction, afterOnline));
     const remainder = roundCurrency(Math.max(0, afterOnline - dueReduction));
     return { validReturnValue, cashRefund: 0, onlineRefund, dueReduction, storeCreditIncrease: remainder };
+  }
+
+  if (mixedPaidCreditReturn) {
+    const dueReduction = roundCurrency(Math.min(toFiniteNonNegative(dueBefore), caps.maxDueReduction, validReturnValue));
+    const afterDue = roundCurrency(Math.max(0, validReturnValue - dueReduction));
+    const cashRefund = roundCurrency(Math.min(afterDue, caps.maxCashRefund));
+    const remainder = roundCurrency(Math.max(0, afterDue - cashRefund));
+    return { validReturnValue, cashRefund, onlineRefund: 0, dueReduction, storeCreditIncrease: remainder };
   }
 
   const cashRefund = roundCurrency(Math.min(validReturnValue, caps.maxCashRefund));
@@ -561,6 +583,46 @@ export const getCanonicalReturnAllocation = (
   return {
     mode,
     ...reconciliation,
+  };
+};
+export const getCanonicalReturnPreviewForDraft = (
+  transaction: Transaction,
+  customers: Customer[],
+  historicalTransactions: Transaction[]
+) => {
+  if (transaction.type !== 'return') {
+    return {
+      mode: 'refund_cash' as ReturnHandlingMode,
+      subtotal: 0,
+      total: 0,
+      dueBefore: 0,
+      dueAfter: 0,
+      storeCreditBefore: 0,
+      storeCreditAfter: 0,
+      dueReduction: 0,
+      cashRefund: 0,
+      onlineRefund: 0,
+      storeCreditCreated: 0,
+    };
+  }
+  const customer = transaction.customerId ? customers.find(c => c.id === transaction.customerId) : null;
+  const dueBefore = toFiniteNonNegative(customer?.totalDue);
+  const storeCreditBefore = toFiniteNonNegative(customer?.storeCredit);
+  const allocation = getCanonicalReturnAllocation(transaction, historicalTransactions, dueBefore);
+  const dueAfter = roundCurrency(Math.max(0, dueBefore - allocation.dueReduction));
+  const storeCreditAfter = roundCurrency(storeCreditBefore + allocation.storeCreditIncrease);
+  return {
+    mode: allocation.mode,
+    subtotal: roundCurrency(Math.abs(toFiniteNumber(transaction.total, 0))),
+    total: roundCurrency(allocation.validReturnValue),
+    dueBefore: roundCurrency(dueBefore),
+    dueAfter,
+    storeCreditBefore: roundCurrency(storeCreditBefore),
+    storeCreditAfter,
+    dueReduction: roundCurrency(allocation.dueReduction),
+    cashRefund: roundCurrency(allocation.cashRefund),
+    onlineRefund: roundCurrency(allocation.onlineRefund),
+    storeCreditCreated: roundCurrency(allocation.storeCreditIncrease),
   };
 };
 const getClampedStoreCreditUsed = (transaction: Transaction, customer: Customer) => {
@@ -2600,6 +2662,57 @@ const assertTransactionFinancials = (transaction: Transaction) => {
 
 const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
   if (transaction.type === 'payment') return;
+  if (transaction.type === 'return') {
+    const linkedSourceGroups = (transaction.items || []).reduce((acc, item) => {
+      if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return acc;
+      const key = `${item.sourceTransactionId}::${item.sourceLineCompositeKey}`;
+      acc.set(key, {
+        sourceTransactionId: item.sourceTransactionId,
+        sourceLineCompositeKey: item.sourceLineCompositeKey,
+        requestedQty: (acc.get(key)?.requestedQty || 0) + Math.max(0, Number(item.quantity) || 0),
+      });
+      return acc;
+    }, new Map<string, { sourceTransactionId: string; sourceLineCompositeKey: string; requestedQty: number }>());
+
+    linkedSourceGroups.forEach((group) => {
+      const sourceSaleTx = historicalTransactions.find(t => t.id === group.sourceTransactionId && t.type === 'sale');
+      if (!sourceSaleTx) {
+        failValidation('RETURN_SOURCE_TRANSACTION_NOT_FOUND', 'Selected source sale transaction for return line was not found.', {
+          sourceTransactionId: group.sourceTransactionId,
+          sourceLineCompositeKey: group.sourceLineCompositeKey,
+        });
+      }
+
+      const originalSourceLineQty = (sourceSaleTx.items || [])
+        .filter(item => getSourceLineCompositeKeyForItem(item) === group.sourceLineCompositeKey)
+        .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+
+      if (originalSourceLineQty <= 0) {
+        failValidation('RETURN_SOURCE_LINE_NOT_FOUND', 'Selected source sale line for return was not found.', {
+          sourceTransactionId: group.sourceTransactionId,
+          sourceLineCompositeKey: group.sourceLineCompositeKey,
+        });
+      }
+
+      const alreadyReturnedQtyForSourceLine = historicalTransactions
+        .filter(t => t.type === 'return')
+        .reduce((sum, tx) => sum + (tx.items || [])
+          .filter(item => item.sourceTransactionId === group.sourceTransactionId && item.sourceLineCompositeKey === group.sourceLineCompositeKey)
+          .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
+
+      const remainingQtyForSourceLine = Math.max(0, originalSourceLineQty - alreadyReturnedQtyForSourceLine);
+      if (group.requestedQty > (remainingQtyForSourceLine + MONEY_EPSILON)) {
+        failValidation('RETURN_EXCEEDS_SOURCE_LINE_REMAINING', 'Return quantity exceeds remaining returnable quantity for the selected bill line.', {
+          sourceTransactionId: group.sourceTransactionId,
+          sourceLineCompositeKey: group.sourceLineCompositeKey,
+          requestedQty: group.requestedQty,
+          originalSourceLineQty,
+          alreadyReturnedQtyForSourceLine,
+          remainingQtyForSourceLine,
+        });
+      }
+    });
+  }
   if (transaction.type === 'return' && transaction.customerId) {
     const caps = getCustomerReturnCaps(transaction, historicalTransactions);
     const requestedValue = Math.abs(toFiniteNumber(transaction.total, 0));

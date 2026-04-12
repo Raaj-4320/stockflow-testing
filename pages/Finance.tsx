@@ -17,8 +17,34 @@ type Expense = {
   createdAt: string;
 };
 
-type FinanceTabKey = 'dashboard' | 'cash' | 'expense' | 'credit' | 'profit';
+type FinanceTabKey = 'dashboard' | 'cashbook' | 'cash' | 'expense' | 'credit' | 'profit';
 type ExpenseDatePreset = 'today' | '7d' | '15d' | 'month' | 'custom';
+
+type CashbookRow = {
+  id: string;
+  date: string;
+  billNo: string;
+  type: 'sale' | 'payment' | 'return' | 'expense';
+  customer: string;
+  notes: string;
+  grossSales: number;
+  salesReturn: number;
+  netSales: number;
+  creditDueCreated: number;
+  onlineSale: number;
+  currentDueEffect: number;
+  currentStoreCreditEffect: number;
+  cashIn: number;
+  cashOut: number;
+  onlineIn: number;
+  onlineOut: number;
+  netCashEffect: number;
+  cogsEffect: number;
+  grossProfitEffect: number;
+  expense: number;
+  netProfitEffect: number;
+  effectSummary: string;
+};
 
 const dateKeyFromDate = (date: Date) => {
   const yyyy = date.getFullYear();
@@ -416,6 +442,10 @@ export default function Finance() {
 
   const [profitDate, setProfitDate] = useState(todayISO());
   const [profitMonth, setProfitMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [cashbookFromDate, setCashbookFromDate] = useState('');
+  const [cashbookToDate, setCashbookToDate] = useState('');
+  const [cashbookTypeFilter, setCashbookTypeFilter] = useState<'all' | 'sale' | 'payment' | 'return' | 'expense'>('all');
+  const [cashbookCustomerQuery, setCashbookCustomerQuery] = useState('');
 
   const refreshData = () => setData(loadData());
 
@@ -790,6 +820,196 @@ export default function Finance() {
     return { totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit };
   }, [data.customers, data.transactions]);
 
+  const cashbookRows = useMemo(() => {
+    const parseTime = (iso: string) => {
+      const parsed = new Date(iso).getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const events: Array<{ date: string; kind: 'tx' | 'expense'; tx?: Transaction; expense?: Expense }> = [
+      ...data.transactions.map(tx => ({ date: tx.date, kind: 'tx' as const, tx })),
+      ...expenses.map(expense => ({ date: expense.createdAt, kind: 'expense' as const, expense })),
+    ].sort((a, b) => parseTime(a.date) - parseTime(b.date));
+
+    let runningDue = 0;
+    const rows: CashbookRow[] = [];
+
+    events.forEach((event) => {
+      if (event.kind === 'expense' && event.expense) {
+        const expense = event.expense;
+        rows.push({
+          id: `expense-${expense.id}`,
+          date: expense.createdAt,
+          billNo: expense.id,
+          type: 'expense',
+          customer: '—',
+          notes: `${expense.title} (${expense.category})`,
+          grossSales: 0,
+          salesReturn: 0,
+          netSales: 0,
+          creditDueCreated: 0,
+          onlineSale: 0,
+          currentDueEffect: 0,
+          currentStoreCreditEffect: 0,
+          cashIn: 0,
+          cashOut: expense.amount,
+          onlineIn: 0,
+          onlineOut: 0,
+          netCashEffect: -expense.amount,
+          cogsEffect: 0,
+          grossProfitEffect: 0,
+          expense: expense.amount,
+          netProfitEffect: -expense.amount,
+          effectSummary: 'Expense cash out',
+        });
+        return;
+      }
+      if (!event.tx) return;
+      const tx = event.tx;
+      const txAmount = Math.abs(tx.total || 0);
+      const cogsAmount = tx.items.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0);
+      if (tx.type === 'sale') {
+        const settlement = getSaleSettlementBreakdown(tx);
+        const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+        runningDue = Math.max(0, runningDue + settlement.creditDue);
+        rows.push({
+          id: `tx-${tx.id}`,
+          date: tx.date,
+          billNo: tx.id,
+          type: 'sale',
+          customer: tx.customerName || 'Walk-in customer',
+          notes: `Cash ₹${settlement.cashPaid.toFixed(2)} • Online ₹${settlement.onlinePaid.toFixed(2)} • Credit Due ₹${settlement.creditDue.toFixed(2)}`,
+          grossSales: txAmount,
+          salesReturn: 0,
+          netSales: txAmount,
+          creditDueCreated: settlement.creditDue,
+          onlineSale: settlement.onlinePaid,
+          currentDueEffect: settlement.creditDue,
+          currentStoreCreditEffect: -storeCreditUsed,
+          cashIn: settlement.cashPaid,
+          cashOut: 0,
+          onlineIn: settlement.onlinePaid,
+          onlineOut: 0,
+          netCashEffect: settlement.cashPaid,
+          cogsEffect: cogsAmount,
+          grossProfitEffect: txAmount - cogsAmount,
+          expense: 0,
+          netProfitEffect: txAmount - cogsAmount,
+          effectSummary: settlement.creditDue > 0 ? 'Credit sale created due' : (settlement.onlinePaid > 0 ? 'Sale paid online/cash' : 'Cash sale'),
+        });
+        return;
+      }
+      if (tx.type === 'payment') {
+        const paymentToDue = Math.min(runningDue, txAmount);
+        const storeCreditIncrease = Math.max(0, txAmount - paymentToDue);
+        runningDue = Math.max(0, runningDue - paymentToDue);
+        const cashIn = tx.paymentMethod === 'Cash' ? txAmount : 0;
+        const onlineIn = tx.paymentMethod === 'Online' ? txAmount : 0;
+        rows.push({
+          id: `tx-${tx.id}`,
+          date: tx.date,
+          billNo: tx.id,
+          type: 'payment',
+          customer: tx.customerName || '—',
+          notes: `${tx.paymentMethod || 'Cash'} collection`,
+          grossSales: 0,
+          salesReturn: 0,
+          netSales: 0,
+          creditDueCreated: 0,
+          onlineSale: 0,
+          currentDueEffect: -paymentToDue,
+          currentStoreCreditEffect: storeCreditIncrease,
+          cashIn,
+          cashOut: 0,
+          onlineIn,
+          onlineOut: 0,
+          netCashEffect: cashIn,
+          cogsEffect: 0,
+          grossProfitEffect: 0,
+          expense: 0,
+          netProfitEffect: 0,
+          effectSummary: 'Collection against due',
+        });
+        return;
+      }
+      const historicalTransactions = data.transactions
+        .filter(candidate => resolveTransactionTimeForSession(candidate) < resolveTransactionTimeForSession(tx)
+          || (resolveTransactionTimeForSession(candidate) === resolveTransactionTimeForSession(tx) && candidate.id !== tx.id))
+        .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
+      const allocation = getCanonicalReturnAllocation(tx, historicalTransactions, runningDue);
+      runningDue = Math.max(0, runningDue - allocation.dueReduction);
+      rows.push({
+        id: `tx-${tx.id}`,
+        date: tx.date,
+        billNo: tx.id,
+        type: 'return',
+        customer: tx.customerName || '—',
+        notes: `Mode: ${allocation.mode}`,
+        grossSales: 0,
+        salesReturn: txAmount,
+        netSales: -txAmount,
+        creditDueCreated: 0,
+        onlineSale: 0,
+        currentDueEffect: -allocation.dueReduction,
+        currentStoreCreditEffect: allocation.storeCreditIncrease,
+        cashIn: 0,
+        cashOut: allocation.cashRefund,
+        onlineIn: 0,
+        onlineOut: allocation.onlineRefund,
+        netCashEffect: -allocation.cashRefund,
+        cogsEffect: -cogsAmount,
+        grossProfitEffect: -txAmount + cogsAmount,
+        expense: 0,
+        netProfitEffect: -txAmount + cogsAmount,
+        effectSummary: allocation.cashRefund > 0
+          ? 'Return cash refund'
+          : allocation.onlineRefund > 0
+            ? 'Return online refund'
+            : allocation.storeCreditIncrease > 0
+              ? 'Return created store credit'
+              : 'Return reduced due',
+      });
+    });
+    return rows;
+  }, [data.transactions, expenses]);
+
+  const filteredCashbookRows = useMemo(() => {
+    const fromTime = cashbookFromDate ? new Date(`${cashbookFromDate}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
+    const toTime = cashbookToDate ? new Date(`${cashbookToDate}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+    const query = cashbookCustomerQuery.trim().toLowerCase();
+    return cashbookRows.filter(row => {
+      const time = new Date(row.date).getTime();
+      if (!Number.isFinite(time) || time < fromTime || time > toTime) return false;
+      if (cashbookTypeFilter !== 'all' && row.type !== cashbookTypeFilter) return false;
+      if (query && !row.customer.toLowerCase().includes(query) && !row.billNo.toLowerCase().includes(query)) return false;
+      return true;
+    });
+  }, [cashbookRows, cashbookFromDate, cashbookToDate, cashbookTypeFilter, cashbookCustomerQuery]);
+
+  const cashbookRollups = useMemo(() => {
+    return filteredCashbookRows.reduce((acc, row) => {
+      acc.cashIn += row.cashIn;
+      acc.cashOut += row.cashOut;
+      acc.onlineIn += row.onlineIn;
+      acc.onlineOut += row.onlineOut;
+      acc.grossSales += row.grossSales;
+      acc.salesReturns += row.salesReturn;
+      acc.creditDueCreated += row.creditDueCreated;
+      acc.grossProfit += row.grossProfitEffect;
+      acc.netProfit += row.netProfitEffect;
+      return acc;
+    }, {
+      cashIn: 0,
+      cashOut: 0,
+      onlineIn: 0,
+      onlineOut: 0,
+      grossSales: 0,
+      salesReturns: 0,
+      creditDueCreated: 0,
+      grossProfit: 0,
+      netProfit: 0,
+    });
+  }, [filteredCashbookRows]);
+
   const persistState = async (newState: AppState) => {
     try {
       await saveData(newState, { throwOnError: true, reason: 'finance.persistState' });
@@ -1149,6 +1369,7 @@ export default function Finance() {
 
   const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
     { key: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="w-4 h-4" /> },
+    { key: 'cashbook', label: 'Cashbook', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'credit', label: 'Credit Management', icon: <DollarSign className="w-4 h-4" /> },
@@ -1160,7 +1381,7 @@ export default function Finance() {
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
-          <p className="text-sm text-slate-600">Manage cash sessions, expenses, customer credit, and profit summary.</p>
+          <p className="text-sm text-slate-600">Track sale-time KPIs, live balances, cash movement, profitability, and transaction-level cashbook effects.</p>
         </div>
 
         {errors && (
@@ -1192,37 +1413,36 @@ export default function Finance() {
             <Card className="border-slate-200 shadow-sm">
               <CardHeader>
                 <CardTitle>Finance Dashboard (Current Window)</CardTitle>
+                <p className="text-xs text-muted-foreground">Sections are separated by accounting meaning: sale-time activity, live balances, cash movement, and profitability.</p>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue / Sale-time activity</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
                     <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
+                    <StatCard label="Credit Due Created" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
+                    <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Profitability (P&L)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
                     <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Cash Movement / Cashbook (operational)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
                     <StatCard label="Cash Collections" value={formatINR(todayFinanceBreakdown.cashCollections)} />
                     <StatCard label="Online Collections" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
                     <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Expenses (cash outflow)" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Net Cash Movement" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
                   </div>
                 </div>
@@ -1236,9 +1456,9 @@ export default function Finance() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Due / store credit summary</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Current balances (live state)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Current Due Total" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Current Due (Outstanding)" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Current Store Credit Total" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
                   </div>
                 </div>
@@ -1283,6 +1503,116 @@ export default function Finance() {
           </div>
         )}
 
+        {activeTab === 'cashbook' && (
+          <div className="space-y-4">
+            <Card className="border-slate-200 shadow-sm">
+              <CardHeader>
+                <CardTitle>Cashbook (Accountant Audit View)</CardTitle>
+                <p className="text-xs text-muted-foreground">Invoice/event level effects across revenue, live balances, cash movement, and profitability.</p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                  <StatCard label="Opening Balance" value={formatINR(openSession?.openingBalance ?? latestCarryForwardSession?.closingBalance ?? 0)} />
+                  <StatCard label="Cash In Total" value={formatINR(cashbookRollups.cashIn)} />
+                  <StatCard label="Cash Out Total" value={formatINR(cashbookRollups.cashOut)} tone={cashbookRollups.cashOut > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Online In Total" value={formatINR(cashbookRollups.onlineIn)} />
+                  <StatCard label="Online Out Total" value={formatINR(cashbookRollups.onlineOut)} tone={cashbookRollups.onlineOut > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Cash Effect" value={formatINR(cashbookRollups.cashIn - cashbookRollups.cashOut)} tone={(cashbookRollups.cashIn - cashbookRollups.cashOut) >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Gross Sales" value={formatINR(cashbookRollups.grossSales)} />
+                  <StatCard label="Returns" value={formatINR(cashbookRollups.salesReturns)} tone={cashbookRollups.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Credit Due Created" value={formatINR(cashbookRollups.creditDueCreated)} />
+                  <StatCard label="Current Due" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Current Store Credit" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
+                  <StatCard label="Net Profit Effect" value={formatINR(cashbookRollups.netProfit)} tone={cashbookRollups.netProfit >= 0 ? 'good' : 'bad'} />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                  <Input type="date" value={cashbookFromDate} onChange={e => setCashbookFromDate(e.target.value)} />
+                  <Input type="date" value={cashbookToDate} onChange={e => setCashbookToDate(e.target.value)} />
+                  <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={cashbookTypeFilter} onChange={e => setCashbookTypeFilter(e.target.value as 'all' | 'sale' | 'payment' | 'return' | 'expense')}>
+                    <option value="all">All Types</option>
+                    <option value="sale">Sale</option>
+                    <option value="payment">Payment</option>
+                    <option value="return">Return</option>
+                    <option value="expense">Expense</option>
+                  </select>
+                  <Input placeholder="Search customer or bill no" value={cashbookCustomerQuery} onChange={e => setCashbookCustomerQuery(e.target.value)} className="md:col-span-2" />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-200 shadow-sm">
+              <CardHeader>
+                <CardTitle>Transaction-by-transaction KPI Effect Table</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-auto border rounded-lg">
+                  <table className="min-w-[1900px] w-full text-xs">
+                    <thead className="bg-muted/40">
+                      <tr>
+                        <th className="p-2 text-left">Date</th>
+                        <th className="p-2 text-left">Bill No</th>
+                        <th className="p-2 text-left">Type</th>
+                        <th className="p-2 text-left">Customer</th>
+                        <th className="p-2 text-left">Notes / Settlement</th>
+                        <th className="p-2 text-right">Gross Sales</th>
+                        <th className="p-2 text-right">Sales Return</th>
+                        <th className="p-2 text-right">Net Sales</th>
+                        <th className="p-2 text-right">Credit Due Created</th>
+                        <th className="p-2 text-right">Online Sale</th>
+                        <th className="p-2 text-right">Current Due Effect</th>
+                        <th className="p-2 text-right">Store Credit Effect</th>
+                        <th className="p-2 text-right">Cash In</th>
+                        <th className="p-2 text-right">Cash Out</th>
+                        <th className="p-2 text-right">Online In</th>
+                        <th className="p-2 text-right">Online Out</th>
+                        <th className="p-2 text-right">Net Cash Effect</th>
+                        <th className="p-2 text-right">COGS Effect</th>
+                        <th className="p-2 text-right">Gross Profit Effect</th>
+                        <th className="p-2 text-right">Expense</th>
+                        <th className="p-2 text-right">Net Profit Effect</th>
+                        <th className="p-2 text-left">Effect Summary</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredCashbookRows.map(row => (
+                        <tr key={row.id} className="border-t">
+                          <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
+                          <td className="p-2 font-medium whitespace-nowrap">#{row.billNo}</td>
+                          <td className="p-2 uppercase">{row.type}</td>
+                          <td className="p-2">{row.customer}</td>
+                          <td className="p-2">{row.notes}</td>
+                          <td className="p-2 text-right">{formatINR(row.grossSales)}</td>
+                          <td className="p-2 text-right">{formatINR(row.salesReturn)}</td>
+                          <td className="p-2 text-right">{formatINR(row.netSales)}</td>
+                          <td className="p-2 text-right">{formatINR(row.creditDueCreated)}</td>
+                          <td className="p-2 text-right">{formatINR(row.onlineSale)}</td>
+                          <td className="p-2 text-right">{formatINR(row.currentDueEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.currentStoreCreditEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.cashIn)}</td>
+                          <td className="p-2 text-right">{formatINR(row.cashOut)}</td>
+                          <td className="p-2 text-right">{formatINR(row.onlineIn)}</td>
+                          <td className="p-2 text-right">{formatINR(row.onlineOut)}</td>
+                          <td className="p-2 text-right">{formatINR(row.netCashEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.cogsEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.grossProfitEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.expense)}</td>
+                          <td className="p-2 text-right">{formatINR(row.netProfitEffect)}</td>
+                          <td className="p-2">{row.effectSummary}</td>
+                        </tr>
+                      ))}
+                      {!filteredCashbookRows.length && (
+                        <tr>
+                          <td className="p-4 text-center text-muted-foreground" colSpan={22}>No cashbook rows for selected filters.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
         {activeTab === 'cash' && (
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1305,7 +1635,7 @@ export default function Finance() {
                       <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
                       <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
                       <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
-                      <StatCard label="Credit Due Created" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
+                      <StatCard label="Credit Due Created (at sale)" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
                       <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
                     </div>
                   </div>
