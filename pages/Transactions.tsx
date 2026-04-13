@@ -2,9 +2,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer, DeletedTransactionRecord } from '../types';
+import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
-import { getDeleteTransactionPreview, getSaleSettlementBreakdown, loadData, deleteTransaction, updateTransaction } from '../services/storage';
+import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, loadData, deleteTransaction, updateTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
@@ -18,6 +18,7 @@ export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [deletedTransactions, setDeletedTransactions] = useState<DeletedTransactionRecord[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -35,6 +36,13 @@ export default function Transactions() {
   const [editingTxDate, setEditingTxDate] = useState('');
   const [editingTxPaymentMethod, setEditingTxPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
   const [editingTxNotes, setEditingTxNotes] = useState('');
+  const [editingCustomerId, setEditingCustomerId] = useState('');
+  const [editingItems, setEditingItems] = useState<CartItem[]>([]);
+  const [editingCashPaid, setEditingCashPaid] = useState('');
+  const [editingOnlinePaid, setEditingOnlinePaid] = useState('');
+  const [editingCreditDue, setEditingCreditDue] = useState('');
+  const [editingReturnMode, setEditingReturnMode] = useState<'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit'>('refund_cash');
+  const [newSaleProductId, setNewSaleProductId] = useState('');
   const [editingError, setEditingError] = useState<string | null>(null);
   const [isSavingTransaction, setIsSavingTransaction] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -78,6 +86,7 @@ export default function Transactions() {
         setTransactions(data.transactions);
         setDeletedTransactions(data.deletedTransactions || []);
         setCustomers(data.customers);
+        setProducts(data.products || []);
         setLoadError(null);
       } catch (error) {
         console.error('[transactions] load failed', error);
@@ -215,13 +224,41 @@ export default function Transactions() {
   const allFilteredTransactionsSelected = filteredTransactions.length > 0 && filteredTransactions.every(tx => selectedTransactionIds.includes(tx.id));
   const isBatchEditing = batchEditTransactionIds.length > 0;
   const remainingBatchTransactions = isBatchEditing ? Math.max(0, batchEditTransactionIds.length - batchEditTransactionIndex - 1) : 0;
+  const toSafeMoney = (value: unknown) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 0;
+    return Math.max(0, num);
+  };
+  const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+  const getDerivedPaymentMethodForSale = (cashPaid: number, onlinePaid: number, creditDue: number): 'Cash' | 'Credit' | 'Online' => {
+    if (creditDue > 0) return 'Credit';
+    if (onlinePaid > 0 && cashPaid <= 0) return 'Online';
+    return 'Cash';
+  };
+  const getEditedSubtotal = () => roundMoney(editingItems.reduce((sum, item) => sum + (toSafeMoney(item.quantity) * toSafeMoney(item.sellPrice)), 0));
+  const getEditedDiscount = () => roundMoney(editingTx?.discount || 0);
+  const getEditedTaxRate = () => Number.isFinite(Number(editingTx?.taxRate)) ? Number(editingTx?.taxRate || 0) : 0;
+  const getEditedTax = () => roundMoney(Math.max(0, getEditedSubtotal() - getEditedDiscount()) * (getEditedTaxRate() / 100));
+  const getEditedTotal = () => {
+    if (!editingTx) return 0;
+    const unsigned = roundMoney(Math.max(0, getEditedSubtotal() - getEditedDiscount()) + getEditedTax());
+    return editingTx.type === 'return' ? -unsigned : unsigned;
+  };
 
   const openTransactionEditor = (tx: Transaction) => {
+    const settlement = getSaleSettlementBreakdown(tx);
     setEditingTx(tx);
     setEditingAmount(String(Math.abs(tx.total || 0)));
     setEditingTxDate(tx.date ? toLocalDateTimeInputValue(tx.date) : '');
     setEditingTxPaymentMethod((tx.paymentMethod || 'Cash') as 'Cash' | 'Credit' | 'Online');
     setEditingTxNotes(tx.notes || '');
+    setEditingCustomerId(tx.customerId || '');
+    setEditingItems((tx.items || []).map(item => ({ ...item })));
+    setEditingCashPaid(String(settlement.cashPaid || 0));
+    setEditingOnlinePaid(String(settlement.onlinePaid || 0));
+    setEditingCreditDue(String(settlement.creditDue || 0));
+    setEditingReturnMode(tx.returnHandlingMode || 'refund_cash');
+    setNewSaleProductId('');
     setEditingError(null);
   };
 
@@ -231,6 +268,12 @@ export default function Transactions() {
     setBatchEditTransactionIndex(0);
     setEditingError(null);
     setIsSavingTransaction(false);
+    setEditingItems([]);
+    setEditingCustomerId('');
+    setEditingCashPaid('');
+    setEditingOnlinePaid('');
+    setEditingCreditDue('');
+    setNewSaleProductId('');
   };
 
   const handleToggleTransactionSelection = (transactionId: string) => {
@@ -264,6 +307,30 @@ export default function Transactions() {
     });
     setTransactions(nextTransactions);
     setSelectedTransactionIds([]);
+  };
+
+  const updateEditingItem = (index: number, patch: Partial<CartItem>) => {
+    setEditingItems(prev => prev.map((item, i) => i === index ? { ...item, ...patch } : item));
+  };
+
+  const removeEditingItem = (index: number) => {
+    setEditingItems(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const addSaleLine = () => {
+    if (!newSaleProductId || !editingTx || editingTx.type !== 'sale') return;
+    const product = products.find(p => p.id === newSaleProductId);
+    if (!product) return;
+    const line: CartItem = {
+      ...product,
+      quantity: 1,
+      sellPrice: product.sellPrice || 0,
+      buyPrice: product.buyPrice || 0,
+      selectedVariant: product.variants?.[0] || NO_VARIANT,
+      selectedColor: product.colors?.[0] || NO_COLOR,
+    };
+    setEditingItems(prev => [...prev, line]);
+    setNewSaleProductId('');
   };
 
   const deletePreview = useMemo(
@@ -306,20 +373,64 @@ export default function Transactions() {
       setIsSavingTransaction(true);
       const nextDate = editingTxDate ? new Date(editingTxDate).toISOString() : editingTx.date;
       const nextNotes = editingTxNotes.trim();
-      let nextTransaction: Transaction = {
-        ...editingTx,
-        date: nextDate,
-        paymentMethod: editingTxPaymentMethod,
-        notes: nextNotes,
-      };
+      const selectedCustomer = customers.find(c => c.id === editingCustomerId);
+      const customerId = selectedCustomer?.id;
+      const customerName = selectedCustomer?.name;
+      let nextTransaction: Transaction = { ...editingTx, date: nextDate, notes: nextNotes, customerId, customerName };
 
-      if (editingTx.type === 'payment') {
+      if (editingTx.type === 'sale') {
+        if (!editingItems.length) {
+          setEditingError('Sale must include at least one line item.');
+          return;
+        }
+        const cashPaid = roundMoney(toSafeMoney(editingCashPaid));
+        const onlinePaid = roundMoney(toSafeMoney(editingOnlinePaid));
+        const creditDue = roundMoney(toSafeMoney(editingCreditDue));
+        const total = Math.abs(getEditedTotal());
+        if (Math.abs((cashPaid + onlinePaid + creditDue) - total) > 0.01) {
+          setEditingError('Cash + Online + Credit Due must match edited sale total.');
+          return;
+        }
+        if (creditDue > 0 && !customerId) {
+          setEditingError('Customer is required when credit due is present.');
+          return;
+        }
+        nextTransaction = {
+          ...nextTransaction,
+          items: editingItems.map(item => ({ ...item, quantity: Math.max(1, Number(item.quantity) || 1), sellPrice: toSafeMoney(item.sellPrice) })),
+          subtotal: getEditedSubtotal(),
+          discount: getEditedDiscount(),
+          taxRate: getEditedTaxRate(),
+          tax: getEditedTax(),
+          total,
+          saleSettlement: { cashPaid, onlinePaid, creditDue },
+          paymentMethod: getDerivedPaymentMethodForSale(cashPaid, onlinePaid, creditDue),
+        };
+      } else if (editingTx.type === 'return') {
+        if (!editingItems.length) {
+          setEditingError('Return must include at least one line item.');
+          return;
+        }
+        const sanitizedItems = editingItems.map(item => ({ ...item, quantity: Math.max(1, Number(item.quantity) || 1), sellPrice: toSafeMoney(item.sellPrice) }));
+        nextTransaction = {
+          ...nextTransaction,
+          items: sanitizedItems,
+          subtotal: getEditedSubtotal(),
+          discount: getEditedDiscount(),
+          taxRate: getEditedTaxRate(),
+          tax: getEditedTax(),
+          total: -Math.abs(getEditedTotal()),
+          returnHandlingMode: editingReturnMode,
+          paymentMethod: editingReturnMode === 'refund_online' ? 'Online' : editingReturnMode === 'refund_cash' ? 'Cash' : 'Credit',
+          saleSettlement: undefined,
+        };
+      } else if (editingTx.type === 'payment') {
         const amt = Number(editingAmount || 0);
         if (!Number.isFinite(amt) || amt <= 0) {
           setEditingError('Please enter a valid payment amount.');
           return;
         }
-        nextTransaction = { ...nextTransaction, total: Math.abs(amt) };
+        nextTransaction = { ...nextTransaction, total: Math.abs(amt), paymentMethod: editingTxPaymentMethod };
       }
 
       const nextTransactions = await updateTransaction(nextTransaction);
@@ -346,6 +457,25 @@ export default function Transactions() {
       setIsSavingTransaction(false);
     }
   };
+
+  const editingReturnPreview = useMemo(() => {
+    if (!editingTx || editingTx.type !== 'return') return null;
+    const selectedCustomer = customers.find(c => c.id === editingCustomerId);
+    const draft: Transaction = {
+      ...editingTx,
+      items: editingItems,
+      customerId: selectedCustomer?.id,
+      customerName: selectedCustomer?.name,
+      subtotal: getEditedSubtotal(),
+      discount: getEditedDiscount(),
+      taxRate: getEditedTaxRate(),
+      tax: getEditedTax(),
+      total: -Math.abs(getEditedTotal()),
+      returnHandlingMode: editingReturnMode,
+      paymentMethod: editingReturnMode === 'refund_online' ? 'Online' : editingReturnMode === 'refund_cash' ? 'Cash' : 'Credit',
+    };
+    return getCanonicalReturnPreviewForDraft(draft, customers, transactions);
+  }, [editingTx, editingItems, editingCustomerId, editingReturnMode, customers, transactions]);
 
   const stats = useMemo(() => {
       let totalRevenue = 0;
@@ -1370,23 +1500,114 @@ export default function Transactions() {
                 <Input type="datetime-local" value={editingTxDate} onChange={e => setEditingTxDate(e.target.value)} />
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Method</label>
-                <Select value={editingTxPaymentMethod} onChange={e => setEditingTxPaymentMethod(e.target.value as 'Cash' | 'Credit' | 'Online')}>
-                  <option value="Cash">Cash</option>
-                  <option value="Credit">Credit</option>
-                  <option value="Online">Online</option>
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Customer</label>
+                <Select value={editingCustomerId || ''} onChange={e => setEditingCustomerId(e.target.value)}>
+                  <option value="">Walk-in</option>
+                  {customers.map(customer => (
+                    <option key={customer.id} value={customer.id}>{customer.name} ({customer.phone})</option>
+                  ))}
                 </Select>
               </div>
+              {editingTx.type === 'sale' && (
+                <div className="space-y-2 border rounded-md p-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Sale Lines</label>
+                  {editingItems.map((item, index) => (
+                    <div key={`${item.id}-${index}`} className="grid grid-cols-[minmax(0,1fr)_72px_88px_30px] gap-1 items-center">
+                      <div className="text-xs truncate">{item.name}</div>
+                      <Input type="number" min="1" value={item.quantity} onChange={e => updateEditingItem(index, { quantity: Math.max(1, Number(e.target.value || 1)) })} />
+                      <Input type="number" min="0" step="0.01" value={item.sellPrice} onChange={e => updateEditingItem(index, { sellPrice: toSafeMoney(e.target.value) })} />
+                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeEditingItem(index)}>✕</Button>
+                    </div>
+                  ))}
+                  <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-1">
+                    <Select value={newSaleProductId} onChange={e => setNewSaleProductId(e.target.value)}>
+                      <option value="">Add product…</option>
+                      {products.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}
+                    </Select>
+                    <Button type="button" variant="outline" onClick={addSaleLine}>Add Line</Button>
+                  </div>
+                </div>
+              )}
+              {editingTx.type === 'return' && (
+                <div className="space-y-2 border rounded-md p-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Return Lines</label>
+                  {editingItems.map((item, index) => (
+                    <div key={`${item.id}-${index}`} className="grid grid-cols-[minmax(0,1fr)_72px_88px_30px] gap-1 items-center">
+                      <div className="text-xs truncate">{item.name}</div>
+                      <Input type="number" min="1" value={item.quantity} onChange={e => updateEditingItem(index, { quantity: Math.max(1, Number(e.target.value || 1)) })} />
+                      <Input type="number" min="0" step="0.01" value={item.sellPrice} onChange={e => updateEditingItem(index, { sellPrice: toSafeMoney(e.target.value) })} />
+                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeEditingItem(index)}>✕</Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {editingTx.type === 'sale' && (
+                <div className="space-y-2 border rounded-md p-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Settlement Split</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Input type="number" min="0" step="0.01" value={editingCashPaid} onChange={e => setEditingCashPaid(e.target.value)} placeholder="Cash" />
+                    <Input type="number" min="0" step="0.01" value={editingOnlinePaid} onChange={e => setEditingOnlinePaid(e.target.value)} placeholder="Online" />
+                    <Input type="number" min="0" step="0.01" value={editingCreditDue} onChange={e => setEditingCreditDue(e.target.value)} placeholder="Credit due" />
+                  </div>
+                  <div className="text-xs text-muted-foreground">Edited total: ₹{formatMoneyPrecise(Math.abs(getEditedTotal()))}</div>
+                </div>
+              )}
+              {editingTx.type === 'return' && (
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Return Handling</label>
+                  <Select value={editingReturnMode} onChange={e => setEditingReturnMode(e.target.value as 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit')}>
+                    <option value="refund_cash">Refund Cash</option>
+                    <option value="refund_online">Refund Online</option>
+                    <option value="reduce_due">Reduce Due</option>
+                    <option value="store_credit">Store Credit</option>
+                  </Select>
+                </div>
+              )}
               {editingTx.type === 'payment' && (
                 <div className="space-y-2">
                   <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Amount</label>
                   <Input type="number" value={editingAmount} onChange={e => setEditingAmount(e.target.value)} placeholder="Amount" />
                 </div>
               )}
+              {editingTx.type === 'payment' && (
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Method</label>
+                  <Select value={editingTxPaymentMethod} onChange={e => setEditingTxPaymentMethod(e.target.value as 'Cash' | 'Credit' | 'Online')}>
+                    <option value="Cash">Cash</option>
+                    <option value="Online">Online</option>
+                  </Select>
+                </div>
+              )}
               <div className="space-y-2">
                 <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Notes</label>
                 <Input value={editingTxNotes} onChange={e => setEditingTxNotes(e.target.value)} placeholder="Notes" />
               </div>
+              {editingTx.type === 'return' && editingReturnPreview && (
+                <div className="rounded-md border bg-muted/20 p-2 text-xs space-y-1">
+                  <div className="font-semibold">Return Impact Preview</div>
+                  <div>Due: ₹{formatMoneyPrecise(editingReturnPreview.dueBefore)} → ₹{formatMoneyPrecise(editingReturnPreview.dueAfter)}</div>
+                  <div>Store Credit: ₹{formatMoneyPrecise(editingReturnPreview.storeCreditBefore)} → ₹{formatMoneyPrecise(editingReturnPreview.storeCreditAfter)}</div>
+                  <div>Cash Refund: ₹{formatMoneyPrecise(editingReturnPreview.cashRefund)} • Online Refund: ₹{formatMoneyPrecise(editingReturnPreview.onlineRefund)}</div>
+                </div>
+              )}
+              {editingTx.type === 'sale' && (
+                <div className="rounded-md border bg-muted/20 p-2 text-xs space-y-1">
+                  <div className="font-semibold">Sale Impact Preview</div>
+                  <div>Subtotal: ₹{formatMoneyPrecise(getEditedSubtotal())} • Total: ₹{formatMoneyPrecise(Math.abs(getEditedTotal()))}</div>
+                  <div>Cash: ₹{formatMoneyPrecise(toSafeMoney(editingCashPaid))} • Online: ₹{formatMoneyPrecise(toSafeMoney(editingOnlinePaid))} • Credit: ₹{formatMoneyPrecise(toSafeMoney(editingCreditDue))}</div>
+                </div>
+              )}
+              {editingTx.type === 'payment' && (
+                <div className="rounded-md border bg-muted/20 p-2 text-xs space-y-1">
+                  <div className="font-semibold">Payment Impact Preview</div>
+                  <div>Collection: ₹{formatMoneyPrecise(Number(editingAmount || 0))} via {editingTxPaymentMethod}</div>
+                  {editingCustomerId && (() => {
+                    const currentDue = customers.find(c => c.id === editingCustomerId)?.totalDue || 0;
+                    const dueAfter = Math.max(0, currentDue - Math.max(0, Number(editingAmount || 0)));
+                    return <div>Due: ₹{formatMoneyPrecise(currentDue)} → ₹{formatMoneyPrecise(dueAfter)}</div>;
+                  })()}
+                </div>
+              )}
               <div className="flex gap-2">
                 <Button variant="outline" onClick={closeTransactionEditor} disabled={isSavingTransaction}>Cancel</Button>
                 <Button variant="outline" onClick={() => void handleSaveTransaction(true)} disabled={isSavingTransaction}>
