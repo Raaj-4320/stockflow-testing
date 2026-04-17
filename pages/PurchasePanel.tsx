@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder } from '../services/storage';
+import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, updatePurchaseOrder } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -119,6 +119,10 @@ export default function PurchasePanel() {
 
   const [partyId, setPartyId] = useState('');
   const [notes, setNotes] = useState('');
+  const [billNumber, setBillNumber] = useState('');
+  const [billDate, setBillDate] = useState('');
+  const [gstPercent, setGstPercent] = useState<number | ''>('');
+  const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
   const [pricingEntries, setPricingEntries] = useState<Record<string, DraftLine>>({});
 
   const [newPartyName, setNewPartyName] = useState('');
@@ -226,6 +230,10 @@ export default function PurchasePanel() {
     setNewProductImage('');
     setPartyId('');
     setNotes('');
+    setBillNumber('');
+    setBillDate('');
+    setGstPercent('');
+    setEditingOrderId(null);
     setPricingEntries({});
   };
 
@@ -317,28 +325,100 @@ export default function PurchasePanel() {
     }));
 
     const now = new Date().toISOString();
+    const taxableAmount = lines.reduce((s, l) => s + l.totalCost, 0);
+    const gstRate = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
+    const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
     const order: PurchaseOrder = {
-      id: `po-${uid()}`,
+      id: editingOrderId || `po-${uid()}`,
       partyId: party.id,
       partyName: party.name,
       partyPhone: party.phone,
       partyGst: party.gst,
       partyLocation: party.location,
+      billNumber: billNumber.trim() || undefined,
+      billDate: billDate || undefined,
+      gstPercent: gstRate,
+      taxableAmount,
+      gstAmount,
       status: 'ordered',
       orderDate: now,
       notes: notes.trim() || undefined,
       lines,
       totalQuantity: lines.reduce((s, l) => s + l.quantity, 0),
-      totalAmount: lines.reduce((s, l) => s + l.totalCost, 0),
+      totalAmount: taxableAmount + gstAmount,
       receivedQuantity: 0,
-      createdAt: now,
+      createdAt: editingOrderId ? (orders.find(o => o.id === editingOrderId)?.createdAt || now) : now,
       updatedAt: now,
     };
 
-    await createPurchaseOrder(order);
+    if (editingOrderId) await updatePurchaseOrder(order);
+    else await createPurchaseOrder(order);
     setIsModalOpen(false);
     resetWizard();
     refresh();
+  };
+
+  const editOrder = (order: PurchaseOrder) => {
+    const first = order.lines[0];
+    if (!first) return;
+    setEditingOrderId(order.id);
+    setPartyId(order.partyId);
+    setNotes(order.notes || '');
+    setBillNumber(order.billNumber || '');
+    setBillDate(order.billDate ? order.billDate.slice(0, 10) : '');
+    setGstPercent(order.gstPercent ?? '');
+    setPricingEntries({});
+
+    if (first.sourceType === 'inventory' && first.productId) {
+      const product = products.find(p => p.id === first.productId) || null;
+      if (!product) return;
+      setSourceMode('inventory');
+      setSelectedProduct(product);
+
+      const rowMap = new Map<string, { key: string; variant?: string; color?: string; stock: number; label: string }>();
+      getProductStockRows(product).forEach((row, idx) => {
+        const key = `${product.id}-${idx}-${row.variant}-${row.color}`;
+        rowMap.set(`${row.variant || ''}__${row.color || ''}`, { key, variant: row.variant, color: row.color, stock: row.stock, label: `${row.variant} / ${row.color}` });
+      });
+      const selectedKeys: string[] = [];
+      const seeded: Record<string, DraftLine> = {};
+      order.lines.forEach((line) => {
+        const mapKey = `${line.variant || ''}__${line.color || ''}`;
+        const row = rowMap.get(mapKey);
+        if (!row) return;
+        selectedKeys.push(row.key);
+        seeded[row.key] = {
+          key: row.key,
+          label: row.label,
+          stock: row.stock,
+          variant: row.variant,
+          color: row.color,
+          quantity: line.quantity,
+          unitCost: line.unitCost,
+        };
+      });
+      setSelectedVariantKeys(selectedKeys);
+      setPricingEntries(seeded);
+    } else {
+      setSourceMode('new');
+      setNewProductName(first.productName || '');
+      setNewProductCategory(first.category || '');
+      setNewProductImage(first.image || '');
+      setPricingEntries({
+        'new-default': {
+          key: 'new-default',
+          label: 'Default',
+          stock: 0,
+          quantity: first.quantity,
+          unitCost: first.unitCost,
+          variant: first.variant,
+          color: first.color,
+        }
+      });
+    }
+
+    setWizardStep('pricing');
+    setIsModalOpen(true);
   };
 
   const handleReceive = (order: PurchaseOrder) => {
@@ -506,9 +586,14 @@ export default function PurchasePanel() {
                         <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
                         <SummaryCard label="Total" value={`₹${formatNumber(totalAmount)}`} />
                       </div>
-                      <Button size="sm" onClick={() => handleReceive(order)} disabled={order.status === 'received'}>
-                        <Truck className="w-4 h-4 mr-1" /> {order.status === 'received' ? 'Received' : 'Receive'}
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" onClick={() => editOrder(order)} disabled={order.status === 'received'}>
+                          <Pencil className="w-4 h-4 mr-1" /> Edit
+                        </Button>
+                        <Button size="sm" onClick={() => handleReceive(order)} disabled={order.status === 'received'}>
+                          <Truck className="w-4 h-4 mr-1" /> {order.status === 'received' ? 'Received' : 'Receive'}
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -654,6 +739,9 @@ export default function PurchasePanel() {
                     <button type="button" onClick={() => setShowPartyPopup(true)} className="mt-2 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button>
                   </div>
                   <div><Label>Order Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
+                  <div><Label>Bill Number</Label><Input value={billNumber} onChange={e => setBillNumber(e.target.value)} placeholder="Supplier invoice no." /></div>
+                  <div><Label>Bill Date</Label><Input type="date" value={billDate} onChange={e => setBillDate(e.target.value)} /></div>
+                  <div><Label>GST %</Label><Input type="number" value={gstPercent} onChange={e => setGstPercent(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 18" /></div>
                   <div className="md:col-span-2"><Label>Notes</Label><Input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes" /></div>
                 </div>
               </div>
@@ -664,6 +752,8 @@ export default function PurchasePanel() {
                   <SummaryCard label="Total Amount" value={`₹${formatNumber(draftTotals.totalAmount)}`} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
                   <SummaryCard label="Party" value={parties.find(p => p.id === partyId)?.name || 'Not selected'} />
+                  <SummaryCard label="GST Amount" value={`₹${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
+                  <SummaryCard label="Grand Total" value={`₹${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
                 </div>
               </div>
             </div>
@@ -729,18 +819,21 @@ export default function PurchasePanel() {
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party</div><div className="font-medium text-slate-900">{parties.find(p => p.id === partyId)?.name || '—'}</div></div>
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party Details</div><div className="font-medium text-slate-900 text-sm">{parties.find(p => p.id === partyId)?.phone || '—'} · GST {parties.find(p => p.id === partyId)?.gst || '—'}</div></div>
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Location</div><div className="font-medium text-slate-900">{parties.find(p => p.id === partyId)?.location || '—'}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Bill</div><div className="font-medium text-slate-900 text-sm">{billNumber || '—'} {billDate ? `• ${billDate}` : ''}</div></div>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <SummaryCard label="Total Qty" value={formatNumber(draftTotals.totalQty, 0)} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
                   <SummaryCard label="Total Amount" value={`₹${formatNumber(draftTotals.totalAmount)}`} />
+                  <SummaryCard label="GST Amount" value={`₹${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
+                  <SummaryCard label="Grand Total" value={`₹${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
                   <SummaryCard label="Date" value={todayLabel()} />
                 </div>
                 <div className="mt-4 grid gap-2">
-                  <button type="button" onClick={() => setWizardStep('product')} className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Go to Product <Pencil className="h-4 w-4" /></button>
+                  <button type="button" onClick={() => setWizardStep(sourceMode === 'new' ? 'newProduct' : 'product')} className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Go to Product <Pencil className="h-4 w-4" /></button>
                   <button type="button" onClick={() => setWizardStep('pricing')} className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Go to Pricing <Pencil className="h-4 w-4" /></button>
                 </div>
-                <button onClick={saveOrder} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Save Purchase Order</button>
+                <button onClick={saveOrder} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">{editingOrderId ? 'Update Purchase Order' : 'Save Purchase Order'}</button>
               </div>
             </div>
           </div>
