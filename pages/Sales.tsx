@@ -124,6 +124,8 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 
 export default function Sales() {
   type ReturnHandlingMode = 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
+  const POS_PRODUCTS_PER_PAGE = 10;
+  const RETURN_TRANSACTIONS_PER_PAGE = 10;
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -172,6 +174,8 @@ export default function Sales() {
   const [isReturnPopupOpen, setIsReturnPopupOpen] = useState(false);
   const [returnSubmitError, setReturnSubmitError] = useState<string | null>(null);
   const [mixedReturnChoice, setMixedReturnChoice] = useState<'refund_paid_method' | 'store_credit'>('refund_paid_method');
+  const [productPage, setProductPage] = useState(1);
+  const [returnPage, setReturnPage] = useState(1);
 
   const refreshData = () => {
       const data = loadData();
@@ -638,6 +642,8 @@ export default function Sales() {
     return searchMatch && categoryMatch;
   });
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
+  const productTotalPages = Math.max(1, Math.ceil(filteredProducts.length / POS_PRODUCTS_PER_PAGE));
+  const paginatedProducts = filteredProducts.slice((productPage - 1) * POS_PRODUCTS_PER_PAGE, productPage * POS_PRODUCTS_PER_PAGE);
   const returnTransactions = useMemo(() => {
     const now = new Date();
     const thresholdDays = returnDateFilter === '30d' ? 30 : returnDateFilter === '90d' ? 90 : null;
@@ -663,6 +669,24 @@ export default function Sales() {
       return new Date(b.date).getTime() - new Date(a.date).getTime();
     });
   }, [transactions, customers, returnDateFilter, returnSearch, returnSort]);
+  const returnTotalPages = Math.max(1, Math.ceil(returnTransactions.length / RETURN_TRANSACTIONS_PER_PAGE));
+  const paginatedReturnTransactions = returnTransactions.slice((returnPage - 1) * RETURN_TRANSACTIONS_PER_PAGE, returnPage * RETURN_TRANSACTIONS_PER_PAGE);
+
+  useEffect(() => {
+    setProductPage(1);
+  }, [productSearch, selectedCategory]);
+
+  useEffect(() => {
+    setReturnPage(1);
+  }, [returnSearch, returnDateFilter, returnSort]);
+
+  useEffect(() => {
+    setProductPage((prev) => Math.min(prev, productTotalPages));
+  }, [productTotalPages]);
+
+  useEffect(() => {
+    setReturnPage((prev) => Math.min(prev, returnTotalPages));
+  }, [returnTotalPages]);
 
   const selectedReturnTx = useMemo(
     () => returnTransactions.find(tx => tx.id === selectedReturnTxId) || null,
@@ -904,7 +928,7 @@ export default function Sales() {
   };
 
   return (
-    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 ${isReturnMode ? 'lg:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_390px]'} gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
+    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 ${isReturnMode ? 'lg:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_390px] lg:items-start'} gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
       <div className="min-w-0 flex flex-col gap-3">
         <div className="bg-card border rounded-xl p-3 space-y-3">
           <div className={`grid gap-3 items-center ${isReturnMode ? 'md:grid-cols-[minmax(0,1fr)_420px]' : 'md:grid-cols-[minmax(0,1fr)_220px]'}`}>
@@ -917,8 +941,8 @@ export default function Sales() {
                 placeholder={isReturnMode ? 'Search customer, phone, bill no, product, code' : 'Search product, barcode, variant'}
               />
             </div>
-            <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-4' : 'grid-cols-2'}`}>
-              {!isReturnMode && <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sale</Button>}
+            <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-5' : 'grid-cols-2'}`}>
+              <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sales</Button>
               <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setCart([]); }}>Return</Button>
               {isReturnMode && (
                 <>
@@ -961,7 +985,7 @@ export default function Sales() {
                   <div>Price</div>
                   <div />
                 </div>
-                {returnTransactions.map((tx) => {
+                {paginatedReturnTransactions.map((tx) => {
                   const totalQty = (tx.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
                   return (
                     <div key={tx.id} className="w-full rounded-xl border bg-card p-3 grid gap-2 md:grid-cols-[130px_180px_minmax(0,1fr)_92px_120px_132px] items-center box-border">
@@ -975,11 +999,19 @@ export default function Sales() {
                   );
                 })}
                 {!returnTransactions.length && <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No sale transactions found for return workflow.</div>}
+                {returnTransactions.length > RETURN_TRANSACTIONS_PER_PAGE && (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border bg-card p-2">
+                    <Button size="sm" variant="outline" onClick={() => setReturnPage((prev) => Math.max(1, prev - 1))} disabled={returnPage === 1}>Prev</Button>
+                    <span className="text-xs text-muted-foreground">Page {returnPage} of {returnTotalPages}</span>
+                    <Button size="sm" variant="outline" onClick={() => setReturnPage((prev) => Math.min(returnTotalPages, prev + 1))} disabled={returnPage === returnTotalPages}>Next</Button>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
-              {filteredProducts.map(p => {
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+              {paginatedProducts.map(p => {
                 const cartItem = cart.find(item => item.id === p.id);
                 const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
                 return (
@@ -993,6 +1025,14 @@ export default function Sales() {
                   />
                 );
               })}
+              </div>
+              {filteredProducts.length > POS_PRODUCTS_PER_PAGE && (
+                <div className="flex items-center justify-between gap-2 rounded-lg border bg-card p-2">
+                  <Button size="sm" variant="outline" onClick={() => setProductPage((prev) => Math.max(1, prev - 1))} disabled={productPage === 1}>Prev</Button>
+                  <span className="text-xs text-muted-foreground">Page {productPage} of {productTotalPages}</span>
+                  <Button size="sm" variant="outline" onClick={() => setProductPage((prev) => Math.min(productTotalPages, prev + 1))} disabled={productPage === productTotalPages}>Next</Button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1037,7 +1077,7 @@ export default function Sales() {
       )}
 
       {!isReturnMode && (
-      <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden">
+      <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden self-start lg:sticky lg:top-3">
         <div className="px-4 py-3 border-b flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold">{isReturnMode ? 'Return Guidance' : 'Cart'}</h2>
