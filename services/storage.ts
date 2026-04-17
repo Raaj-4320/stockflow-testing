@@ -3725,16 +3725,17 @@ const applyPurchaseLineToProduct = async (
 
   const newProduct: Product = {
     id: `purchase-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-    barcode: `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
+    barcode: line.pendingProductBarcode || line.pendingProductDraft?.barcode || `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
     name: line.productName.trim(),
-    description: '',
+    description: line.pendingProductDraft?.description || '',
     buyPrice: line.unitCost,
-    sellPrice: Math.max(line.unitCost, line.unitCost * 1.2),
+    sellPrice: Math.max(line.pendingProductDraft?.sellPrice || 0, line.unitCost, line.unitCost * 1.2),
     stock: line.quantity,
     image: line.image || '',
     category: line.category || 'Uncategorized',
-    variants: line.variant ? [line.variant] : [],
-    colors: line.color ? [line.color] : [],
+    hsn: line.pendingProductDraft?.hsn || '',
+    variants: line.pendingProductDraft?.variants?.length ? line.pendingProductDraft.variants : (line.variant ? [line.variant] : []),
+    colors: line.pendingProductDraft?.colors?.length ? line.pendingProductDraft.colors : (line.color ? [line.color] : []),
     stockByVariantColor: line.variant || line.color
       ? [{ variant: line.variant || 'No Variant', color: line.color || 'No Color', stock: line.quantity, totalPurchase: line.quantity, totalSold: 0 }]
       : [],
