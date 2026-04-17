@@ -395,6 +395,11 @@ export interface PurchaseOrder {
   partyPhone?: string;
   partyGst?: string;
   partyLocation?: string;
+  billNumber?: string;
+  billDate?: string;
+  gstPercent?: number;
+  taxableAmount?: number;
+  gstAmount?: number;
   status: 'draft' | 'ordered' | 'partially_received' | 'received' | 'cancelled';
   orderDate: string;
   notes?: string;
