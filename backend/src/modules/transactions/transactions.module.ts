@@ -12,6 +12,6 @@ import { TransactionsService } from './transactions.service';
   imports: [AuthModule, TenancyModule, ProductsModule, CustomersModule],
   controllers: [TransactionsController],
   providers: [TransactionsRepository, TransactionsService],
-  exports: [TransactionsService],
+  exports: [TransactionsService, TransactionsRepository],
 })
 export class TransactionsModule {}
