@@ -8,6 +8,7 @@ import { FileText, Download, User, Users } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel, exportDetailedSalesToExcel } from '../services/excel';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
+import { generateProductCatalogPDF } from '../services/pdf';
 
 export default function Reports() {
   const [products, setProducts] = useState(loadData().products);
@@ -64,6 +65,12 @@ export default function Reports() {
         // For now, detailed sales is Excel only as it's a data-heavy report
         // We could add PDF later if needed, but Excel is better for analysis
         return;
+    }
+    if (reportType === 'customer') {
+      await generateProductCatalogPDF(products, {
+        fileName: 'stockflow-customer-report.pdf',
+      });
+      return;
     }
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();

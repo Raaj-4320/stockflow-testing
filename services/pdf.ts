@@ -1,7 +1,7 @@
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer } from '../types';
+import { Transaction, Customer, Product } from '../types';
 import { loadData } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { formatMoneyPrecise, formatMoneyWhole } from './numberFormat';
@@ -9,6 +9,181 @@ import { formatMoneyPrecise, formatMoneyWhole } from './numberFormat';
 type ReceiptPaymentDetails = {
     cashReceived?: number;
     changeReturned?: number;
+};
+
+const getPdfImageSource = async (image: string | undefined): Promise<string | null> => {
+    if (!image) return null;
+    if (image.startsWith('data:image')) return image;
+    if (!/^https?:\/\//i.test(image)) return null;
+    try {
+        const response = await fetch(image);
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        return await new Promise<string | null>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+        });
+    } catch {
+        return null;
+    }
+};
+
+export const generateProductCatalogPDF = async (
+    products: Product[],
+    options?: { fileName?: string; generatedLabel?: string },
+) => {
+    const doc = new jsPDF();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 10;
+    const headerBottomY = 34;
+    const contentStartY = headerBottomY + 4;
+    const cols = 3;
+    const rows = 4;
+    const colGap = 4;
+    const rowGap = 4;
+    const cardsPerPage = cols * rows;
+    const usableWidth = pageWidth - margin * 2 - colGap * (cols - 1);
+    const cardWidth = usableWidth / cols;
+    const usableHeight = pageHeight - contentStartY - margin - rowGap * (rows - 1);
+    const cardHeight = usableHeight / rows;
+    const cardPadding = 3;
+    const imageBlockHeight = Math.max(24, Math.min(cardHeight * 0.48, 34));
+    const imageCache = new Map<string, string | null>();
+    const nowLabel = options?.generatedLabel ?? new Date().toLocaleString();
+
+    const renderPageHeader = (categoryName: string, continuation: boolean) => {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(18);
+        doc.setTextColor(40, 40, 40);
+        doc.text('Inventory Product Catalog', pageWidth / 2, 15, { align: 'center' });
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.setTextColor(100, 100, 100);
+        doc.text(`Generated: ${nowLabel}`, pageWidth / 2, 22, { align: 'center' });
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.setTextColor(31, 41, 55);
+        const prefix = continuation ? 'Category (cont.):' : 'Category:';
+        doc.text(`${prefix} ${categoryName}`, margin, 29);
+        doc.setDrawColor(200, 200, 200);
+        doc.line(margin, headerBottomY, pageWidth - margin, headerBottomY);
+    };
+
+    const groupedProducts = products.reduce<Record<string, Product[]>>((acc, product) => {
+        const normalized = (product.category || '').trim() || 'Uncategorized';
+        if (!acc[normalized]) acc[normalized] = [];
+        acc[normalized].push(product);
+        return acc;
+    }, {});
+
+    const sortedCategories = Object.keys(groupedProducts).sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: 'base' }),
+    );
+
+    for (let categoryIndex = 0; categoryIndex < sortedCategories.length; categoryIndex += 1) {
+        const categoryName = sortedCategories[categoryIndex];
+        const categoryProducts = [...groupedProducts[categoryName]].sort((a, b) => {
+            const normalizedA = (a.name || '').trim().toLowerCase();
+            const normalizedB = (b.name || '').trim().toLowerCase();
+            const nameCompare = normalizedA.localeCompare(normalizedB, undefined, { sensitivity: 'base' });
+            if (nameCompare !== 0) return nameCompare;
+            return (Number.isFinite(a.sellPrice) ? a.sellPrice : 0) - (Number.isFinite(b.sellPrice) ? b.sellPrice : 0);
+        });
+
+        if (categoryIndex > 0) doc.addPage();
+
+        for (let offset = 0; offset < categoryProducts.length; offset += cardsPerPage) {
+            if (offset > 0) doc.addPage();
+            renderPageHeader(categoryName, offset > 0);
+
+            const chunk = categoryProducts.slice(offset, offset + cardsPerPage);
+            for (let i = 0; i < chunk.length; i += 1) {
+                const product = chunk[i];
+                const row = Math.floor(i / cols);
+                const col = i % cols;
+                const x = margin + col * (cardWidth + colGap);
+                const y = contentStartY + row * (cardHeight + rowGap);
+                const textX = x + cardPadding;
+                const textWidth = cardWidth - cardPadding * 2;
+
+                const inStock = Number.isFinite(product.stock) ? product.stock > 0 : false;
+                const borderColor = inStock ? [22, 163, 74] : [220, 38, 38];
+                doc.setDrawColor(borderColor[0], borderColor[1], borderColor[2]);
+                doc.setFillColor(255, 255, 255);
+                doc.roundedRect(x, y, cardWidth, cardHeight, 2.5, 2.5, 'FD');
+
+                const badgeText = inStock ? 'Stock In' : 'Stock Out';
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(8.5);
+                const badgeWidth = doc.getTextWidth(badgeText) + 7;
+                const badgeHeight = 6;
+                const badgeX = x + cardPadding;
+                const badgeY = y + cardPadding;
+                if (inStock) {
+                    doc.setFillColor(22, 163, 74);
+                } else {
+                    doc.setFillColor(220, 38, 38);
+                }
+                doc.roundedRect(badgeX, badgeY, badgeWidth, badgeHeight, 1.5, 1.5, 'F');
+                doc.setTextColor(255, 255, 255);
+                doc.text(badgeText, badgeX + badgeWidth / 2, badgeY + 4.2, { align: 'center' });
+
+                const imageBoxSize = Math.min(textWidth, imageBlockHeight - 2);
+                const imageX = x + (cardWidth - imageBoxSize) / 2;
+                const imageY = y + cardPadding + badgeHeight + 2;
+                let pdfImageSource: string | null = null;
+                const imageKey = product.image || '';
+                if (imageKey) {
+                    if (imageCache.has(imageKey)) pdfImageSource = imageCache.get(imageKey) ?? null;
+                    else {
+                        pdfImageSource = await getPdfImageSource(product.image);
+                        imageCache.set(imageKey, pdfImageSource);
+                    }
+                }
+
+                if (pdfImageSource) {
+                    const formatMatch = pdfImageSource.match(/^data:image\/(png|jpeg|jpg)/i);
+                    const format = formatMatch?.[1]?.toLowerCase() === 'png' ? 'PNG' : 'JPEG';
+                    doc.addImage(pdfImageSource, format, imageX, imageY, imageBoxSize, imageBoxSize, undefined, 'FAST');
+                } else {
+                    doc.setFillColor(245, 245, 245);
+                    doc.rect(imageX, imageY, imageBoxSize, imageBoxSize, 'F');
+                    doc.setFont('helvetica', 'normal');
+                    doc.setFontSize(8);
+                    doc.setTextColor(150, 150, 150);
+                    doc.text('No Image', imageX + imageBoxSize / 2, imageY + imageBoxSize / 2 + 1, { align: 'center' });
+                }
+
+                const nameRaw = ((product.name || '').trim() || 'Unnamed product').toUpperCase();
+                const nameLines = doc.splitTextToSize(nameRaw, textWidth) as string[];
+                const safeNameLines = nameLines.slice(0, 2);
+                if (nameLines.length > 2 && safeNameLines.length > 0) {
+                    const last = safeNameLines[safeNameLines.length - 1];
+                    safeNameLines[safeNameLines.length - 1] = `${last.slice(0, Math.max(1, last.length - 1))}…`;
+                }
+
+                let textY = imageY + imageBoxSize + 5;
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(10.5);
+                doc.setTextColor(20, 20, 20);
+                for (const line of safeNameLines) {
+                    doc.text(line, x + cardWidth / 2, textY, { align: 'center' });
+                    textY += 4.4;
+                }
+
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(10.5);
+                doc.setTextColor(55, 65, 81);
+                const priceText = `${Number.isFinite(product.sellPrice) ? product.sellPrice.toFixed(0) : '0'} INR`;
+                doc.text(priceText, x + cardWidth / 2, textY + 1, { align: 'center' });
+            }
+        }
+    }
+
+    doc.save(options?.fileName ?? 'product-catalog.pdf');
 };
 
 export const generateReceiptPDF = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
@@ -464,4 +639,3 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
         }, 250);
     }
 };
-
