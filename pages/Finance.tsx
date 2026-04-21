@@ -2130,45 +2130,45 @@ export default function Finance() {
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
-                      <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
-                      <StatCard label="Credit Due Created (at sale)" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
-                      <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
+                      <StatCard label="Gross Sales" value={formatINRSummary(todayFinanceBreakdown.grossSales)} />
+                      <StatCard label="Sales Returns" value={formatINRSummary(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Sales" value={formatINRSummary(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
+                      <StatCard label="Credit Due Created (at sale)" value={formatINRSummary(todayFinanceBreakdown.creditSalesCreated)} />
+                      <StatCard label="Online Sales (at sale)" value={formatINRSummary(todayFinanceBreakdown.onlineSalesAtSale)} />
                     </div>
                   </div>
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
-                      <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
+                      <StatCard label="COGS (net of returns)" value={formatINRSummary(todayFinanceBreakdown.cogs)} />
+                      <StatCard label="Gross Profit" value={formatINRSummary(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
                     </div>
                   </div>
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
+                      <StatCard label="Expenses" value={formatINRSummary(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Profit" value={formatINRSummary(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
                     </div>
                   </div>
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement (selected layer)</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
-                      <StatCard label="Cash Collections (payments)" value={formatINR(todayFinanceBreakdown.cashCollections)} />
-                      <StatCard label="Online Collections (payments)" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
-                      <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Expense (cash outflow)" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Net Cash Movement (after expenses)" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
+                      <StatCard label="Cash at Sale" value={formatINRSummary(todayFinanceBreakdown.saleCashReceipts)} />
+                      <StatCard label="Cash Collections (payments)" value={formatINRSummary(todayFinanceBreakdown.cashCollections)} />
+                      <StatCard label="Online Collections (payments)" value={formatINRSummary(todayFinanceBreakdown.onlineCollections)} />
+                      <StatCard label="Cash Refunds" value={formatINRSummary(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Expense (cash outflow)" value={formatINRSummary(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Cash Movement (after expenses)" value={formatINRSummary(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
                     </div>
                   </div>
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects by handling mode (selected layer)</p>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Online Refunds" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Due Reduction (returns)" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
-                      <StatCard label="Store Credit Created" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
+                      <StatCard label="Cash Refunds" value={formatINRSummary(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Online Refunds" value={formatINRSummary(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Due Reduction (returns)" value={formatINRSummary(todayFinanceBreakdown.dueReductionFromReturns)} />
+                      <StatCard label="Store Credit Created" value={formatINRSummary(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
                     </div>
                   </div>
                   <div className="rounded-2xl border bg-muted/20 p-4">
@@ -2253,9 +2253,9 @@ export default function Finance() {
                   ) : (
                     <>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <StatCard label="Expected Closing" value={formatINR(expectedClosingForOpenSession)} />
-                        <StatCard label="Counted Total" value={formatINR(closingCountTotal)} />
-                        <StatCard label="Variance" value={formatINR(closingVariance)} tone={closingVariance === 0 ? 'good' : (closingVariance > 0 ? 'neutral' : 'bad')} />
+                        <StatCard label="Expected Closing" value={formatINRSummary(expectedClosingForOpenSession)} />
+                        <StatCard label="Counted Total" value={formatINRSummary(closingCountTotal)} />
+                        <StatCard label="Variance" value={formatINRSummary(closingVariance)} tone={closingVariance === 0 ? 'good' : (closingVariance > 0 ? 'neutral' : 'bad')} />
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -2754,7 +2754,7 @@ export default function Finance() {
                     <p className="text-sm text-muted-foreground">Last Visit: {new Date(customer.lastVisit).toLocaleDateString()}</p>
                   </div>
                   <div className="text-right">
-                    <p className="font-bold text-red-700">Due: {formatINR(customer.totalDue)}</p>
+                    <p className="font-bold text-red-700">Due: {formatINRSummary(customer.totalDue)}</p>
                     <Button size="sm" onClick={() => { setCollectingCustomer(customer); setPaymentAmount(customer.totalDue.toFixed(2)); }}>Collect Payment</Button>
                   </div>
                 </div>
@@ -2794,13 +2794,13 @@ export default function Finance() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3">
-                  <StatCard label="Gross Sales" value={formatINR(dailySummary.grossSales)} />
-                  <StatCard label="Sales Returns" value={formatINR(dailySummary.salesReturns)} tone={dailySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Net Sales" value={formatINR(dailySummary.netSales)} tone={dailySummary.netSales >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="COGS" value={formatINR(dailySummary.cogs)} />
-                  <StatCard label="Gross Profit" value={formatINR(dailySummary.grossProfit)} tone={dailySummary.grossProfit >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="Expenses" value={formatINR(dailySummary.todayExpenses)} />
-                  <StatCard label="Net Profit" value={formatINR(dailySummary.netProfit)} tone={dailySummary.netProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Gross Sales" value={formatINRSummary(dailySummary.grossSales)} />
+                  <StatCard label="Sales Returns" value={formatINRSummary(dailySummary.salesReturns)} tone={dailySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Sales" value={formatINRSummary(dailySummary.netSales)} tone={dailySummary.netSales >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="COGS" value={formatINRSummary(dailySummary.cogs)} />
+                  <StatCard label="Gross Profit" value={formatINRSummary(dailySummary.grossProfit)} tone={dailySummary.grossProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Expenses" value={formatINRSummary(dailySummary.todayExpenses)} />
+                  <StatCard label="Net Profit" value={formatINRSummary(dailySummary.netProfit)} tone={dailySummary.netProfit >= 0 ? 'good' : 'bad'} />
                 </CardContent>
               </Card>
 
@@ -2812,13 +2812,13 @@ export default function Finance() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3">
-                  <StatCard label="Gross Sales" value={formatINR(monthlySummary.grossSales)} />
-                  <StatCard label="Sales Returns" value={formatINR(monthlySummary.salesReturns)} tone={monthlySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Gross Sales" value={formatINRSummary(monthlySummary.grossSales)} />
+                  <StatCard label="Sales Returns" value={formatINRSummary(monthlySummary.salesReturns)} tone={monthlySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
                   <StatCard label="Net Sales" value={formatINRSummary(monthlySummary.netSales)} tone={monthlySummary.netSales >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="COGS" value={formatINR(monthlySummary.cogs)} />
+                  <StatCard label="COGS" value={formatINRSummary(monthlySummary.cogs)} />
                   <StatCard label="Gross Profit" value={formatINRSummary(monthlySummary.grossProfit)} tone={monthlySummary.grossProfit >= 0 ? 'good' : 'bad'} />
                   <StatCard label="Expenses" value={formatINRSummary(monthlySummary.todayExpenses)} />
-                  <StatCard label="Net Profit" value={formatINR(monthlySummary.netProfit)} tone={monthlySummary.netProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Net Profit" value={formatINRSummary(monthlySummary.netProfit)} tone={monthlySummary.netProfit >= 0 ? 'good' : 'bad'} />
                 </CardContent>
               </Card>
             </div>

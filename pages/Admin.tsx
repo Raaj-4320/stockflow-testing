@@ -9,6 +9,7 @@ import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label,
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
+import { generateProductCatalogPDF } from '../services/pdf';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 
@@ -1049,158 +1050,10 @@ export default function Admin() {
   };
 
   const handleDownloadCategoryPDF = async () => {
-    const doc = new jsPDF();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    const pageWidth = doc.internal.pageSize.getWidth();
-    
-    // Layout Configuration (Customer Catalog Style)
-    const margin = 10;
-    const cols = 3; 
-    const colGap = 5;
-    const rowGap = 5;
-    const contentWidth = pageWidth - (margin * 2);
-    const cardWidth = (contentWidth - ((cols - 1) * colGap)) / cols;
-    const cardHeight = 60; // Compact height for customer catalog
-
-    // Group filtered products by category
-    const groupedProducts: Record<string, Product[]> = {};
-    filteredProducts.forEach(p => {
-        if (!groupedProducts[p.category]) groupedProducts[p.category] = [];
-        groupedProducts[p.category].push(p);
+    await generateProductCatalogPDF(filteredProducts, {
+      fileName: `customer-catalog-${categoryFilter}.pdf`,
+      generatedLabel: `${new Date().toLocaleString()} | Filter: ${categoryFilter}`,
     });
-
-    // Sort categories alphabetically
-    const sortedCategories = Object.keys(groupedProducts).sort();
-    let isFirstCategory = true;
-
-    for (const cat of sortedCategories) {
-        if (!isFirstCategory) {
-            doc.addPage();
-        }
-        isFirstCategory = false;
-
-        let x = margin;
-        let y = 30; // Start Y after header
-
-        // --- Category Header ---
-        doc.setFontSize(18);
-        doc.setTextColor(40, 40, 40);
-        doc.setFont("helvetica", "bold");
-        doc.text(`Category: ${cat}`, pageWidth/2, 15, { align: "center" });
-        
-        doc.setFontSize(10);
-        doc.setTextColor(100, 100, 100);
-        doc.setFont("helvetica", "normal");
-        doc.text(`Generated: ${new Date().toLocaleString()}`, pageWidth/2, 22, { align: "center" });
-        
-        doc.setDrawColor(200, 200, 200);
-        doc.line(margin, 25, pageWidth - margin, 25);
-
-        // Sort products within category by barcode (numeric sort for GEN-001 style)
-        const catProducts = groupedProducts[cat].sort((a, b) => 
-            a.barcode.localeCompare(b.barcode, undefined, { numeric: true, sensitivity: 'base' })
-        );
-
-        // --- Product Loop ---
-        for (let index = 0; index < catProducts.length; index += 1) {
-            const product = catProducts[index];
-            // Check for Page Break
-            if (y + cardHeight > pageHeight - margin) {
-                doc.addPage();
-                y = margin;
-                x = margin; // Reset X on new page
-            }
-
-            // --- Draw Card Container ---
-            doc.setDrawColor(230, 230, 230); // Light gray border
-            doc.setFillColor(255, 255, 255); // White background
-            doc.roundedRect(x, y, cardWidth, cardHeight, 3, 3, 'FD');
-
-            // --- Image ---
-            const imgSize = 30; 
-            const imgX = x + (cardWidth - imgSize) / 2;
-            const imgY = y + 5;
-            
-            try {
-                const pdfImageSource = await getPdfImageSource(product.image);
-                if (pdfImageSource) {
-                    const formatMatch = pdfImageSource.match(/^data:image\/(png|jpeg|jpg)/i);
-                const format =
-                  formatMatch?.[1]?.toLowerCase() === 'png'
-                    ? 'PNG'
-                    : 'JPEG';
-                doc.addImage(pdfImageSource, format, imgX, imgY, imgSize, imgSize, undefined, 'FAST');
-                } else {
-                     // Placeholder
-                     doc.setFillColor(245, 245, 245);
-                     doc.rect(imgX, imgY, imgSize, imgSize, 'F');
-                     doc.setFontSize(8);
-                     doc.setTextColor(150, 150, 150);
-                     doc.text("No Image", imgX + imgSize/2, imgY + imgSize/2, { align: "center" });
-                }
-            } catch (e) {
-                 doc.setFillColor(245, 245, 245);
-                 doc.rect(imgX, imgY, imgSize, imgSize, 'F');
-            }
-
-            // --- Text Content Base Y ---
-            const textStartY = imgY + imgSize + 5; 
-            
-            // Product Name (Bold, Dark)
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(10);
-            doc.setTextColor(20, 20, 20);
-            // Truncate name if too long
-            const titleLines = doc.splitTextToSize(product.name, cardWidth - 6);
-            doc.text(titleLines[0], x + 3, textStartY);
-            
-            // Barcode (Gray, Smaller)
-            const codeY = textStartY + 4;
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            doc.setTextColor(100, 100, 100);
-            doc.text(product.barcode, x + 3, codeY); 
-
-            // --- Customer Mode Layout ---
-            const priceY = codeY + 8; // 8mm below code line
-            
-            // Price
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(12);
-            doc.setTextColor(0, 0, 0);
-            doc.text(`Rs.${product.sellPrice}`, x + 3, priceY);
-            
-            // Stock Badge
-            const inStock = product.stock > 0;
-            const badgeText = inStock ? "In Stock" : "Out of Stock";
-            const badgeWidth = doc.getTextWidth(badgeText) + 6;
-            const badgeX = x + cardWidth - badgeWidth - 3;
-            const badgeRectY = priceY - 5; 
-            
-            if (inStock) {
-                doc.setFillColor(209, 250, 229);
-                doc.setTextColor(6, 95, 70); 
-            } else {
-                doc.setFillColor(254, 226, 226);
-                doc.setTextColor(185, 28, 28);
-            }
-            
-            doc.roundedRect(badgeX, badgeRectY, badgeWidth, 7, 2, 2, 'F');
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text(badgeText, badgeX + 3, priceY);
-
-            // --- Grid Logic ---
-            x += cardWidth + colGap;
-            
-            if ((index + 1) % cols === 0) {
-                x = margin;
-                y += cardHeight + rowGap;
-            }
-        }
-    }
-    
-    doc.save(`customer-catalog-${categoryFilter}.pdf`);
   };
 
   const handleExport = (format: 'pdf' | 'excel') => {
