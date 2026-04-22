@@ -12,7 +12,10 @@ import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
 import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
-import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
+import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
+
+const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
+const fromMoneyCents = (value: number) => value / 100;
 
 const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
@@ -176,6 +179,72 @@ export default function Sales() {
   const [mixedReturnChoice, setMixedReturnChoice] = useState<'refund_paid_method' | 'store_credit'>('refund_paid_method');
   const [productPage, setProductPage] = useState(1);
   const [returnPage, setReturnPage] = useState(1);
+
+  const buildCheckoutMoney = ({
+    cartItems,
+    taxRate,
+    returnMode,
+    storeCreditRequested,
+    availableStoreCreditAmount,
+    hasCustomer,
+    cashInput,
+    onlineInput,
+  }: {
+    cartItems: CartItem[];
+    taxRate: number;
+    returnMode: boolean;
+    storeCreditRequested: number;
+    availableStoreCreditAmount: number;
+    hasCustomer: boolean;
+    cashInput: string;
+    onlineInput: string;
+  }) => {
+    const subtotalCents = cartItems.reduce((acc, item) => acc + toMoneyCents(item.sellPrice * item.quantity), 0);
+    const discountCents = cartItems.reduce((acc, item) => acc + toMoneyCents(item.discountAmount || 0), 0);
+    const taxableCents = Math.max(0, subtotalCents - discountCents);
+    const taxCents = toMoneyCents((taxableCents / 100) * (taxRate / 100));
+    const grossTotalCents = taxableCents + taxCents;
+    const signedTotal = returnMode ? -fromMoneyCents(grossTotalCents) : fromMoneyCents(grossTotalCents);
+
+    const maxStoreCreditCents = !returnMode && hasCustomer
+      ? Math.min(grossTotalCents, toMoneyCents(availableStoreCreditAmount))
+      : 0;
+    const requestedStoreCreditCents = toMoneyCents(storeCreditRequested);
+    const appliedStoreCreditCents = Math.min(requestedStoreCreditCents, maxStoreCreditCents);
+    const remainingPayableCents = Math.max(0, grossTotalCents - appliedStoreCreditCents);
+
+    const cashPaidCents = Math.max(0, toMoneyCents(Number(cashInput || 0)));
+    const onlinePaidCents = Math.max(0, toMoneyCents(Number(onlineInput || 0)));
+    const paidNowCents = cashPaidCents + onlinePaidCents;
+    const overpayCents = Math.max(0, paidNowCents - remainingPayableCents);
+    const creditDueCents = returnMode ? 0 : Math.max(0, remainingPayableCents - paidNowCents);
+    const remainingPayableWhole = roundMoneyWhole(fromMoneyCents(remainingPayableCents));
+    const settlementPaidNowWhole = roundMoneyWhole(fromMoneyCents(paidNowCents));
+    const settlementOverpayWhole = returnMode ? 0 : Math.max(0, settlementPaidNowWhole - remainingPayableWhole);
+    const creditDuePreviewWhole = returnMode ? 0 : Math.max(0, remainingPayableWhole - settlementPaidNowWhole);
+
+    return {
+      subtotal: fromMoneyCents(subtotalCents),
+      totalDiscount: fromMoneyCents(discountCents),
+      taxableAmount: fromMoneyCents(taxableCents),
+      taxAmount: fromMoneyCents(taxCents),
+      total: signedTotal,
+      appliedStoreCredit: fromMoneyCents(appliedStoreCreditCents),
+      maxApplicableStoreCredit: fromMoneyCents(maxStoreCreditCents),
+      remainingPayable: fromMoneyCents(remainingPayableCents),
+      cashPaid: fromMoneyCents(cashPaidCents),
+      onlinePaid: fromMoneyCents(onlinePaidCents),
+      settlementPaidNow: fromMoneyCents(paidNowCents),
+      settlementOverpay: fromMoneyCents(overpayCents),
+      creditDuePreview: fromMoneyCents(creditDueCents),
+      remainingPayableWhole,
+      settlementPaidNowWhole,
+      settlementOverpayWhole,
+      creditDuePreviewWhole,
+      overpayCents,
+      hasWholeOverpay: settlementOverpayWhole > 0,
+    };
+  };
 
   const refreshData = () => {
       const data = loadData();
@@ -549,33 +618,40 @@ export default function Sales() {
           }
       }
 
-      const subtotal = cart.reduce((acc, item) => acc + (item.sellPrice * item.quantity), 0);
-      const totalDiscount = cart.reduce((acc, item) => acc + (item.discountAmount || 0), 0);
-      const taxableAmount = subtotal - totalDiscount;
-      const taxAmount = (taxableAmount * (selectedTax.value / 100));
-      const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
       const availableCreditAtSubmit = Math.max(0, Number(finalCustomer?.storeCredit || 0));
-      const maxCreditAtSubmit = !isReturnMode && finalCustomer ? Math.min(Math.abs(total), availableCreditAtSubmit) : 0;
-      const requestedCreditAtSubmit = storeCreditMode === 'full'
-        ? maxCreditAtSubmit
-        : storeCreditMode === 'custom'
-          ? Math.max(0, Number(customStoreCreditUse || 0))
-          : 0;
-      const appliedStoreCredit = Math.min(requestedCreditAtSubmit, maxCreditAtSubmit);
-      const payableAfterCredit = Math.max(0, Math.abs(total) - appliedStoreCredit);
-      const cashPaid = Number(cashPaidInput || 0);
-      const onlinePaid = Number(onlinePaidInput || 0);
+      const checkoutMoney = buildCheckoutMoney({
+        cartItems: cart,
+        taxRate: selectedTax.value,
+        returnMode: isReturnMode,
+        storeCreditRequested: storeCreditMode === 'full'
+          ? Number.MAX_SAFE_INTEGER
+          : storeCreditMode === 'custom'
+            ? Math.max(0, Number(customStoreCreditUse || 0))
+            : 0,
+        availableStoreCreditAmount: availableCreditAtSubmit,
+        hasCustomer: Boolean(finalCustomer),
+        cashInput: cashPaidInput,
+        onlineInput: onlinePaidInput,
+      });
+      const total = checkoutMoney.total;
+      const subtotal = checkoutMoney.subtotal;
+      const totalDiscount = checkoutMoney.totalDiscount;
+      const taxAmount = checkoutMoney.taxAmount;
+      const appliedStoreCredit = checkoutMoney.appliedStoreCredit;
+      const payableAfterCredit = checkoutMoney.remainingPayable;
+      const cashPaid = checkoutMoney.cashPaid;
+      const onlinePaid = checkoutMoney.onlinePaid;
       if (!isReturnMode) {
           if (!Number.isFinite(cashPaid) || cashPaid < 0 || !Number.isFinite(onlinePaid) || onlinePaid < 0) {
               setCheckoutError('Cash/Online paid values must be valid non-negative numbers.');
               return;
           }
-          if ((cashPaid + onlinePaid) > (payableAfterCredit + 0.0001)) {
-              setCheckoutError('Cash + Online paid cannot exceed remaining payable.');
+          if (checkoutMoney.hasWholeOverpay) {
+              setCheckoutError(`Paid now ₹${formatMoneyWhole(checkoutMoney.settlementPaidNowWhole)} cannot exceed payable ₹${formatMoneyWhole(checkoutMoney.remainingPayableWhole)} under whole-money rule.`);
               return;
           }
       }
-      const creditDue = isReturnMode ? 0 : clampCreditDueAmount(Math.max(0, payableAfterCredit - cashPaid - onlinePaid));
+      const creditDue = isReturnMode ? 0 : clampCreditDueAmount(checkoutMoney.creditDuePreviewWhole);
       if (!isReturnMode && creditDue > 0 && !finalCustomer) {
           setCheckoutError("Customer is required when credit due is created.");
           return;
@@ -659,27 +735,32 @@ export default function Sales() {
     }
   };
 
-  const subtotal = cart.reduce((acc, item) => acc + (item.sellPrice * item.quantity), 0);
-  const totalDiscount = cart.reduce((acc, item) => acc + (item.discountAmount || 0), 0);
-  const taxable = subtotal - totalDiscount;
-  const taxVal = (taxable * (selectedTax.value / 100));
-  const grandTotal = isReturnMode ? -(taxable + taxVal) : (taxable + taxVal);
   const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
-  const maxApplicableStoreCredit = isReturnMode || !selectedCustomer ? 0 : Math.min(Math.abs(grandTotal), availableStoreCredit);
-  const customStoreCreditNumber = Math.max(0, Number(customStoreCreditUse || 0));
-  const storeCreditUsed = !selectedCustomer || isReturnMode
-    ? 0
-    : storeCreditMode === 'full'
-      ? maxApplicableStoreCredit
-      : storeCreditMode === 'custom'
-        ? Math.min(customStoreCreditNumber, maxApplicableStoreCredit)
-        : 0;
-  const remainingPayable = Math.max(0, Math.abs(grandTotal) - storeCreditUsed);
-  const cashPaidValue = Math.max(0, Number(cashPaidInput || 0));
-  const onlinePaidValue = Math.max(0, Number(onlinePaidInput || 0));
-  const settlementPaidNow = cashPaidValue + onlinePaidValue;
-  const settlementOverpay = settlementPaidNow - remainingPayable;
-  const creditDuePreview = Math.max(0, remainingPayable - settlementPaidNow);
+  const checkoutPreview = buildCheckoutMoney({
+    cartItems: cart,
+    taxRate: selectedTax.value,
+    returnMode: isReturnMode,
+    storeCreditRequested: !selectedCustomer || isReturnMode
+      ? 0
+      : storeCreditMode === 'full'
+        ? Number.MAX_SAFE_INTEGER
+        : storeCreditMode === 'custom'
+          ? Math.max(0, Number(customStoreCreditUse || 0))
+          : 0,
+    availableStoreCreditAmount: availableStoreCredit,
+    hasCustomer: Boolean(selectedCustomer),
+    cashInput: cashPaidInput,
+    onlineInput: onlinePaidInput,
+  });
+  const subtotal = checkoutPreview.subtotal;
+  const totalDiscount = checkoutPreview.totalDiscount;
+  const taxable = checkoutPreview.taxableAmount;
+  const taxVal = checkoutPreview.taxAmount;
+  const grandTotal = checkoutPreview.total;
+  const storeCreditUsed = checkoutPreview.appliedStoreCredit;
+  const maxApplicableStoreCredit = checkoutPreview.maxApplicableStoreCredit;
+  const cashPaidValue = checkoutPreview.cashPaid;
+  const onlinePaidValue = checkoutPreview.onlinePaid;
 
   const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
   const filteredProducts = products.filter(p => {
@@ -1375,10 +1456,10 @@ export default function Sales() {
                       <Input type="number" min="0" step="0.01" placeholder="0.00" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
-                      <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyPrecise(settlementPaidNow)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{formatMoneyPrecise(creditDuePreview)}</span></div>
-                      {settlementOverpay > 0.0001 && (
-                        <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyPrecise(settlementOverpay)}</p>
+                      <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyWhole(checkoutPreview.settlementPaidNowWhole)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
+                      {checkoutPreview.hasWholeOverpay && (
+                        <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyWhole(checkoutPreview.settlementOverpayWhole)}</p>
                       )}
                     </div>
                   </div>
@@ -1481,10 +1562,10 @@ export default function Sales() {
                     <div className="text-xs space-y-1 border-t pt-2">
                       <div className="flex justify-between"><span>Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
                       <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyPrecise(remainingPayable)}</span></div>
-                      <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyPrecise(cashPaidValue)}</span></div>
-                      <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyPrecise(onlinePaidValue)}</span></div>
-                      <div className="flex justify-between text-muted-foreground"><span>Credit Due to Create</span><span>₹{formatMoneyPrecise(creditDuePreview)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
+                      <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyWhole(cashPaidValue)}</span></div>
+                      <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
+                      <div className="flex justify-between text-muted-foreground"><span>Credit Due to Create</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
                     </div>
                   </div>
                 )}
