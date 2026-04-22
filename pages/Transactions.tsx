@@ -782,6 +782,21 @@ export default function Transactions() {
   }, [editingTx, editingSaleLinkageInfo]);
 
   const stats = useMemo(() => {
+      const productsById = new Map(products.map(product => [product.id, product]));
+      const resolveBuyPrice = (item: CartItem, txDate: string) => {
+          const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
+          if (direct > 0) return direct;
+          const product = productsById.get(item.id);
+          if (!product) return 0;
+          const txTime = new Date(txDate).getTime();
+          const historical = (product.purchaseHistory || [])
+              .filter(entry => Number.isFinite(new Date(entry.date).getTime()) && new Date(entry.date).getTime() <= txTime)
+              .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+          const historicalBuy = historical ? Number(historical.nextBuyPrice ?? historical.unitPrice ?? 0) : 0;
+          if (Number.isFinite(historicalBuy) && historicalBuy > 0) return historicalBuy;
+          const fallback = Number.isFinite(product.buyPrice) ? Number(product.buyPrice) : 0;
+          return fallback > 0 ? fallback : 0;
+      };
       let totalRevenue = 0;
       let totalReturns = 0;
       let grossProfit = 0;
@@ -795,14 +810,14 @@ export default function Transactions() {
               totalDiscount += (tx.discount || 0);
               // Calculate Profit: (Sell - Buy) * Qty
               tx.items.forEach(item => {
-                  const profit = (item.sellPrice - item.buyPrice) * item.quantity;
+                  const profit = (item.sellPrice - resolveBuyPrice(item, tx.date)) * item.quantity;
                   grossProfit += profit;
               });
           } else if (tx.type === 'return') {
               totalReturns += amount;
               // Reverse Profit for returns
               tx.items.forEach(item => {
-                  const profit = (item.sellPrice - item.buyPrice) * item.quantity;
+                  const profit = (item.sellPrice - resolveBuyPrice(item, tx.date)) * item.quantity;
                   grossProfit -= profit;
               });
           }
@@ -815,7 +830,7 @@ export default function Transactions() {
           grossProfit,
           totalDiscount
       };
-  }, [filteredTransactions]);
+  }, [filteredTransactions, products]);
 
   const getSaleSettlementText = (tx: Transaction) => {
     if (tx.type !== 'sale') return null;
@@ -1488,11 +1503,11 @@ export default function Transactions() {
                               {selectedTx.type === 'sale' && (
                                 <div className="col-span-2 rounded-lg border bg-muted/10 p-2">
                                   <p className="text-xs text-muted-foreground uppercase tracking-wider font-semibold mb-1">Settlement</p>
-                                  <p className="text-xs">Total Sale: ₹{Math.abs(selectedTx.total).toFixed(2)}</p>
-                                  <p className="text-xs">Store Credit Used: ₹{Number(selectedTx.storeCreditUsed || 0).toFixed(2)}</p>
-                                  <p className="text-xs">Cash Paid: ₹{getSaleSettlementBreakdown(selectedTx).cashPaid.toFixed(2)}</p>
-                                  <p className="text-xs">Online Paid: ₹{getSaleSettlementBreakdown(selectedTx).onlinePaid.toFixed(2)}</p>
-                                  <p className="text-xs font-semibold">Credit Due Created: ₹{getSaleSettlementBreakdown(selectedTx).creditDue.toFixed(2)}</p>
+                                  <p className="text-xs">Total Sale: ₹{formatMoneyWhole(Math.abs(selectedTx.total))}</p>
+                                  <p className="text-xs">Store Credit Used: ₹{formatMoneyWhole(Number(selectedTx.storeCreditUsed || 0))}</p>
+                                  <p className="text-xs">Cash Paid: ₹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).cashPaid)}</p>
+                                  <p className="text-xs">Online Paid: ₹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).onlinePaid)}</p>
+                                  <p className="text-xs font-semibold">Credit Due Created: ₹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).creditDue)}</p>
                                 </div>
                               )}
                           </div>
@@ -1515,7 +1530,7 @@ export default function Transactions() {
                                       <div className="flex-1">
                                           <div className="flex justify-between items-start">
                                               <p className="font-medium text-sm leading-tight">{item.name}</p>
-                                              <p className="font-medium text-sm">₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}</p>
+                                              <p className="font-medium text-sm">₹{formatMoneyWhole((item.sellPrice * item.quantity) - (item.discountAmount || 0))}</p>
                                           </div>
                                           <div className="flex justify-between items-center mt-1">
                                               <p className="text-xs text-muted-foreground">SKU: {item.barcode} • {item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
@@ -1540,14 +1555,14 @@ export default function Transactions() {
                               {/* Subtotal */}
                               <div className="flex justify-between text-xs text-muted-foreground">
                                   <span>Subtotal</span>
-                                  <span>₹{selectedTx.subtotal ? selectedTx.subtotal.toFixed(2) : Math.abs(selectedTx.total).toFixed(2)}</span>
+                                  <span>₹{formatMoneyWhole(selectedTx.subtotal ? selectedTx.subtotal : Math.abs(selectedTx.total))}</span>
                               </div>
                               
                               {/* Discount */}
                               <div className="flex justify-between text-xs text-green-600">
                                   <span>Discount</span>
                                   {selectedTx.discount && selectedTx.discount > 0 ? (
-                                      <span>-₹{selectedTx.discount.toFixed(2)}</span>
+                                      <span>-₹{formatMoneyWhole(selectedTx.discount)}</span>
                                   ) : (
                                       <span className="text-muted-foreground font-medium">No discount</span>
                                   )}
@@ -1557,7 +1572,7 @@ export default function Transactions() {
                               <div className="flex justify-between text-xs text-muted-foreground">
                                   <span>Tax {selectedTx.tax && selectedTx.tax > 0 ? `(${selectedTx.taxLabel})` : ''}</span>
                                   {selectedTx.tax && selectedTx.tax > 0 ? (
-                                      <span>+₹{selectedTx.tax.toFixed(2)}</span>
+                                      <span>+₹{formatMoneyWhole(selectedTx.tax)}</span>
                                   ) : (
                                       <span className="text-muted-foreground font-medium">No tax applied</span>
                                   )}
@@ -1566,7 +1581,7 @@ export default function Transactions() {
                               <div className="border-t pt-2 mt-2 flex justify-between items-center font-bold text-xl">
                                   <span>Total</span>
                                   <span className={selectedTx.type === 'sale' ? 'text-green-700' : selectedTx.type === 'return' ? 'text-red-700' : 'text-emerald-700'}>
-                                      {selectedTx.type === 'return' ? '-' : ''}₹{Math.abs(selectedTx.total).toFixed(2)}
+                                      {selectedTx.type === 'return' ? '-' : ''}₹{formatMoneyWhole(Math.abs(selectedTx.total))}
                                   </span>
                               </div>
                           </div>
@@ -1638,8 +1653,8 @@ export default function Transactions() {
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
                 <p className="font-semibold text-amber-900 mb-1">Financial effect summary</p>
                 <p className="text-amber-800">
-                  Deleting this {selectedDeletedTx.type} changed due by ₹{(selectedDeletedTx.afterImpact.customerDue - selectedDeletedTx.beforeImpact.customerDue).toLocaleString()}
-                  {' '}and cash estimate by ₹{(selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions - selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions).toLocaleString()}.
+                  Deleting this {selectedDeletedTx.type} changed due by ₹{formatMoneyWhole(selectedDeletedTx.afterImpact.customerDue - selectedDeletedTx.beforeImpact.customerDue)}
+                  {' '}and cash estimate by ₹{formatMoneyWhole(selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions - selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions)}.
                 </p>
               </div>
 
@@ -1651,9 +1666,9 @@ export default function Transactions() {
                   <div><span className="text-muted-foreground">Date:</span> {new Date(selectedDeletedTx.originalTransaction.date).toLocaleString()}</div>
                   <div><span className="text-muted-foreground">Customer:</span> {selectedDeletedTx.originalTransaction.customerName || 'Walk-in'}</div>
                   <div><span className="text-muted-foreground">Payment method:</span> {selectedDeletedTx.originalTransaction.paymentMethod || 'N/A'}</div>
-                  <div><span className="text-muted-foreground">Total:</span> ₹{Math.abs(selectedDeletedTx.originalTransaction.total || 0).toLocaleString()}</div>
-                  <div><span className="text-muted-foreground">Discount:</span> ₹{Math.abs(selectedDeletedTx.originalTransaction.discount || 0).toLocaleString()}</div>
-                  <div><span className="text-muted-foreground">Tax:</span> ₹{Math.abs(selectedDeletedTx.originalTransaction.tax || 0).toLocaleString()}</div>
+                  <div><span className="text-muted-foreground">Total:</span> ₹{formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.total || 0))}</div>
+                  <div><span className="text-muted-foreground">Discount:</span> ₹{formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.discount || 0))}</div>
+                  <div><span className="text-muted-foreground">Tax:</span> ₹{formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.tax || 0))}</div>
                   <div className="md:col-span-2"><span className="text-muted-foreground">Notes:</span> {selectedDeletedTx.originalTransaction.notes || '—'}</div>
                 </div>
               </div>
@@ -1682,8 +1697,8 @@ export default function Transactions() {
                               <td className="py-1 pr-2">{item.quantity}</td>
                               <td className="py-1 pr-2">{item.selectedVariant || NO_VARIANT}</td>
                               <td className="py-1 pr-2">{item.selectedColor || NO_COLOR}</td>
-                              <td className="py-1 pr-2">₹{(item.sellPrice || 0).toLocaleString()}</td>
-                              <td className="py-1 text-right">₹{subtotal.toLocaleString()}</td>
+                              <td className="py-1 pr-2">₹{formatMoneyWhole(item.sellPrice || 0)}</td>
+                              <td className="py-1 text-right">₹{formatMoneyWhole(subtotal)}</td>
                             </tr>
                           );
                         })}
