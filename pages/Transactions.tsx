@@ -26,6 +26,7 @@ export default function Transactions() {
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [viewMode, setViewMode] = useState<'default' | 'list' | 'list-details' | 'medium'>('list-details');
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -166,7 +167,7 @@ export default function Transactions() {
     setIsTransactionWindowed(false);
   };
 
-  const filteredTransactions = useMemo(() => {
+  const dateFilteredTransactions = useMemo(() => {
       const now = new Date();
       now.setHours(0,0,0,0); // Start of today
 
@@ -218,12 +219,46 @@ export default function Transactions() {
           }
       }).sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions, filterType, customStart, customEnd]);
+
   const customerPhoneById = useMemo(
     () => new Map(customers.map(customer => [customer.id, customer.phone || ''])),
     [customers]
   );
+  const productsById = useMemo(
+    () => new Map<string, Product>(products.map(product => [product.id, product])),
+    [products]
+  );
+
+  const filteredTransactions = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return dateFilteredTransactions;
+
+    return dateFilteredTransactions.filter((tx) => {
+      const customerPhone = tx.customerId ? (customerPhoneById.get(tx.customerId) || '') : '';
+      const baseHaystack = [
+        tx.id,
+        tx.customerName || '',
+        customerPhone,
+        tx.customerId || '',
+      ].join(' ').toLowerCase();
+      if (baseHaystack.includes(query)) return true;
+
+      return (tx.items || []).some((item) => {
+        const product = productsById.get(item.id);
+        const itemHaystack = [
+          item.id,
+          product?.id || '',
+          item.name || '',
+          product?.name || '',
+          product?.barcode || '',
+        ].join(' ').toLowerCase();
+        return itemHaystack.includes(query);
+      });
+    });
+  }, [dateFilteredTransactions, searchTerm, customerPhoneById, productsById]);
   const getDisplayPaymentMethod = (tx: Transaction) => {
-    if (tx.type !== 'sale') return tx.paymentMethod || 'Cash';
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    if (txType !== 'sale' && txType !== 'historical_reference') return tx.paymentMethod || 'Cash';
     const settlement = getSaleSettlementBreakdown(tx);
     if (settlement.creditDue > 0) return 'Credit';
     if (settlement.cashPaid > 0 && settlement.onlinePaid > 0) return 'Split';
@@ -291,7 +326,8 @@ export default function Transactions() {
     return filteredTransactions.slice(start, start + TRANSACTIONS_ROWS_PER_PAGE);
   }, [filteredTransactions, transactionPage]);
   const paginatedTransactionRows = useMemo(() => paginatedTransactions.map((tx) => {
-    const isSale = tx.type === 'sale';
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    const isSale = txType === 'sale' || txType === 'historical_reference';
     const isReturn = tx.type === 'return';
     const isPayment = tx.type === 'payment';
     const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
@@ -301,7 +337,7 @@ export default function Transactions() {
       isReturn,
       isPayment,
       itemCount,
-      typeLabel: isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT',
+      typeLabel: isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT',
       typeVariant: isSale ? 'success' : isReturn ? 'destructive' : 'secondary',
       amountClass: isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700',
     };
@@ -320,7 +356,7 @@ export default function Transactions() {
 
   useEffect(() => {
     setTransactionPage(1);
-  }, [filterType, customStart, customEnd]);
+  }, [filterType, customStart, customEnd, searchTerm]);
 
   useEffect(() => {
     setDeletedPage(1);
@@ -781,8 +817,32 @@ export default function Transactions() {
     return { tone: 'bg-emerald-50 border-emerald-200 text-emerald-800', title: 'Safe edit', detail: 'Edit is allowed with standard reconcile and audit trace.' };
   }, [editingTx, editingSaleLinkageInfo]);
 
+
+  const diagnostics = useMemo(() => {
+    const typeCounts = transactions.reduce<Record<string, number>>((acc, tx) => {
+      const txType = String((tx as Transaction & { type?: string }).type || 'unknown').toLowerCase();
+      acc[txType] = (acc[txType] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      loadedTransactions: transactions.length,
+      filteredTransactions: filteredTransactions.length,
+      windowedMode: isTransactionWindowed,
+      hasMoreWindow: hasMoreTransactionsWindow,
+      typeCounts,
+      searchTerm,
+    };
+  }, [transactions, filteredTransactions.length, isTransactionWindowed, hasMoreTransactionsWindow, searchTerm]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const show = Boolean((import.meta as any)?.env?.DEV) || new URLSearchParams(window.location.search).get('debug') === '1';
+    if (!show) return;
+    console.info('[TX][DIAGNOSTICS]', diagnostics);
+  }, [diagnostics]);
+
   const stats = useMemo(() => {
-      const productsById = new Map(products.map(product => [product.id, product]));
+      const productsById = new Map<string, Product>(products.map(product => [product.id, product]));
       const resolveBuyPrice = (item: CartItem, txDate: string) => {
           const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
           if (direct > 0) return direct;
@@ -804,8 +864,10 @@ export default function Transactions() {
 
       filteredTransactions.forEach(tx => {
           const amount = Math.abs(tx.total);
+          const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+          const isSaleLike = txType === 'sale' || txType === 'historical_reference';
           
-          if (tx.type === 'sale') {
+          if (isSaleLike) {
               totalRevenue += amount;
               totalDiscount += (tx.discount || 0);
               // Calculate Profit: (Sell - Buy) * Qty
@@ -833,7 +895,8 @@ export default function Transactions() {
   }, [filteredTransactions, products]);
 
   const getSaleSettlementText = (tx: Transaction) => {
-    if (tx.type !== 'sale') return null;
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    if (txType !== 'sale' && txType !== 'historical_reference') return null;
     const settlement = getSaleSettlementBreakdown(tx);
     const used = Math.max(0, Number(tx.storeCreditUsed || 0));
     return `Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` • SC ${formatINRPrecise(used)}` : ''}`;
@@ -996,6 +1059,13 @@ export default function Transactions() {
                 </div>
             )}
             
+            <Input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search product id/name, customer name/phone"
+              className="h-9 w-[280px] text-sm"
+            />
+
             <Badge variant="outline" className="h-9 px-3 bg-background flex items-center gap-2 ml-auto md:ml-0">
                 <Calendar className="w-3.5 h-3.5" />
                 {filteredTransactions.length} records
@@ -1202,7 +1272,7 @@ export default function Transactions() {
                     <Calendar className="w-6 h-6 opacity-50" />
                 </div>
                 <p className="font-medium">No transactions found</p>
-                <p className="text-sm">Try changing the date filter.</p>
+                <p className="text-sm">Try changing the date filter or search keyword.</p>
             </div>
         ) : viewMode === 'list' || viewMode === 'list-details' ? (
             <Card className="overflow-hidden border-none shadow-sm">
