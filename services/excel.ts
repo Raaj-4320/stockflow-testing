@@ -1,6 +1,6 @@
 
 import * as XLSX from 'xlsx';
-import { Product, Transaction, Customer } from '../types';
+import { Product, Transaction, Customer, CartItem } from '../types';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { getCanonicalReturnAllocation, getResolvedReturnHandlingMode, getSaleSettlementBreakdown, loadData } from './storage';
 import { formatMoneyPrecise } from './numberFormat';
@@ -150,8 +150,36 @@ export const exportProductsToExcel = (products: Product[]) => {
  */
 export const exportTransactionsToExcel = (transactions: Transaction[]) => {
     const effects = buildTransactionEffects(transactions);
-    const { customers } = loadData();
+    const { customers, products } = loadData();
     const customerPhoneById = new Map((customers || []).map(customer => [customer.id, customer.phone || '']));
+    const productsById = new Map((products || []).map(product => [product.id, product]));
+    type BuyPriceSource = 'item' | 'history' | 'current' | 'none';
+    const buyPriceSourceCounts: Record<BuyPriceSource, number> = {
+        item: 0,
+        history: 0,
+        current: 0,
+        none: 0,
+    };
+    let totalExportedLineProfit = 0;
+
+    const resolveBuyPriceForExport = (item: CartItem, txDate: string): { buyPrice: number; source: BuyPriceSource } => {
+        const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
+        if (direct > 0) return { buyPrice: direct, source: 'item' };
+        const product = productsById.get(item.id);
+        if (!product) return { buyPrice: 0, source: 'none' };
+
+        const txTime = new Date(txDate).getTime();
+        const historical = (product.purchaseHistory || [])
+            .filter(entry => Number.isFinite(new Date(entry.date).getTime()) && new Date(entry.date).getTime() <= txTime)
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+        const historicalBuy = historical ? Number(historical.nextBuyPrice ?? historical.unitPrice ?? 0) : 0;
+        if (Number.isFinite(historicalBuy) && historicalBuy > 0) return { buyPrice: historicalBuy, source: 'history' };
+
+        const current = Number.isFinite(product.buyPrice) ? Number(product.buyPrice) : 0;
+        if (current > 0) return { buyPrice: current, source: 'current' };
+        return { buyPrice: 0, source: 'none' };
+    };
+
     const data: Array<Record<string, string | number>> = [];
 
     transactions.forEach((t) => {
@@ -163,6 +191,14 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
 
         if (items.length <= 1) {
             const item = items[0];
+            const resolvedBuy = item ? resolveBuyPriceForExport(item, t.date) : { buyPrice: 0, source: 'none' as BuyPriceSource };
+            const qty = item?.quantity || 0;
+            const sellPrice = item?.sellPrice || 0;
+            const lineRevenue = qty * sellPrice;
+            const lineCost = qty * resolvedBuy.buyPrice;
+            const lineProfit = lineRevenue - lineCost;
+            buyPriceSourceCounts[resolvedBuy.source] += item ? 1 : 0;
+            totalExportedLineProfit += lineProfit;
             const lineTotal = item ? ((item.sellPrice || 0) * (item.quantity || 0) - (item.discountAmount || 0)) : 0;
             data.push({
                 'Row Type': 'SINGLE',
@@ -179,6 +215,11 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
                 'Color': item?.selectedColor || (item ? NO_COLOR : ''),
                 'Qty': item?.quantity || 0,
                 'Unit Price (₹)': item?.sellPrice || 0,
+                'Buy Price (₹)': resolvedBuy.buyPrice,
+                'Buy Price Source': resolvedBuy.source,
+                'Line Revenue (₹)': lineRevenue,
+                'Line Cost (₹)': lineCost,
+                'Line Profit (₹)': lineProfit,
                 'Line Total (₹)': lineTotal,
                 'Subtotal (₹)': txSubtotal,
                 'Discount (₹)': t.discount || 0,
@@ -213,6 +254,11 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
             'Color': '',
             'Qty': '',
             'Unit Price (₹)': '',
+            'Buy Price (₹)': '',
+            'Buy Price Source': '',
+            'Line Revenue (₹)': '',
+            'Line Cost (₹)': '',
+            'Line Profit (₹)': '',
             'Line Total (₹)': '',
             'Subtotal (₹)': txSubtotal,
             'Discount (₹)': t.discount || 0,
@@ -231,6 +277,12 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
         });
 
         items.forEach((item, index) => {
+            const resolvedBuy = resolveBuyPriceForExport(item, t.date);
+            buyPriceSourceCounts[resolvedBuy.source] += 1;
+            const lineRevenue = (item.sellPrice || 0) * (item.quantity || 0);
+            const lineCost = resolvedBuy.buyPrice * (item.quantity || 0);
+            const lineProfit = lineRevenue - lineCost;
+            totalExportedLineProfit += lineProfit;
             const lineSubtotal = (item.sellPrice || 0) * (item.quantity || 0);
             const lineDiscount = item.discountAmount || 0;
             const lineTotal = lineSubtotal - lineDiscount;
@@ -249,6 +301,11 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
                 'Color': item.selectedColor || NO_COLOR,
                 'Qty': item.quantity,
                 'Unit Price (₹)': item.sellPrice || 0,
+                'Buy Price (₹)': resolvedBuy.buyPrice,
+                'Buy Price Source': resolvedBuy.source,
+                'Line Revenue (₹)': lineRevenue,
+                'Line Cost (₹)': lineCost,
+                'Line Profit (₹)': lineProfit,
                 'Line Total (₹)': lineTotal,
                 'Subtotal (₹)': lineSubtotal,
                 'Discount (₹)': lineDiscount,
@@ -271,6 +328,14 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Transactions');
+    const summarySheet = XLSX.utils.json_to_sheet([
+        { Metric: 'Rows using item buy price', Value: buyPriceSourceCounts.item },
+        { Metric: 'Rows using history buy price', Value: buyPriceSourceCounts.history },
+        { Metric: 'Rows using current buy price', Value: buyPriceSourceCounts.current },
+        { Metric: 'Rows using none buy price', Value: buyPriceSourceCounts.none },
+        { Metric: 'Total exported line profit (₹)', Value: totalExportedLineProfit },
+    ]);
+    XLSX.utils.book_append_sheet(workbook, summarySheet, 'Audit_Summary');
 
     const wscols = [
         { wch: 10 }, // Row Type
@@ -287,6 +352,11 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
         { wch: 16 }, // Color
         { wch: 8 }, // Qty
         { wch: 12 }, // Unit Price
+        { wch: 12 }, // Buy Price
+        { wch: 14 }, // Buy Price Source
+        { wch: 14 }, // Line Revenue
+        { wch: 12 }, // Line Cost
+        { wch: 12 }, // Line Profit
         { wch: 12 }, // Line Total
         { wch: 12 }, // Subtotal
         { wch: 12 }, // Discount
