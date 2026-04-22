@@ -8,6 +8,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
+import { useVersionCheck } from './src/hooks/useVersionCheck';
 
 const Admin = lazy(() => import('./pages/Admin'));
 const Sales = lazy(() => import('./pages/Sales'));
@@ -16,6 +17,7 @@ const Transactions = lazy(() => import('./pages/Transactions'));
 const Customers = lazy(() => import('./pages/Customers'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Finance = lazy(() => import('./pages/Finance'));
+const Financial = lazy(() => import('./pages/Financial'));
 const FreightBooking = lazy(() => import('./pages/FreightBooking'));
 const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 
@@ -68,12 +70,15 @@ const ProtectedRoute = ({ isVerified, children }: { isVerified: boolean; childre
 };
 
 export default function App() {
+  const currentBuildId = typeof APP_BUILD_ID === 'string' ? APP_BUILD_ID : 'unknown';
+  const { updateAvailable, latestVersionData, dismissUpdate } = useVersionCheck(currentBuildId);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unverified' | 'unauthenticated'>('loading');
   const [currentEmail, setCurrentEmail] = useState<string | null>(getCurrentUser());
   const [storeName, setStoreName] = useState('StockFlow');
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
   const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
+  const [salesCartCount, setSalesCartCount] = useState(0);
 
   useEffect(() => {
     if (!auth) {
@@ -134,6 +139,29 @@ export default function App() {
     return () => clearTimeout(t);
   }, [opStatus]);
 
+  useEffect(() => {
+    const handleSalesCartState = (event: Event) => {
+      const detail = (event as CustomEvent<{ count?: number }>).detail;
+      setSalesCartCount(Number(detail?.count || 0));
+    };
+    window.addEventListener('sales-cart-state', handleSalesCartState as EventListener);
+    return () => window.removeEventListener('sales-cart-state', handleSalesCartState as EventListener);
+  }, []);
+
+  const handleUpdate = () => {
+    const currentHashPath = window.location.hash.replace('#', '') || '/';
+    if (currentHashPath === '/sales' && salesCartCount > 0) {
+      const shouldContinue = window.confirm('Unsaved transaction will be lost. Continue?');
+      if (!shouldContinue) return;
+    }
+    const targetUrl = (latestVersionData?.targetUrl || '').trim();
+    if (targetUrl) {
+      window.location.assign(targetUrl);
+      return;
+    }
+    window.location.reload();
+  };
+
   const handleLoginSuccess = () => {
       setAuthStatus('authenticated');
   };
@@ -154,8 +182,22 @@ export default function App() {
     <Router>
       <MenuController setIsMenuOpen={setIsMenuOpen} />
       <div className="flex h-screen bg-background overflow-hidden">
+        {updateAvailable && (
+          <div className="fixed top-0 left-0 right-0 z-[95] bg-amber-500 text-slate-950 text-xs px-3 py-2">
+            <div className="max-w-7xl mx-auto flex items-center justify-between gap-2">
+              <div>
+                <div className="font-semibold">🔄 Update available</div>
+                <div>A new version is ready</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button size="sm" className="h-8 bg-slate-900 text-white hover:bg-slate-800" onClick={handleUpdate}>Update Now</Button>
+                <Button size="sm" variant="outline" className="h-8 border-slate-900 text-slate-900 hover:bg-slate-100" onClick={dismissUpdate}>Later</Button>
+              </div>
+            </div>
+          </div>
+        )}
         {(cloudStatus.status === 'offline' || cloudStatus.status === 'missing_store' || cloudStatus.status === 'error') && (
-          <div className="fixed top-0 left-0 right-0 z-[80] bg-red-600 text-white text-xs px-3 py-2 text-center">
+          <div className={`fixed top-0 left-0 right-0 z-[80] bg-red-600 text-white text-xs px-3 py-2 text-center ${updateAvailable ? 'mt-12' : ''}`}>
             {cloudStatus.message || 'Live cloud data unavailable. Business data operations are blocked until connection is restored.'}
           </div>
         )}
@@ -183,6 +225,7 @@ export default function App() {
             <NavItem to="/pdf" icon={FileText} label="Reports" />
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
+            <NavItem to="/financial" icon={Landmark} label="Financial" />
             <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
             <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Panel" />
 
@@ -252,6 +295,12 @@ export default function App() {
                               </div>
                               <span className="font-medium text-sm">Finance</span>
                          </Link>
+                         <Link to="/financial" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                              <div className="p-3 bg-slate-100 text-slate-700 rounded-full mb-2">
+                                  <Landmark className="w-6 h-6" />
+                              </div>
+                              <span className="font-medium text-sm">Financial</span>
+                         </Link>
                          <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-orange-100 text-orange-600 rounded-full mb-2">
                                   <Truck className="w-6 h-6" />
@@ -292,6 +341,7 @@ export default function App() {
                 <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
+                <Route path="/financial" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Financial /></ProtectedRoute>} />
                 <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
                 <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><PurchasePanel /></ProtectedRoute>} />
                 

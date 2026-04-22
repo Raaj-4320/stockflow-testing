@@ -677,8 +677,8 @@ export default function Customers() {
       doc.setFillColor(15, 23, 42); doc.rect(0, 0, pageWidth, 40, 'F');
       doc.setFontSize(20); doc.setTextColor(255, 255, 255); doc.text("Customer Dues Report", 14, 20);
       doc.setFontSize(10); doc.setTextColor(203, 213, 225); doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
-      const tableBody = filteredData.displayCustomers.map(c => [c.name, c.phone, `Rs.${formatMoneyWhole(c.totalSpend)}`, `Rs.${formatMoneyPrecise(c.totalDue)}`]);
-      tableBody.push(['TOTAL', '', '', `Rs.${formatMoneyPrecise(filteredData.totalDues)}`]);
+      const tableBody = filteredData.displayCustomers.map(c => [c.name, c.phone, `Rs.${formatMoneyWhole(c.totalSpend)}`, `Rs.${formatMoneyWhole(c.totalDue)}`]);
+      tableBody.push(['TOTAL', '', '', `Rs.${formatMoneyWhole(filteredData.totalDues)}`]);
       autoTable(doc, { startY: 50, head: [['Name', 'Phone', 'Total Spend', 'Current Due']], body: tableBody, theme: 'striped', columnStyles: { 3: { halign: 'right', fontStyle: 'bold', textColor: [220, 38, 38] } } });
       doc.save(`Customer_Dues_Report.pdf`);
   };
@@ -814,8 +814,8 @@ export default function Customers() {
                 <td className="p-3">{customer.phone}</td>
                 <td className="p-3">{customer.visitCount}</td>
                 <td className="p-3">₹{formatMoneyWhole(customer.totalSpend)}</td>
-                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{formatMoneyPrecise(customer.totalDue)}</td>
-                <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{formatMoneyPrecise(customer.storeCredit || 0)}</td>
+                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{formatMoneyWhole(customer.totalDue)}</td>
+                <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{formatMoneyWhole(customer.storeCredit || 0)}</td>
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
@@ -935,11 +935,11 @@ export default function Customers() {
                       <div className="flex gap-3 mt-6">
                            <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
                                <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
-                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyPrecise(viewingCustomerCanonical?.totalDue || 0)}</div>
+                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(viewingCustomerCanonical?.totalDue || 0)}</div>
                            </div>
                            <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
                                <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
-                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{formatMoneyPrecise(viewingCustomerCanonical?.storeCredit || 0)}</div>
+                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{formatMoneyWhole(viewingCustomerCanonical?.storeCredit || 0)}</div>
                            </div>
                            <div className="flex flex-col gap-2">
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={(viewingCustomerCanonical?.totalDue || 0) <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
@@ -999,7 +999,7 @@ export default function Customers() {
                                                 </div>
                                                 {saleSettlement && (
                                                   <div className="text-[10px] text-muted-foreground font-medium mt-1">
-                                                    • Paid Now ₹{saleSettlement.paidNow.toFixed(2)} • Credit Due ₹{saleSettlement.creditDue.toFixed(2)}{saleSettlement.storeCreditUsed > 0 ? ` • Used SC ₹${saleSettlement.storeCreditUsed.toFixed(2)}` : ''}
+                                                    • Paid Now ₹{formatMoneyWhole(saleSettlement.paidNow)} • Credit Due ₹{formatMoneyWhole(saleSettlement.creditDue)}{saleSettlement.storeCreditUsed > 0 ? ` • Used SC ₹${formatMoneyWhole(saleSettlement.storeCreditUsed)}` : ''}
                                                   </div>
                                                 )}
                                                 {!saleSettlement && ledgerRow && (
@@ -1114,12 +1114,12 @@ export default function Customers() {
                             autoFocus 
                           />
                         </div>
-                        <p className="text-[10px] text-muted-foreground font-bold">Due outstanding: ₹{formatMoneyPrecise(viewingCustomerCanonical?.totalDue || 0)} (overpayment allowed)</p>
+                        <p className="text-[10px] text-muted-foreground font-bold">Due outstanding: ₹{formatMoneyWhole(viewingCustomerCanonical?.totalDue || 0)} (overpayment allowed)</p>
                         <p className="text-[10px] text-muted-foreground">Any excess above due will be saved as store credit.</p>
                         {paymentAmountValid && (
                           <div className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-[10px]">
-                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{formatMoneyPrecise(paymentAppliedToDue)}</span></div>
-                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{formatMoneyPrecise(paymentExcessToCredit)}</span></div>
+                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{formatMoneyWhole(paymentAppliedToDue)}</span></div>
+                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{formatMoneyWhole(paymentExcessToCredit)}</span></div>
                           </div>
                         )}
                       </div>
@@ -1192,7 +1192,7 @@ export default function Customers() {
                                 <div className="flex-1 min-w-0">
                                     <p className="text-sm font-black text-slate-800 leading-tight truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                                     <p className="text-[10px] font-bold text-muted-foreground mt-1 tracking-tight">
-                                        Qty: {item.quantity} <span className="mx-1">•</span> ₹{item.sellPrice.toFixed(0)}
+                                        Qty: {item.quantity} <span className="mx-1">•</span> ₹{formatMoneyWhole(item.sellPrice)}
                                     </p>
                                     {item.discountAmount !== undefined && item.discountAmount > 0 ? (
                                         <p className="text-[9px] font-bold text-emerald-600 mt-0.5">
@@ -1237,10 +1237,10 @@ export default function Customers() {
                             <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800 p-3 text-[11px] space-y-1">
                               <p className="font-bold uppercase tracking-wider text-slate-300">Settlement Breakdown</p>
                               <div className="flex justify-between"><span>Total Sale</span><span>₹{formatMoneyWhole(Math.abs(selectedTx.total))}</span></div>
-                              <div className="flex justify-between"><span>Store Credit Used</span><span>₹{formatMoneyPrecise(Math.max(0, Number(selectedTx.storeCreditUsed || 0)))}</span></div>
-                              <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyPrecise(getSaleSettlementBreakdown(selectedTx).cashPaid)}</span></div>
-                              <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyPrecise(getSaleSettlementBreakdown(selectedTx).onlinePaid)}</span></div>
-                              <div className="flex justify-between font-semibold"><span>Credit Due Created</span><span>₹{formatMoneyPrecise(getSaleSettlementBreakdown(selectedTx).creditDue)}</span></div>
+                              <div className="flex justify-between"><span>Store Credit Used</span><span>₹{formatMoneyWhole(Math.max(0, Number(selectedTx.storeCreditUsed || 0)))}</span></div>
+                              <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).cashPaid)}</span></div>
+                              <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).onlinePaid)}</span></div>
+                              <div className="flex justify-between font-semibold"><span>Credit Due Created</span><span>₹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).creditDue)}</span></div>
                             </div>
                           )}
                       </div>
@@ -1344,16 +1344,16 @@ export default function Customers() {
                       <div className="bg-slate-50 p-3 rounded-lg border space-y-1">
                           <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                               <span>Order Total</span>
-                              <span>₹{selectedUpfrontOrder.totalCost.toFixed(2)}</span>
+                              <span>₹{formatMoneyWhole(selectedUpfrontOrder.totalCost)}</span>
                           </div>
                           <div className="flex justify-between text-[10px] font-bold text-emerald-600 uppercase tracking-wider">
                               <span>Advance Paid</span>
-                              <span>₹{selectedUpfrontOrder.advancePaid.toFixed(2)}</span>
+                              <span>₹{formatMoneyWhole(selectedUpfrontOrder.advancePaid)}</span>
                           </div>
                           <div className="h-px bg-slate-200 my-1"></div>
                           <div className="flex justify-between text-xs font-black text-red-600">
                               <span>Balance Due</span>
-                              <span>₹{selectedUpfrontOrder.remainingAmount.toFixed(2)}</span>
+                              <span>₹{formatMoneyWhole(selectedUpfrontOrder.remainingAmount)}</span>
                           </div>
                       </div>
                       <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px]">
@@ -1373,9 +1373,9 @@ export default function Customers() {
                       </div>
                       {isCollectAmountValid && (
                         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] space-y-1">
-                          <div className="flex justify-between"><span className="text-muted-foreground">Remaining after this collection</span><span className="font-black text-slate-700">₹{projectedRemainingAfterCollect.toFixed(2)}</span></div>
+                          <div className="flex justify-between"><span className="text-muted-foreground">Remaining after this collection</span><span className="font-black text-slate-700">₹{formatMoneyWhole(projectedRemainingAfterCollect)}</span></div>
                           <div className="flex justify-between"><span className="text-muted-foreground">Order status after collection</span><span className={`font-black ${projectedRemainingAfterCollect <= 0 ? 'text-emerald-700' : 'text-amber-700'}`}>{projectedRemainingAfterCollect <= 0 ? 'Paid in Full' : 'Balance Due'}</span></div>
-                          <div className="flex justify-between"><span className="text-muted-foreground">Possible store credit application (manual)</span><span className="font-black text-emerald-700">₹{possibleCreditApplication.toFixed(2)}</span></div>
+                          <div className="flex justify-between"><span className="text-muted-foreground">Possible store credit application (manual)</span><span className="font-black text-emerald-700">₹{formatMoneyWhole(possibleCreditApplication)}</span></div>
                         </div>
                       )}
                       <div className="flex gap-2 pt-4 border-t">

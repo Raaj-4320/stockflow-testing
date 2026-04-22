@@ -1,0 +1,5 @@
+{
+  "version": "__APP_BUILD_ID__",
+  "deployedAt": "__DEPLOYED_AT__",
+  "targetUrl": "__TARGET_URL__"
+}
