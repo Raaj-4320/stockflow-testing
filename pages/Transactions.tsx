@@ -4,6 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
+import { auth } from '../services/firebase';
 import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
@@ -15,6 +16,14 @@ import { downloadTransactionsData, downloadTransactionsTemplate, importHistorica
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 
 export default function Transactions() {
+  type BackendShadowTransaction = {
+    id: string;
+    type?: string;
+    transactionDate?: string;
+    totals?: { grandTotal?: number };
+    lineItems?: Array<{ quantity?: number; unitPrice?: number; unitCost?: number; buyPrice?: number }>;
+  };
+
   const TRANSACTIONS_ROWS_PER_PAGE = 25;
   const DELETED_ROWS_PER_PAGE = 25;
   const TRANSACTIONS_WINDOW_BATCH_SIZE = 200;
@@ -26,6 +35,7 @@ export default function Transactions() {
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [viewMode, setViewMode] = useState<'default' | 'list' | 'list-details' | 'medium'>('list-details');
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -73,6 +83,8 @@ export default function Transactions() {
   const [hasMoreDeletedWindow, setHasMoreDeletedWindow] = useState(false);
   const [isTransactionWindowed, setIsTransactionWindowed] = useState(true);
   const [isDeletedWindowed, setIsDeletedWindowed] = useState(true);
+  const [firestoreShadowTransactions, setFirestoreShadowTransactions] = useState<Transaction[]>([]);
+  const [backendShadowTransactions, setBackendShadowTransactions] = useState<BackendShadowTransaction[]>([]);
 
   const formatRoleLabel = (role?: string) => {
     const source = (role || 'Admin').trim();
@@ -99,6 +111,7 @@ export default function Transactions() {
         const deletedWindow = loadDeletedTransactionsPage({ limit: DELETED_WINDOW_BATCH_SIZE });
         const data = loadData();
         setTransactions(txWindow.rows);
+        setFirestoreShadowTransactions(data.transactions || []);
         setDeletedTransactions(deletedWindow.rows);
         setCustomers(data.customers);
         setProducts(data.products || []);
@@ -125,6 +138,234 @@ export default function Transactions() {
         window.removeEventListener('local-storage-update', refreshData);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const envEnabled = String((import.meta as any)?.env?.VITE_ENABLE_TX_SHADOW || '').toLowerCase() === 'true';
+    const queryEnabled = new URLSearchParams(window.location.search).get('shadow') === '1';
+    const shadowEnabled = envEnabled || queryEnabled;
+    if (!shadowEnabled || firestoreShadowTransactions.length === 0) return;
+    let cancelled = false;
+
+    const getBackendShadowBaseUrl = () => {
+      const raw = String(
+        ((import.meta as any)?.env?.VITE_BACKEND_BASE_URL)
+        || ((import.meta as any)?.env?.VITE_API_BASE_URL)
+        || ''
+      ).trim();
+      return raw.replace(/\/+$/, '');
+    };
+
+    const buildShadowDateWindow = () => {
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+      const clone = (date: Date) => new Date(date.getTime());
+      const startEnd = (start: Date, end: Date) => ({
+        dateFrom: new Date(start.setHours(0, 0, 0, 0)).toISOString(),
+        dateTo: new Date(end.setHours(23, 59, 59, 999)).toISOString(),
+      });
+
+      switch (filterType) {
+        case 'today':
+          return startEnd(clone(now), clone(now));
+        case 'yesterday': {
+          const y = clone(now);
+          y.setDate(y.getDate() - 1);
+          return startEnd(y, y);
+        }
+        case '7days': {
+          const start = clone(now);
+          start.setDate(start.getDate() - 7);
+          return startEnd(start, clone(now));
+        }
+        case '15days': {
+          const start = clone(now);
+          start.setDate(start.getDate() - 15);
+          return startEnd(start, clone(now));
+        }
+        case '30days': {
+          const start = clone(now);
+          start.setDate(start.getDate() - 30);
+          return startEnd(start, clone(now));
+        }
+        case '6months': {
+          const start = clone(now);
+          start.setMonth(start.getMonth() - 6);
+          return startEnd(start, clone(now));
+        }
+        case '1year': {
+          const start = clone(now);
+          start.setFullYear(start.getFullYear() - 1);
+          return startEnd(start, clone(now));
+        }
+        case 'custom': {
+          if (!customStart) return null;
+          const start = new Date(customStart);
+          const end = customEnd ? new Date(customEnd) : clone(now);
+          return startEnd(start, end);
+        }
+        default:
+          return null;
+      }
+    };
+
+    const fetchBackendTransactionsShadow = async () => {
+      try {
+        const baseUrl = getBackendShadowBaseUrl();
+        const endpointBase = `${baseUrl || ''}/api/v1/transactions`;
+        const token = await auth?.currentUser?.getIdToken?.();
+        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+        const pageSize = 200;
+        let page = 1;
+        const all: BackendShadowTransaction[] = [];
+        const dateWindow = buildShadowDateWindow();
+        const query = searchTerm.trim();
+        const typeFilter = 'all';
+
+        while (!cancelled) {
+          const params = new URLSearchParams({
+            page: String(page),
+            pageSize: String(pageSize),
+            sortBy: 'transactionDate',
+            sortOrder: 'desc',
+          });
+          if (dateWindow?.dateFrom) params.set('dateFrom', dateWindow.dateFrom);
+          if (dateWindow?.dateTo) params.set('dateTo', dateWindow.dateTo);
+          if (query) params.set('q', query);
+          if (typeFilter !== 'all') params.set('type', typeFilter);
+          const url = `${endpointBase}?${params.toString()}`;
+          const response = await fetch(url, { headers });
+          if (!response.ok) throw new Error(`backend shadow fetch failed (${response.status})`);
+          const payload = await response.json() as { items?: BackendShadowTransaction[] };
+          const rows = Array.isArray(payload?.items) ? payload.items : [];
+          all.push(...rows);
+          if (rows.length < pageSize) break;
+          page += 1;
+        }
+
+        if (cancelled) return;
+        setBackendShadowTransactions(all);
+      } catch (error) {
+        if (cancelled) return;
+        console.log('[TX_SHADOW_COMPARE]', {
+          enabled: true,
+          filters: {
+            filterType,
+            customStart,
+            customEnd,
+            type: 'all',
+            q: searchTerm.trim() || '',
+          },
+          shadowFetchError: error instanceof Error ? error.message : String(error),
+          mismatch: false,
+        });
+      }
+    };
+
+    fetchBackendTransactionsShadow();
+    return () => { cancelled = true; };
+  }, [firestoreShadowTransactions, filterType, customStart, customEnd, searchTerm]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const envEnabled = String((import.meta as any)?.env?.VITE_ENABLE_TX_SHADOW || '').toLowerCase() === 'true';
+    const queryEnabled = new URLSearchParams(window.location.search).get('shadow') === '1';
+    const shadowEnabled = envEnabled || queryEnabled;
+    if (!shadowEnabled || !backendShadowTransactions.length) return;
+
+    const isSaleLikeFirestore = (tx: Transaction) => {
+      const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+      return txType === 'sale' || txType === 'historical_reference';
+    };
+    const isSaleLikeBackend = (tx: BackendShadowTransaction) => String(tx.type || '').toLowerCase() === 'sale';
+
+    const firestoreFiltered = filteredTransactions;
+    const firestoreCount = firestoreFiltered.length;
+    const backendCount = backendShadowTransactions.length;
+    const firestoreRevenue = firestoreFiltered
+      .filter(isSaleLikeFirestore)
+      .reduce((sum, tx) => sum + Math.abs(Number(tx.total || 0)), 0);
+    const backendRevenue = backendShadowTransactions
+      .filter(isSaleLikeBackend)
+      .reduce((sum, tx) => sum + Math.abs(Number(tx.totals?.grandTotal || 0)), 0);
+
+    const firestoreGrossProfit = firestoreFiltered
+      .filter(isSaleLikeFirestore)
+      .reduce((sum, tx) => sum + (tx.items || []).reduce((lineSum, item) => {
+        const qty = Number(item.quantity || 0);
+        const sell = Number(item.sellPrice || 0);
+        const buy = Number(item.buyPrice || 0);
+        return lineSum + (qty * (sell - buy));
+      }, 0), 0);
+
+    const backendHasCostData = backendShadowTransactions.some(tx =>
+      (tx.lineItems || []).some(line => Number.isFinite(Number((line as any).unitCost ?? line.buyPrice)))
+    );
+    const backendGrossProfit = backendHasCostData
+      ? backendShadowTransactions
+        .filter(isSaleLikeBackend)
+        .reduce((sum, tx) => sum + (tx.lineItems || []).reduce((lineSum, line) => {
+          const qty = Number(line.quantity || 0);
+          const sell = Number(line.unitPrice || 0);
+          const buy = Number((line as any).unitCost ?? line.buyPrice ?? 0);
+          return lineSum + (qty * (sell - buy));
+        }, 0), 0)
+      : null;
+
+    const toRange = (dates: string[]) => {
+      const valid = dates
+        .map((iso) => new Date(iso).getTime())
+        .filter((value) => Number.isFinite(value))
+        .sort((a, b) => a - b);
+      if (!valid.length) return { from: null as string | null, to: null as string | null };
+      return { from: new Date(valid[0]).toISOString(), to: new Date(valid[valid.length - 1]).toISOString() };
+    };
+
+    const firestoreDateRange = toRange(firestoreFiltered.map(tx => tx.date));
+    const backendDateRange = toRange(backendShadowTransactions.map(tx => String(tx.transactionDate || '')));
+    const firestoreIds = new Set(firestoreFiltered.map((tx) => tx.id));
+    const backendIds = new Set(backendShadowTransactions.map((tx) => String(tx.id || '')));
+    const idsOnlyInFirestore = Array.from(firestoreIds).filter((id) => !backendIds.has(id)).slice(0, 10);
+    const idsOnlyInBackend = Array.from(backendIds).filter((id) => !firestoreIds.has(id)).slice(0, 10);
+
+    const countMismatch = firestoreCount !== backendCount;
+    const revenueMismatch = Math.abs(firestoreRevenue - backendRevenue) > 0.01;
+    const dateRangeMismatch = firestoreDateRange.from !== backendDateRange.from || firestoreDateRange.to !== backendDateRange.to;
+    const grossProfitMismatch = backendGrossProfit !== null && Math.abs(firestoreGrossProfit - backendGrossProfit) > 0.01;
+    const idMismatch = idsOnlyInFirestore.length > 0 || idsOnlyInBackend.length > 0;
+    const mismatch = countMismatch || revenueMismatch || dateRangeMismatch || grossProfitMismatch || idMismatch;
+
+    console.log('[TX_SHADOW_COMPARE]', {
+      enabled: shadowEnabled,
+      filters: {
+        filterType,
+        customStart,
+        customEnd,
+        type: 'all',
+        q: searchTerm.trim() || '',
+        mappedToBackend: {
+          dateFrom: true,
+          dateTo: true,
+          type: false,
+          q: true,
+        },
+      },
+      firestoreCount,
+      backendCount,
+      firestoreRevenue,
+      backendRevenue,
+      firestoreGrossProfit,
+      backendGrossProfit,
+      backendGrossProfitAvailable: backendGrossProfit !== null,
+      firestoreDateMin: firestoreDateRange.from,
+      firestoreDateMax: firestoreDateRange.to,
+      backendDateMin: backendDateRange.from,
+      backendDateMax: backendDateRange.to,
+      idsOnlyInFirestore,
+      idsOnlyInBackend,
+      mismatch,
+    });
+  }, [backendShadowTransactions, filteredTransactions, filterType, customStart, customEnd, searchTerm]);
 
   const loadOlderTransactionsWindow = () => {
     if (!transactionsWindowCursor || !hasMoreTransactionsWindow) return;
@@ -166,7 +407,7 @@ export default function Transactions() {
     setIsTransactionWindowed(false);
   };
 
-  const filteredTransactions = useMemo(() => {
+  const dateFilteredTransactions = useMemo(() => {
       const now = new Date();
       now.setHours(0,0,0,0); // Start of today
 
@@ -218,12 +459,46 @@ export default function Transactions() {
           }
       }).sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions, filterType, customStart, customEnd]);
+
   const customerPhoneById = useMemo(
     () => new Map(customers.map(customer => [customer.id, customer.phone || ''])),
     [customers]
   );
+  const productsById = useMemo(
+    () => new Map<string, Product>(products.map(product => [product.id, product])),
+    [products]
+  );
+
+  const filteredTransactions = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return dateFilteredTransactions;
+
+    return dateFilteredTransactions.filter((tx) => {
+      const customerPhone = tx.customerId ? (customerPhoneById.get(tx.customerId) || '') : '';
+      const baseHaystack = [
+        tx.id,
+        tx.customerName || '',
+        customerPhone,
+        tx.customerId || '',
+      ].join(' ').toLowerCase();
+      if (baseHaystack.includes(query)) return true;
+
+      return (tx.items || []).some((item) => {
+        const product = productsById.get(item.id);
+        const itemHaystack = [
+          item.id,
+          product?.id || '',
+          item.name || '',
+          product?.name || '',
+          product?.barcode || '',
+        ].join(' ').toLowerCase();
+        return itemHaystack.includes(query);
+      });
+    });
+  }, [dateFilteredTransactions, searchTerm, customerPhoneById, productsById]);
   const getDisplayPaymentMethod = (tx: Transaction) => {
-    if (tx.type !== 'sale') return tx.paymentMethod || 'Cash';
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    if (txType !== 'sale' && txType !== 'historical_reference') return tx.paymentMethod || 'Cash';
     const settlement = getSaleSettlementBreakdown(tx);
     if (settlement.creditDue > 0) return 'Credit';
     if (settlement.cashPaid > 0 && settlement.onlinePaid > 0) return 'Split';
@@ -291,7 +566,8 @@ export default function Transactions() {
     return filteredTransactions.slice(start, start + TRANSACTIONS_ROWS_PER_PAGE);
   }, [filteredTransactions, transactionPage]);
   const paginatedTransactionRows = useMemo(() => paginatedTransactions.map((tx) => {
-    const isSale = tx.type === 'sale';
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    const isSale = txType === 'sale' || txType === 'historical_reference';
     const isReturn = tx.type === 'return';
     const isPayment = tx.type === 'payment';
     const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
@@ -301,7 +577,7 @@ export default function Transactions() {
       isReturn,
       isPayment,
       itemCount,
-      typeLabel: isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT',
+      typeLabel: isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT',
       typeVariant: isSale ? 'success' : isReturn ? 'destructive' : 'secondary',
       amountClass: isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700',
     };
@@ -320,7 +596,7 @@ export default function Transactions() {
 
   useEffect(() => {
     setTransactionPage(1);
-  }, [filterType, customStart, customEnd]);
+  }, [filterType, customStart, customEnd, searchTerm]);
 
   useEffect(() => {
     setDeletedPage(1);
@@ -781,8 +1057,32 @@ export default function Transactions() {
     return { tone: 'bg-emerald-50 border-emerald-200 text-emerald-800', title: 'Safe edit', detail: 'Edit is allowed with standard reconcile and audit trace.' };
   }, [editingTx, editingSaleLinkageInfo]);
 
+
+  const diagnostics = useMemo(() => {
+    const typeCounts = transactions.reduce<Record<string, number>>((acc, tx) => {
+      const txType = String((tx as Transaction & { type?: string }).type || 'unknown').toLowerCase();
+      acc[txType] = (acc[txType] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      loadedTransactions: transactions.length,
+      filteredTransactions: filteredTransactions.length,
+      windowedMode: isTransactionWindowed,
+      hasMoreWindow: hasMoreTransactionsWindow,
+      typeCounts,
+      searchTerm,
+    };
+  }, [transactions, filteredTransactions.length, isTransactionWindowed, hasMoreTransactionsWindow, searchTerm]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const show = Boolean((import.meta as any)?.env?.DEV) || new URLSearchParams(window.location.search).get('debug') === '1';
+    if (!show) return;
+    console.info('[TX][DIAGNOSTICS]', diagnostics);
+  }, [diagnostics]);
+
   const stats = useMemo(() => {
-      const productsById = new Map(products.map(product => [product.id, product]));
+      const productsById = new Map<string, Product>(products.map(product => [product.id, product]));
       const resolveBuyPrice = (item: CartItem, txDate: string) => {
           const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
           if (direct > 0) return direct;
@@ -804,8 +1104,10 @@ export default function Transactions() {
 
       filteredTransactions.forEach(tx => {
           const amount = Math.abs(tx.total);
+          const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+          const isSaleLike = txType === 'sale' || txType === 'historical_reference';
           
-          if (tx.type === 'sale') {
+          if (isSaleLike) {
               totalRevenue += amount;
               totalDiscount += (tx.discount || 0);
               // Calculate Profit: (Sell - Buy) * Qty
@@ -833,7 +1135,8 @@ export default function Transactions() {
   }, [filteredTransactions, products]);
 
   const getSaleSettlementText = (tx: Transaction) => {
-    if (tx.type !== 'sale') return null;
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    if (txType !== 'sale' && txType !== 'historical_reference') return null;
     const settlement = getSaleSettlementBreakdown(tx);
     const used = Math.max(0, Number(tx.storeCreditUsed || 0));
     return `Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` • SC ${formatINRPrecise(used)}` : ''}`;
@@ -996,6 +1299,13 @@ export default function Transactions() {
                 </div>
             )}
             
+            <Input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search product id/name, customer name/phone"
+              className="h-9 w-[280px] text-sm"
+            />
+
             <Badge variant="outline" className="h-9 px-3 bg-background flex items-center gap-2 ml-auto md:ml-0">
                 <Calendar className="w-3.5 h-3.5" />
                 {filteredTransactions.length} records
@@ -1202,7 +1512,7 @@ export default function Transactions() {
                     <Calendar className="w-6 h-6 opacity-50" />
                 </div>
                 <p className="font-medium">No transactions found</p>
-                <p className="text-sm">Try changing the date filter.</p>
+                <p className="text-sm">Try changing the date filter or search keyword.</p>
             </div>
         ) : viewMode === 'list' || viewMode === 'list-details' ? (
             <Card className="overflow-hidden border-none shadow-sm">
