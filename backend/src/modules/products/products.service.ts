@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
 import { AuthTenantErrorCode } from '../../contracts/v1/common/error-codes';
 import { CreateProductDto } from '../../contracts/v1/products/create-product.dto';
@@ -6,11 +6,19 @@ import { ListProductsQueryDto } from '../../contracts/v1/products/list-products-
 import { ProductDto } from '../../contracts/v1/products/product.types';
 import { UpdateProductDto } from '../../contracts/v1/products/update-product.dto';
 import { normalizeCreatePayload, normalizeUpdatePayload } from './helpers/product-normalizer';
+import { AppConfigService } from '../../config/config.service';
+import { MongoProductsRepository } from './mongo-products.repository';
 import { ProductsRepository } from './products.repository';
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly repository: ProductsRepository) {}
+  private readonly logger = new Logger(ProductsService.name);
+
+  constructor(
+    private readonly repository: ProductsRepository,
+    private readonly mongoRepository?: MongoProductsRepository,
+    private readonly config?: AppConfigService,
+  ) {}
 
   async create(storeId: string, payload: CreateProductDto): Promise<ProductDto> {
     const normalized = normalizeCreatePayload(payload);
@@ -40,11 +48,30 @@ export class ProductsService {
   }
 
   async list(storeId: string, query: ListProductsQueryDto): Promise<ProductDto[]> {
+    if (this.config?.useMongoReads && this.mongoRepository) {
+      this.logger.log('[MONGO_READ] Products fetched from Mongo');
+      const all = await this.mongoRepository.findAll(storeId);
+      const includeArchived = Boolean(query.includeArchived);
+      const category = query.category?.trim().toLowerCase();
+      const search = query.q?.trim().toLowerCase();
+
+      return all
+        .filter((p) => includeArchived || !p.isArchived)
+        .filter((p) => (category ? p.category.toLowerCase() === category : true))
+        .filter((p) => {
+          if (!search) return true;
+          return p.name.toLowerCase().includes(search) || p.barcode.toLowerCase().includes(search);
+        })
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    }
+
     return this.repository.findMany(storeId, query);
   }
 
   async getById(storeId: string, id: string): Promise<ProductDto> {
-    const product = await this.repository.findById(storeId, id);
+    const product = this.config?.useMongoReads && this.mongoRepository
+      ? await this.mongoRepository.findById(storeId, id)
+      : await this.repository.findById(storeId, id);
     if (!product) {
       throw new NotFoundException({
         code: AuthTenantErrorCode.PRODUCT_NOT_FOUND,

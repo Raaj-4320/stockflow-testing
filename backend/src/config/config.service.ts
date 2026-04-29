@@ -83,4 +83,26 @@ export class AppConfigService {
   get mongodbAppName(): string {
     return this.env.MONGODB_APP_NAME;
   }
+
+  get mongodbMinPoolSize(): number {
+    return this.env.MONGODB_MIN_POOL_SIZE;
+  }
+
+  get mongodbMaxPoolSize(): number {
+    return this.env.MONGODB_MAX_POOL_SIZE;
+  }
+
+  get mongodbServerSelectionTimeoutMs(): number {
+    return this.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS;
+  }
+
+  get mongodbSocketTimeoutMs(): number {
+    return this.env.MONGODB_SOCKET_TIMEOUT_MS;
+  }
+
+  get useMongoReads(): boolean {
+    return this.env.USE_MONGO_READS;
+  }
 }
+
+

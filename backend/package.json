@@ -25,7 +25,9 @@
     "test:finance:expenses": "jest tests/finance/expenses-source-activation.spec.ts",
     "test:finance:sessions": "jest tests/finance/cash-sessions-source-activation.spec.ts",
     "test:finance:delete-compensations": "jest tests/finance/delete-compensations-source-activation.spec.ts",
-    "test:finance:update-corrections": "jest tests/finance/update-corrections-source-activation.spec.ts"
+    "test:finance:update-corrections": "jest tests/finance/update-corrections-source-activation.spec.ts",
+    "verify:mongo:readiness": "node -r ts-node/register scripts/verify-mongo-readiness.ts",
+    "verify:mongo:parity": "ts-node scripts/mongo-read-parity-check.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.8",

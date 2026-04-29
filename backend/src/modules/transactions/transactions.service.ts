@@ -2,9 +2,11 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 
+import { AppConfigService } from '../../config/config.service';
 import { IdempotencyService } from '../../infrastructure/idempotency/idempotency.service';
 import { CustomersRepository } from '../customers/customers.repository';
 import { ProductsRepository } from '../products/products.repository';
@@ -28,21 +30,43 @@ import {
 } from '../../contracts/v1/transactions/transaction-response.dto';
 import { TransactionDto, TransactionLineItemSnapshotDto } from '../../contracts/v1/transactions/transaction.types';
 import { FinanceArtifactsRepository } from '../finance-artifacts/finance-artifacts.repository';
+import { MongoDeletedTransactionsRepository } from './mongo-deleted-transactions.repository';
+import { MongoTransactionsRepository } from './mongo-transactions.repository';
 import { TransactionsRepository } from './transactions.repository';
 
 @Injectable()
 export class TransactionsService {
+  private readonly logger = new Logger(TransactionsService.name);
+
   constructor(
     private readonly repository: TransactionsRepository,
     private readonly productsRepository: ProductsRepository,
     private readonly customersRepository: CustomersRepository,
     private readonly idempotencyService: IdempotencyService,
     private readonly financeArtifactsRepository: FinanceArtifactsRepository,
+    private readonly mongoTransactionsRepository?: MongoTransactionsRepository,
+    private readonly mongoDeletedTransactionsRepository?: MongoDeletedTransactionsRepository,
+    private readonly config?: AppConfigService,
   ) {}
 
   async list(storeId: string, query: ListTransactionsQueryDto): Promise<TransactionListResponseDto> {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 25;
+
+    if (this.config?.useMongoReads && this.mongoTransactionsRepository) {
+      this.logger.log('[MONGO_READ] Transactions fetched from Mongo');
+      const all = await this.mongoTransactionsRepository.findAll(storeId);
+      const filtered = this.applyTransactionFilters(all, query);
+      const start = (page - 1) * pageSize;
+      const end = start + pageSize;
+
+      return {
+        items: filtered.slice(start, end),
+        page,
+        pageSize,
+        total: filtered.length,
+      };
+    }
 
     const { items, total } = await this.repository.findMany(storeId, query);
     const start = (page - 1) * pageSize;
@@ -57,7 +81,9 @@ export class TransactionsService {
   }
 
   async getById(storeId: string, id: string): Promise<TransactionResponseDto> {
-    const transaction = await this.repository.findById(storeId, id);
+    const transaction = this.config?.useMongoReads && this.mongoTransactionsRepository
+      ? await this.mongoTransactionsRepository.findById(storeId, id)
+      : await this.repository.findById(storeId, id);
     if (!transaction) {
       throw new NotFoundException({
         code: AuthTenantErrorCode.TRANSACTION_NOT_FOUND,
@@ -69,6 +95,10 @@ export class TransactionsService {
   }
 
   async listDeleted(storeId: string): Promise<DeletedTransactionListResponseDto> {
+    if (this.config?.useMongoReads && this.mongoDeletedTransactionsRepository) {
+      return { items: await this.mongoDeletedTransactionsRepository.findAll(storeId) };
+    }
+
     return { items: await this.repository.findDeleted(storeId) };
   }
 
@@ -452,6 +482,47 @@ export class TransactionsService {
 
       return this.appliedResponse('delete_transaction', mutationId, context);
     });
+  }
+
+
+  private applyTransactionFilters(items: TransactionDto[], query: ListTransactionsQueryDto): TransactionDto[] {
+    const dateFrom = query.dateFrom ? new Date(query.dateFrom).getTime() : null;
+    const dateTo = query.dateTo ? new Date(query.dateTo).getTime() : null;
+    const text = query.q?.trim().toLowerCase();
+
+    const filtered = items
+      .filter((t) => (query.type ? t.type === query.type : true))
+      .filter((t) => (query.customerId ? t.customer.customerId === query.customerId : true))
+      .filter((t) => {
+        const ts = new Date(t.transactionDate).getTime();
+        if (dateFrom !== null && ts < dateFrom) return false;
+        if (dateTo !== null && ts > dateTo) return false;
+        return true;
+      })
+      .filter((t) => {
+        if (!text) return true;
+        const candidate = [
+          t.id,
+          t.customer.customerName ?? '',
+          t.customer.customerPhone ?? '',
+          ...t.lineItems.map((x) => x.productName),
+        ]
+          .join(' ')
+          .toLowerCase();
+        return candidate.includes(text);
+      });
+
+    const sortBy = query.sortBy ?? 'transactionDate';
+    const sortOrder = query.sortOrder ?? 'desc';
+
+    filtered.sort((a, b) => {
+      const av = a[sortBy];
+      const bv = b[sortBy];
+      const compare = String(av).localeCompare(String(bv));
+      return sortOrder === 'asc' ? compare : -compare;
+    });
+
+    return filtered;
   }
 
   private ensureIdempotencyKey(idempotencyKey: string): void {
