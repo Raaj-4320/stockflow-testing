@@ -1,0 +1,11 @@
+{
+  "decision": "NO-GO",
+  "blockers": [
+    "Usage: --storeId <id> --mongoUri <uri> --dbName <db> [--sampleSize 50]"
+  ],
+  "warnings": [],
+  "counts": {},
+  "idDiff": {},
+  "financialDiff": {},
+  "sampleDiff": {}
+}

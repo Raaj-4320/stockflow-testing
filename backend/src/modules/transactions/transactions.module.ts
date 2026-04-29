@@ -6,13 +6,20 @@ import { FinanceArtifactsModule } from '../finance-artifacts/finance-artifacts.m
 import { ProductsModule } from '../products/products.module';
 import { TenancyModule } from '../tenancy/tenancy.module';
 import { TransactionsController } from './transactions.controller';
+import { MongoDeletedTransactionsRepository } from './mongo-deleted-transactions.repository';
+import { MongoTransactionsRepository } from './mongo-transactions.repository';
 import { TransactionsRepository } from './transactions.repository';
 import { TransactionsService } from './transactions.service';
 
 @Module({
   imports: [AuthModule, TenancyModule, ProductsModule, CustomersModule, FinanceArtifactsModule],
   controllers: [TransactionsController],
-  providers: [TransactionsRepository, TransactionsService],
+  providers: [
+    TransactionsRepository,
+    MongoTransactionsRepository,
+    MongoDeletedTransactionsRepository,
+    TransactionsService,
+  ],
   exports: [TransactionsService, TransactionsRepository],
 })
 export class TransactionsModule {}

@@ -46,6 +46,10 @@ export const envSchema = z.object({
   MONGODB_MAX_POOL_SIZE: z.coerce.number().int().min(1).default(10),
   MONGODB_SERVER_SELECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
   MONGODB_SOCKET_TIMEOUT_MS: z.coerce.number().int().positive().default(20000),
+  USE_MONGO_READS: z
+    .string()
+    .default('false')
+    .transform((v) => v.toLowerCase() === 'true'),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
 import { AuthTenantErrorCode } from '../../contracts/v1/common/error-codes';
 import { CreateCustomerDto } from '../../contracts/v1/customers/create-customer.dto';
@@ -6,11 +6,19 @@ import { CustomerDto } from '../../contracts/v1/customers/customer.types';
 import { ListCustomersQueryDto } from '../../contracts/v1/customers/list-customers-query.dto';
 import { UpdateCustomerDto } from '../../contracts/v1/customers/update-customer.dto';
 import { normalizeCreateCustomerPayload, normalizeUpdateCustomerPayload } from './helpers/customer-normalizer';
+import { AppConfigService } from '../../config/config.service';
 import { CustomersRepository } from './customers.repository';
+import { MongoCustomersRepository } from './mongo-customers.repository';
 
 @Injectable()
 export class CustomersService {
-  constructor(private readonly repository: CustomersRepository) {}
+  private readonly logger = new Logger(CustomersService.name);
+
+  constructor(
+    private readonly repository: CustomersRepository,
+    private readonly mongoRepository?: MongoCustomersRepository,
+    private readonly config?: AppConfigService,
+  ) {}
 
   async create(storeId: string, payload: CreateCustomerDto): Promise<CustomerDto> {
     const normalized = normalizeCreateCustomerPayload(payload);
@@ -28,11 +36,32 @@ export class CustomersService {
   }
 
   async list(storeId: string, query: ListCustomersQueryDto): Promise<CustomerDto[]> {
+    if (this.config?.useMongoReads && this.mongoRepository) {
+      this.logger.log('[MONGO_READ] Customers fetched from Mongo');
+      const all = await this.mongoRepository.findAll(storeId);
+      const includeArchived = Boolean(query.includeArchived);
+      const search = query.q?.trim().toLowerCase();
+
+      return all
+        .filter((c) => includeArchived || !c.isArchived)
+        .filter((c) => {
+          if (!search) return true;
+          return (
+            c.name.toLowerCase().includes(search) ||
+            c.phone.toLowerCase().includes(search) ||
+            (c.email ?? '').toLowerCase().includes(search)
+          );
+        })
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    }
+
     return this.repository.findMany(storeId, query);
   }
 
   async getById(storeId: string, id: string): Promise<CustomerDto> {
-    const customer = await this.repository.findById(storeId, id);
+    const customer = this.config?.useMongoReads && this.mongoRepository
+      ? await this.mongoRepository.findById(storeId, id)
+      : await this.repository.findById(storeId, id);
     if (!customer) {
       throw new NotFoundException({
         code: AuthTenantErrorCode.CUSTOMER_NOT_FOUND,
