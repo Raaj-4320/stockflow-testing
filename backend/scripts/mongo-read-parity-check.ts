@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { MongoClient } from 'mongodb';
@@ -22,7 +22,22 @@ import { TransactionsService } from '../src/modules/transactions/transactions.se
 import { IdempotencyService } from '../src/infrastructure/idempotency/idempotency.service';
 import { FinanceArtifactsRepository } from '../src/modules/finance-artifacts/finance-artifacts.repository';
 
-type Options = { storeId: string; mongoUri: string; dbName: string; sampleSize: number };
+type BaselineMode = 'service' | 'snapshot';
+
+type SnapshotBaseline = {
+  products: ProductDto[];
+  customers: CustomerDto[];
+  transactions: TransactionDto[];
+  deletedTransactions: DeletedTransactionDto[];
+};
+
+type Options = {
+  storeId: string;
+  mongoUri: string;
+  dbName: string;
+  sampleSize: number;
+  baselineSnapshot?: string;
+};
 
 function parseArgs(argv: string[]): Options {
   const args = new Map<string, string>();
@@ -45,12 +60,13 @@ function parseArgs(argv: string[]): Options {
   const mongoUri = args.get('--mongoUri');
   const dbName = args.get('--dbName');
   const sampleSize = Number(args.get('--sampleSize') ?? '50');
+  const baselineSnapshot = args.get('--baselineSnapshot');
 
   if (!storeId || !mongoUri || !dbName) {
-    throw new Error('Usage: --storeId <id> --mongoUri <uri> --dbName <db> [--sampleSize 50]');
+    throw new Error('Usage: --storeId <id> --mongoUri <uri> --dbName <db> [--sampleSize 50] [--baselineSnapshot <path-to-mongo-ready-snapshot.json>]');
   }
 
-  return { storeId, mongoUri, dbName, sampleSize: Number.isFinite(sampleSize) ? sampleSize : 50 };
+  return { storeId, mongoUri, dbName, sampleSize: Number.isFinite(sampleSize) ? sampleSize : 50, baselineSnapshot };
 }
 
 function sampleDiff<T>(base: T[], mongo: T[], fields: string[], sampleSize: number): Array<{ id: string; field: string; baseline: unknown; mongo: unknown }> {
@@ -70,6 +86,20 @@ function sampleDiff<T>(base: T[], mongo: T[], fields: string[], sampleSize: numb
   }
 
   return result;
+}
+
+
+
+function loadBaselineSnapshot(snapshotPath: string): SnapshotBaseline {
+  const raw = readFileSync(resolve(process.cwd(), snapshotPath), 'utf8');
+  const parsed = JSON.parse(raw) as Partial<SnapshotBaseline>;
+
+  const products = Array.isArray(parsed.products) ? parsed.products : [];
+  const customers = Array.isArray(parsed.customers) ? parsed.customers : [];
+  const transactions = Array.isArray(parsed.transactions) ? parsed.transactions : [];
+  const deletedTransactions = Array.isArray(parsed.deletedTransactions) ? parsed.deletedTransactions : [];
+
+  return { products, customers, transactions, deletedTransactions };
 }
 
 function sumRevenue(items: TransactionDto[]): number {
@@ -110,6 +140,7 @@ async function run(): Promise<void> {
     idDiff: {},
     financialDiff: {},
     sampleDiff: {},
+    baselineMode: (opts.baselineSnapshot ? 'snapshot' : 'service') as BaselineMode,
   };
 
   let client: MongoClient | null = null;
@@ -139,10 +170,23 @@ async function run(): Promise<void> {
     const cq: ListCustomersQueryDto = {};
     const tq: ListTransactionsQueryDto = { page: 1, pageSize: 100000 };
 
-    const baselineProducts = await productsService.list(opts.storeId, pq);
-    const baselineCustomers = await customersService.list(opts.storeId, cq);
-    const baselineTransactions = (await transactionsService.list(opts.storeId, tq)).items;
-    const baselineDeleted = (await transactionsService.listDeleted(opts.storeId)).items;
+    let baselineProducts: ProductDto[];
+    let baselineCustomers: CustomerDto[];
+    let baselineTransactions: TransactionDto[];
+    let baselineDeleted: DeletedTransactionDto[];
+
+    if (opts.baselineSnapshot) {
+      const snapshot = loadBaselineSnapshot(opts.baselineSnapshot);
+      baselineProducts = snapshot.products;
+      baselineCustomers = snapshot.customers;
+      baselineTransactions = snapshot.transactions;
+      baselineDeleted = snapshot.deletedTransactions;
+    } else {
+      baselineProducts = await productsService.list(opts.storeId, pq);
+      baselineCustomers = await customersService.list(opts.storeId, cq);
+      baselineTransactions = (await transactionsService.list(opts.storeId, tq)).items;
+      baselineDeleted = (await transactionsService.listDeleted(opts.storeId)).items;
+    }
 
     const mongoProductsData = await mongoProducts.findAll(opts.storeId);
     const mongoCustomersData = await mongoCustomers.findAll(opts.storeId);
@@ -156,6 +200,13 @@ async function run(): Promise<void> {
       transactions: { baseline: baselineTransactions.length, mongo: mongoTransactionsData.length },
       deletedTransactions: { baseline: baselineDeleted.length, mongo: mongoDeletedData.length },
     };
+
+    const hasLikelyEmptyServiceBaseline =
+      report.baselineMode === 'service' &&
+      Object.values(report.counts).some((x: any) => x.baseline === 0 && x.mongo > 0);
+    if (hasLikelyEmptyServiceBaseline) {
+      report.warnings.push('Service baseline appears empty while Mongo has data. Try --baselineSnapshot=<path-to-mongo-ready-snapshot.json>.');
+    }
 
     console.log('[PARITY][IDS]');
     const idDiff = (base: Array<{ id: string }>, mongo: Array<{ id: string }>) => {
