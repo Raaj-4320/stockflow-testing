@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
 import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, updatePurchaseOrder } from '../services/storage';
+import { runProcurementShadowCompare } from '../services/procurementApi';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -179,9 +180,12 @@ export default function PurchasePanel() {
 
   const refresh = () => {
     const data = loadData();
+    const nextOrders = getPurchaseOrders();
+    const nextParties = getPurchaseParties();
     setProducts(data.products || []);
-    setOrders(getPurchaseOrders());
-    setParties(getPurchaseParties());
+    setOrders(nextOrders);
+    setParties(nextParties);
+    void runProcurementShadowCompare({ orders: nextOrders, parties: nextParties });
   };
 
   useEffect(() => {
