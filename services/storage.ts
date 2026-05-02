@@ -1601,6 +1601,13 @@ const computeCashEstimateFromTransactions = (transactions: Transaction[], delete
   return txCash - deleteCompensationOutflow;
 };
 
+const computeCashSupplierPaymentsOutflow = (orders: PurchaseOrder[] = []) =>
+  (orders || []).reduce((sum, order) =>
+    sum + (order.paymentHistory || []).reduce((inner, payment) => {
+      if ((payment.method || 'cash') !== 'cash') return inner;
+      return inner + Math.max(0, Number(payment.amount) || 0);
+    }, 0), 0);
+
 const logLoadedState = (state: AppState) => {
   const openShift = (state.cashSessions || []).find(s => s.status === 'open');
   financeLog.load('STATE', {
@@ -1608,7 +1615,9 @@ const logLoadedState = (state: AppState) => {
     customersCount: state.customers.length,
     transactionsCount: state.transactions.length,
     totalDue: state.customers.reduce((sum, c) => sum + (c.totalDue || 0), 0),
-    totalCashEstimate: computeCashEstimateFromTransactions(state.transactions, state.deleteCompensations || []) - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0),
+    totalCashEstimate: computeCashEstimateFromTransactions(state.transactions, state.deleteCompensations || [])
+      - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0)
+      - computeCashSupplierPaymentsOutflow(state.purchaseOrders || []),
     openShift: openShift ? { id: openShift.id, openingBalance: openShift.openingBalance, startTime: openShift.startTime } : null,
   });
   if (!hasLoggedInitKpiSnapshot) {
@@ -3642,16 +3651,60 @@ export const getPurchaseOrders = (): PurchaseOrder[] => {
 
 export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
   const data = loadData();
-  const next = [order, ...(data.purchaseOrders || [])];
+  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
+  const totalPaid = Math.max(0, Math.min(totalAmount, Number(order.totalPaid) || 0));
+  const normalizedOrder: PurchaseOrder = {
+    ...order,
+    totalPaid,
+    remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
+    paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
+  };
+  const next = [normalizedOrder, ...(data.purchaseOrders || [])];
   await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder', auditOperation: 'CREATE' });
-  return order;
+  return normalizedOrder;
 };
 
 export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
   const data = loadData();
-  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? order : item);
+  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
+  const totalPaid = Math.max(0, Math.min(totalAmount, Number(order.totalPaid) || 0));
+  const normalizedOrder: PurchaseOrder = {
+    ...order,
+    totalPaid,
+    remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
+    paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
+  };
+  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? normalizedOrder : item);
   await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder', auditOperation: 'UPDATE' });
-  return order;
+  return normalizedOrder;
+};
+
+export const recordPurchaseOrderPayment = async (orderId: string, amount: number, method: 'cash' | 'online' = 'cash', note?: string): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const order = (data.purchaseOrders || []).find(o => o.id === orderId);
+  if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
+  const safeAmount = Math.max(0, Number(amount) || 0);
+  if (safeAmount <= 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Payment amount must be greater than zero.', { orderId, amount });
+  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
+  const paidSoFar = Math.max(0, Number(order.totalPaid) || 0);
+  const remaining = Math.max(0, Number((totalAmount - paidSoFar).toFixed(2)));
+  if (safeAmount > remaining + 0.0001) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Payment exceeds remaining amount.', { orderId, amount: safeAmount, remaining });
+
+  const payment = {
+    id: `pop-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    paidAt: new Date().toISOString(),
+    amount: Number(safeAmount.toFixed(2)),
+    method,
+    note: note?.trim() || undefined,
+  };
+  const updatedOrder: PurchaseOrder = {
+    ...order,
+    totalPaid: Number((paidSoFar + safeAmount).toFixed(2)),
+    paymentHistory: [...(order.paymentHistory || []), payment],
+    updatedAt: new Date().toISOString(),
+  };
+  updatedOrder.remainingAmount = Math.max(0, Number((totalAmount - (updatedOrder.totalPaid || 0)).toFixed(2)));
+  return updatePurchaseOrder(updatedOrder);
 };
 
 
