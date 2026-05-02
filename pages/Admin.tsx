@@ -2,9 +2,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
-import { Product } from '../types';
+import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -50,6 +50,10 @@ export default function Admin() {
   const [purchaseNextBuyPrice, setPurchaseNextBuyPrice] = useState('');
   const [purchaseReference, setPurchaseReference] = useState('');
   const [purchaseNotes, setPurchaseNotes] = useState('');
+  const [purchasePartyName, setPurchasePartyName] = useState('');
+  const [purchasePaidAmount, setPurchasePaidAmount] = useState('');
+  const [purchasePaymentMethod, setPurchasePaymentMethod] = useState<'cash' | 'online'>('cash');
+  const [purchasePaymentNote, setPurchasePaymentNote] = useState('');
   const [purchaseModalTab, setPurchaseModalTab] = useState<'add' | 'history'>('add');
   const [purchaseHistoryVariantFilter, setPurchaseHistoryVariantFilter] = useState('all');
   const [selectedPurchaseVariantKey, setSelectedPurchaseVariantKey] = useState('');
@@ -460,6 +464,21 @@ export default function Admin() {
     const nextBuyPrice = manualBuyPrice ?? weightedAvg;
     const reference = purchaseReference.trim() || undefined;
     const notes = purchaseNotes.trim() || undefined;
+    const partyName = purchasePartyName.trim();
+    const totalAmount = Number((qty * unitPrice).toFixed(2));
+    const paidAmount = Math.max(0, Number(purchasePaidAmount) || 0);
+    if (!partyName) {
+      alert('Supplier/party name is required.');
+      return;
+    }
+    if (paidAmount > totalAmount) {
+      alert('Paid amount cannot exceed total purchase amount.');
+      return;
+    }
+    if (paidAmount > 0 && !purchasePaymentMethod) {
+      alert('Payment method is required when paid amount is greater than zero.');
+      return;
+    }
 
     const updatedVariantRows = isVariantPurchase
       ? (purchaseTarget.stockByVariantColor || []).map((row) => {
@@ -515,6 +534,47 @@ export default function Admin() {
     };
 
     const updated = await updateProduct(updatedProduct);
+    const existingParty = getPurchaseParties().find((p) => p.name.toLowerCase() === partyName.toLowerCase());
+    const party = existingParty || await createPurchaseParty({ name: partyName });
+    const now = new Date().toISOString();
+    const line: PurchaseOrderLine = {
+      id: `line-${Date.now()}`,
+      sourceType: 'inventory',
+      productId: purchaseTarget.id,
+      productName: purchaseTarget.name,
+      category: purchaseTarget.category,
+      image: purchaseTarget.image,
+      variant: isVariantPurchase ? (selectedPurchaseVariantRow?.variant || NO_VARIANT) : NO_VARIANT,
+      color: isVariantPurchase ? (selectedPurchaseVariantRow?.color || NO_COLOR) : NO_COLOR,
+      quantity: qty,
+      unitCost: unitPrice,
+      totalCost: totalAmount,
+    };
+    const order: PurchaseOrder = {
+      id: `po-admin-${Date.now()}`,
+      partyId: party.id,
+      partyName: party.name,
+      partyPhone: party.phone,
+      partyGst: party.gst,
+      partyLocation: party.location,
+      status: 'received',
+      orderDate: now,
+      notes,
+      lines: [line],
+      totalQuantity: qty,
+      totalAmount,
+      paymentHistory: paidAmount > 0 ? [{
+        id: `pop-init-${Date.now()}`,
+        paidAt: now,
+        amount: paidAmount,
+        method: purchasePaymentMethod,
+        note: purchasePaymentNote.trim() || reference || undefined,
+      }] : [],
+      receivedQuantity: qty,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await createPurchaseOrder(order);
     setProducts(updated);
     setPurchaseTarget(null);
     setPurchaseQty('');
@@ -522,6 +582,10 @@ export default function Admin() {
     setPurchaseNextBuyPrice('');
     setPurchaseReference('');
     setPurchaseNotes('');
+    setPurchasePartyName('');
+    setPurchasePaidAmount('');
+    setPurchasePaymentMethod('cash');
+    setPurchasePaymentNote('');
     setSelectedPurchaseVariantKey('');
   };
 
@@ -1255,7 +1319,7 @@ export default function Admin() {
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setPurchasePaidAmount(''); setPurchasePaymentMethod('cash'); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
@@ -1544,6 +1608,17 @@ export default function Admin() {
 
               <Input type="number" placeholder="Purchase quantity" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} />
               <Input type="number" placeholder="Purchase unit price" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
+              <Input placeholder="Supplier / Party name" value={purchasePartyName} onChange={(e) => setPurchasePartyName(e.target.value)} />
+              <Input type="number" placeholder="Amount paid now" value={purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} />
+              <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={purchasePaymentMethod} onChange={(e) => setPurchasePaymentMethod(e.target.value as 'cash' | 'online')}>
+                <option value="cash">cash</option>
+                <option value="online">online</option>
+              </select>
+              <Input placeholder="Payment note (optional)" value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} />
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded border bg-white p-2">Total: ₹{(toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)).toFixed(2)}</div>
+                <div className="rounded border bg-white p-2">Due: ₹{Math.max(0, (toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)) - toNonNegativeNumber(purchasePaidAmount)).toFixed(2)}</div>
+              </div>
               <Input placeholder="Reference (optional)" value={purchaseReference} onChange={(e) => setPurchaseReference(e.target.value)} />
               <textarea
                 value={purchaseNotes}
