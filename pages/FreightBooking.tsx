@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
+import { addCategory, convertConfirmedOrderToPurchase, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, getFreightPurchases, loadData, receiveFreightPurchaseIntoInventory, updateFreightInquiry } from '../services/storage';
 import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
@@ -113,6 +113,7 @@ export default function FreightBooking() {
   const [cartonCbmDrafts, setCartonCbmDrafts] = useState<Record<string, CartonCbmDraft>>({});
   const [showConfirmSave, setShowConfirmSave] = useState(false);
   const [convertingInquiryId, setConvertingInquiryId] = useState<string | null>(null);
+  const [materializingOrderId, setMaterializingOrderId] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
@@ -133,6 +134,21 @@ export default function FreightBooking() {
       alert(error?.message || 'Unable to convert inquiry to confirmed order.');
     } finally {
       setConvertingInquiryId(null);
+    }
+  };
+
+  const receiveIntoInventory = async (order: FreightConfirmedOrder) => {
+    if (materializingOrderId) return;
+    setMaterializingOrderId(order.id);
+    try {
+      let purchase = getFreightPurchases().find((p) => p.sourceConfirmedOrderId === order.id && !p.isDeleted);
+      if (!purchase) purchase = await convertConfirmedOrderToPurchase(order.id);
+      await receiveFreightPurchaseIntoInventory(purchase.id);
+      refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Unable to receive into inventory.');
+    } finally {
+      setMaterializingOrderId(null);
     }
   };
 
@@ -738,6 +754,17 @@ export default function FreightBooking() {
                   <div className="text-xs text-muted-foreground">
                     Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
                   </div>
+                  {order.source === 'new' && (
+                    <div className="mt-2">
+                      {order.inventoryProductId ? (
+                        <div className="text-xs text-emerald-700">Added to Inventory · Product ID: {order.inventoryProductId}</div>
+                      ) : (
+                        <Button size="sm" variant="outline" onClick={() => receiveIntoInventory(order)} disabled={materializingOrderId === order.id}>
+                          {materializingOrderId === order.id ? 'Receiving...' : 'Receive into Inventory'}
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
               {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}

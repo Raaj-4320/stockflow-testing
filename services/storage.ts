@@ -1601,6 +1601,13 @@ const computeCashEstimateFromTransactions = (transactions: Transaction[], delete
   return txCash - deleteCompensationOutflow;
 };
 
+const computeCashSupplierPaymentsOutflow = (orders: PurchaseOrder[] = []) =>
+  (orders || []).reduce((sum, order) =>
+    sum + (order.paymentHistory || []).reduce((inner, payment) => {
+      if ((payment.method || 'cash') !== 'cash') return inner;
+      return inner + Math.max(0, Number(payment.amount) || 0);
+    }, 0), 0);
+
 const logLoadedState = (state: AppState) => {
   const openShift = (state.cashSessions || []).find(s => s.status === 'open');
   financeLog.load('STATE', {
@@ -1608,7 +1615,9 @@ const logLoadedState = (state: AppState) => {
     customersCount: state.customers.length,
     transactionsCount: state.transactions.length,
     totalDue: state.customers.reduce((sum, c) => sum + (c.totalDue || 0), 0),
-    totalCashEstimate: computeCashEstimateFromTransactions(state.transactions, state.deleteCompensations || []) - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0),
+    totalCashEstimate: computeCashEstimateFromTransactions(state.transactions, state.deleteCompensations || [])
+      - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0)
+      - computeCashSupplierPaymentsOutflow(state.purchaseOrders || []),
     openShift: openShift ? { id: openShift.id, openingBalance: openShift.openingBalance, startTime: openShift.startTime } : null,
   });
   if (!hasLoggedInitKpiSnapshot) {
@@ -2632,7 +2641,13 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: Math.max(0, Number(product.totalSold) || 0), totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0) });
+  const nowIso = new Date().toISOString();
+  const sanitized = sanitizeVariantColorStock({
+    ...product,
+    createdAt: product.createdAt || nowIso,
+    totalSold: Math.max(0, Number(product.totalSold) || 0),
+    totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0),
+  });
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = [...data.products.filter(p => p.id !== preparedProduct.id), preparedProduct];
 
@@ -2660,7 +2675,12 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: Math.max(0, Number(product.totalSold) || 0), totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0) });
+  const sanitized = sanitizeVariantColorStock({
+    ...product,
+    updatedAt: new Date().toISOString(),
+    totalSold: Math.max(0, Number(product.totalSold) || 0),
+    totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0),
+  });
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
 
@@ -3563,6 +3583,83 @@ export const convertConfirmedOrderToPurchase = async (
   return purchase;
 };
 
+export const receiveFreightPurchaseIntoInventory = async (purchaseId: string): Promise<{ purchase: FreightPurchase; product: Product }> => {
+  const data = loadData();
+  const purchase = (data.freightPurchases || []).find(item => item.id === purchaseId && !item.isDeleted);
+  if (!purchase) failValidation('FREIGHT_PURCHASE_NOT_FOUND', 'Freight purchase not found.', { purchaseId });
+  if (purchase.source !== 'new') failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Only new-source freight purchases can be materialized.', { purchaseId, source: purchase.source });
+  if (purchase.materializedProductId) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Freight purchase already materialized to inventory.', { purchaseId, materializedProductId: purchase.materializedProductId });
+
+  const name = (purchase.productName || '').trim();
+  const qty = Math.max(0, Number(purchase.totalPieces) || 0);
+  if (!name) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Product name is required for inventory materialization.', { purchaseId });
+  if (qty <= 0) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Received quantity must be greater than zero.', { purchaseId, totalPieces: purchase.totalPieces });
+
+  const existingProducts = data.products || [];
+  const now = new Date().toISOString();
+  const variant = (purchase.variant || '').trim();
+  const color = (purchase.color || '').trim();
+  const unitCost = Math.max(0, Number(purchase.productCostPerPiece || purchase.inrPricePerPiece || 0));
+  const buyPrice = unitCost;
+  const sellPrice = Math.max(0, Number(purchase.sellingPrice || 0), buyPrice, buyPrice * 1.2);
+  const generatedBarcode = `FRG-${Math.floor(100000 + Math.random() * 900000)}`;
+  const barcode = generatedBarcode;
+  if (existingProducts.some(p => (p.barcode || '').trim().toLowerCase() === barcode.toLowerCase())) {
+    failValidation('DUPLICATE_BARCODE', 'Generated freight barcode already exists. Retry materialization.', { purchaseId, barcode });
+  }
+
+  const product: Product = {
+    id: `freight-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    barcode,
+    name,
+    description: purchase.lines?.[0]?.baseProductDetails || '',
+    buyPrice,
+    sellPrice,
+    stock: qty,
+    image: purchase.productPhoto || '',
+    category: purchase.category || 'Uncategorized',
+    variants: variant ? [variant] : [],
+    colors: color ? [color] : [],
+    stockByVariantColor: variant || color ? [{ variant: variant || 'No Variant', color: color || 'No Color', stock: qty, totalPurchase: qty, totalSold: 0 }] : [],
+    totalPurchase: qty,
+    totalSold: 0,
+    purchaseHistory: [{
+      id: `ph-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      date: now,
+      variant: variant || 'No Variant',
+      color: color || 'No Color',
+      quantity: qty,
+      unitPrice: buyPrice,
+      previousStock: 0,
+      previousBuyPrice: 0,
+      nextBuyPrice: buyPrice,
+      reference: `FREIGHT:${purchase.id}`,
+      notes: 'Materialized from freight receive',
+    }],
+  };
+  await addProduct(product);
+
+  const updatedPurchase: FreightPurchase = {
+    ...purchase,
+    status: 'received',
+    materializedProductId: product.id,
+    materializedAt: now,
+    receivedAt: now,
+    inventoryProductId: product.id,
+    updatedAt: now,
+  };
+  await updateFreightPurchase(updatedPurchase);
+  const confirmedOrder = (data.freightConfirmedOrders || []).find((item) => item.id === purchase.sourceConfirmedOrderId);
+  if (confirmedOrder) {
+    await updateFreightConfirmedOrder({
+      ...confirmedOrder,
+      inventoryProductId: product.id,
+      updatedAt: now,
+    });
+  }
+  return { purchase: updatedPurchase, product };
+};
+
 export const getPurchaseReceiptPostings = (): PurchaseReceiptPosting[] => {
   const data = loadData();
   return data.purchaseReceiptPostings || [];
@@ -3642,16 +3739,60 @@ export const getPurchaseOrders = (): PurchaseOrder[] => {
 
 export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
   const data = loadData();
-  const next = [order, ...(data.purchaseOrders || [])];
+  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
+  const totalPaid = Math.max(0, Math.min(totalAmount, Number(order.totalPaid) || 0));
+  const normalizedOrder: PurchaseOrder = {
+    ...order,
+    totalPaid,
+    remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
+    paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
+  };
+  const next = [normalizedOrder, ...(data.purchaseOrders || [])];
   await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder', auditOperation: 'CREATE' });
-  return order;
+  return normalizedOrder;
 };
 
 export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
   const data = loadData();
-  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? order : item);
+  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
+  const totalPaid = Math.max(0, Math.min(totalAmount, Number(order.totalPaid) || 0));
+  const normalizedOrder: PurchaseOrder = {
+    ...order,
+    totalPaid,
+    remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
+    paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
+  };
+  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? normalizedOrder : item);
   await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder', auditOperation: 'UPDATE' });
-  return order;
+  return normalizedOrder;
+};
+
+export const recordPurchaseOrderPayment = async (orderId: string, amount: number, method: 'cash' | 'online' = 'cash', note?: string): Promise<PurchaseOrder> => {
+  const data = loadData();
+  const order = (data.purchaseOrders || []).find(o => o.id === orderId);
+  if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
+  const safeAmount = Math.max(0, Number(amount) || 0);
+  if (safeAmount <= 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Payment amount must be greater than zero.', { orderId, amount });
+  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
+  const paidSoFar = Math.max(0, Number(order.totalPaid) || 0);
+  const remaining = Math.max(0, Number((totalAmount - paidSoFar).toFixed(2)));
+  if (safeAmount > remaining + 0.0001) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Payment exceeds remaining amount.', { orderId, amount: safeAmount, remaining });
+
+  const payment = {
+    id: `pop-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    paidAt: new Date().toISOString(),
+    amount: Number(safeAmount.toFixed(2)),
+    method,
+    note: note?.trim() || undefined,
+  };
+  const updatedOrder: PurchaseOrder = {
+    ...order,
+    totalPaid: Number((paidSoFar + safeAmount).toFixed(2)),
+    paymentHistory: [...(order.paymentHistory || []), payment],
+    updatedAt: new Date().toISOString(),
+  };
+  updatedOrder.remainingAmount = Math.max(0, Number((totalAmount - (updatedOrder.totalPaid || 0)).toFixed(2)));
+  return updatePurchaseOrder(updatedOrder);
 };
 
 

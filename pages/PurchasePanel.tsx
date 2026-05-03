@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, updatePurchaseOrder } from '../services/storage';
+import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder } from '../services/storage';
+import { runProcurementShadowCompare } from '../services/procurementApi';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -161,6 +162,7 @@ export default function PurchasePanel() {
   const [billNumber, setBillNumber] = useState('');
   const [billDate, setBillDate] = useState('');
   const [gstPercent, setGstPercent] = useState<number | ''>('');
+  const [initialPaidAmount, setInitialPaidAmount] = useState<number | ''>('');
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
   const [pricingEntries, setPricingEntries] = useState<Record<string, DraftLine>>({});
 
@@ -174,14 +176,22 @@ export default function PurchasePanel() {
   const [showPartyPopup, setShowPartyPopup] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [showReceivePopup, setShowReceivePopup] = useState(false);
+  const [showPaymentPopup, setShowPaymentPopup] = useState(false);
+  const [paymentTargetOrder, setPaymentTargetOrder] = useState<PurchaseOrder | null>(null);
+  const [partialPaymentAmount, setPartialPaymentAmount] = useState<number | ''>('');
+  const [partialPaymentMethod, setPartialPaymentMethod] = useState<'cash' | 'online'>('cash');
+  const [partialPaymentNote, setPartialPaymentNote] = useState('');
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
 
   const refresh = () => {
     const data = loadData();
+    const nextOrders = getPurchaseOrders();
+    const nextParties = getPurchaseParties();
     setProducts(data.products || []);
-    setOrders(getPurchaseOrders());
-    setParties(getPurchaseParties());
+    setOrders(nextOrders);
+    setParties(nextParties);
+    void runProcurementShadowCompare({ orders: nextOrders, parties: nextParties });
   };
 
   useEffect(() => {
@@ -310,6 +320,7 @@ export default function PurchasePanel() {
     setBillNumber('');
     setBillDate('');
     setGstPercent('');
+    setInitialPaidAmount('');
     setEditingOrderId(null);
     setPricingEntries({});
   };
@@ -459,6 +470,8 @@ export default function PurchasePanel() {
     const taxableAmount = lines.reduce((s, l) => s + l.totalCost, 0);
     const gstRate = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
     const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
+    const initialPaid = Math.max(0, Number(initialPaidAmount) || 0);
+    if (initialPaid > taxableAmount + gstAmount) return;
     const order: PurchaseOrder = {
       id: editingOrderId || `po-${uid()}`,
       partyId: party.id,
@@ -477,6 +490,15 @@ export default function PurchasePanel() {
       lines,
       totalQuantity: lines.reduce((s, l) => s + l.quantity, 0),
       totalAmount: taxableAmount + gstAmount,
+      totalPaid: initialPaid,
+      remainingAmount: Number(((taxableAmount + gstAmount) - initialPaid).toFixed(2)),
+      paymentHistory: initialPaid > 0 ? [{
+        id: `pop-init-${uid()}`,
+        paidAt: now,
+        amount: Number(initialPaid.toFixed(2)),
+        method: 'cash',
+        note: editingOrderId ? 'Adjusted on order edit' : 'Initial payment during order create',
+      }] : [],
       receivedQuantity: 0,
       createdAt: editingOrderId ? (orders.find(o => o.id === editingOrderId)?.createdAt || now) : now,
       updatedAt: now,
@@ -573,6 +595,38 @@ export default function PurchasePanel() {
     setShowReceivePopup(true);
   };
 
+  const partyFinancials = useMemo(() => {
+    const map = new Map<string, { totalPurchase: number; totalPaid: number; remaining: number }>();
+    orders.forEach((order) => {
+      const current = map.get(order.partyId) || { totalPurchase: 0, totalPaid: 0, remaining: 0 };
+      const totalPurchase = current.totalPurchase + Math.max(0, Number(order.totalAmount) || 0);
+      const orderPaid = Math.max(0, Number(order.totalPaid) || 0);
+      const totalPaid = current.totalPaid + orderPaid;
+      const remaining = current.remaining + Math.max(0, Number(order.remainingAmount ?? ((order.totalAmount || 0) - orderPaid)) || 0);
+      map.set(order.partyId, { totalPurchase, totalPaid, remaining });
+    });
+    return map;
+  }, [orders]);
+
+  const openPartialPaymentModal = (order: PurchaseOrder) => {
+    setPaymentTargetOrder(order);
+    setPartialPaymentAmount('');
+    setPartialPaymentMethod('cash');
+    setPartialPaymentNote('');
+    setShowPaymentPopup(true);
+  };
+
+  const submitPartialPayment = async () => {
+    if (!paymentTargetOrder) return;
+    const amount = Math.max(0, Number(partialPaymentAmount) || 0);
+    const remaining = Math.max(0, Number(paymentTargetOrder.remainingAmount ?? (paymentTargetOrder.totalAmount - (paymentTargetOrder.totalPaid || 0))) || 0);
+    if (amount <= 0 || amount > remaining) return;
+    await recordPurchaseOrderPayment(paymentTargetOrder.id, amount, partialPaymentMethod, partialPaymentNote);
+    setShowPaymentPopup(false);
+    setPaymentTargetOrder(null);
+    refresh();
+  };
+
   const confirmReceiveOrder = async () => {
     if (!receiveTargetOrder) return;
     await receivePurchaseOrder(receiveTargetOrder.id, receivePriceMethod);
@@ -661,6 +715,11 @@ export default function PurchasePanel() {
                   <div className="font-medium">{p.name}</div>
                   <div className="text-xs text-muted-foreground">{p.phone || '—'} · GST: {p.gst || '—'} · {p.location || '—'}</div>
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || '—'}</div>
+                  <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                    <SummaryCard label="Purchase" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
+                    <SummaryCard label="Paid" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPaid || 0)}`} />
+                    <SummaryCard label="Remaining" value={`₹${formatNumber(partyFinancials.get(p.id)?.remaining || 0)}`} />
+                  </div>
                 </div>
               ))}
               {!parties.length && <div className="text-sm text-muted-foreground">No parties yet.</div>}
@@ -731,6 +790,8 @@ export default function PurchasePanel() {
                         <SummaryCard label="Qty" value={formatNumber(totalQty, 0)} />
                         <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
                         <SummaryCard label="Total" value={`₹${formatNumber(totalAmount)}`} />
+                        <SummaryCard label="Paid" value={`₹${formatNumber(order.totalPaid || 0)}`} />
+                        <SummaryCard label="Due" value={`₹${formatNumber(order.remainingAmount ?? (order.totalAmount - (order.totalPaid || 0)))}`} />
                       </div>
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" onClick={() => editOrder(order)} disabled={order.status === 'received'}>
@@ -738,6 +799,9 @@ export default function PurchasePanel() {
                         </Button>
                         <Button size="sm" onClick={() => handleReceive(order)} disabled={order.status === 'received'}>
                           <Truck className="w-4 h-4 mr-1" /> {order.status === 'received' ? 'Received' : 'Receive'}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => openPartialPaymentModal(order)} disabled={(order.remainingAmount ?? (order.totalAmount - (order.totalPaid || 0))) <= 0}>
+                          Pay Due
                         </Button>
                       </div>
                     </div>
@@ -941,6 +1005,7 @@ export default function PurchasePanel() {
                   <div><Label>Bill Number</Label><Input value={billNumber} onChange={e => setBillNumber(e.target.value)} placeholder="Supplier invoice no." /></div>
                   <div><Label>Bill Date</Label><Input type="date" value={billDate} onChange={e => setBillDate(e.target.value)} /></div>
                   <div><Label>GST %</Label><Input type="number" value={gstPercent} onChange={e => setGstPercent(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 18" /></div>
+                  <div><Label>Initial Paid Amount</Label><Input type="number" value={initialPaidAmount} onChange={e => setInitialPaidAmount(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 1000" /></div>
                   <div className="md:col-span-2"><Label>Notes</Label><Input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes" /></div>
                 </div>
               </div>
@@ -953,6 +1018,7 @@ export default function PurchasePanel() {
                   <SummaryCard label="Party" value={parties.find(p => p.id === partyId)?.name || 'Not selected'} />
                   <SummaryCard label="GST Amount" value={`₹${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
                   <SummaryCard label="Grand Total" value={`₹${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
+                  <SummaryCard label="Initial Due" value={`₹${formatNumber(Math.max(0, (draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)) - (initialPaidAmount === '' ? 0 : Number(initialPaidAmount) || 0)))}`} />
                 </div>
               </div>
             </div>
@@ -1132,6 +1198,25 @@ export default function PurchasePanel() {
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setShowReceivePopup(false)}>Cancel</Button>
             <Button onClick={confirmReceiveOrder}><Truck className="w-4 h-4 mr-1" /> Confirm Receive</Button>
+          </div>
+        </div>
+      </Modal>
+      <Modal open={showPaymentPopup} onClose={() => setShowPaymentPopup(false)} title="Pay Supplier Due">
+        <div className="space-y-3">
+          <div className="text-sm text-slate-700">Order: <span className="font-semibold">{paymentTargetOrder?.id}</span></div>
+          <div className="text-sm text-slate-700">Remaining: <span className="font-semibold">₹{formatNumber(Math.max(0, Number(paymentTargetOrder?.remainingAmount ?? ((paymentTargetOrder?.totalAmount || 0) - (paymentTargetOrder?.totalPaid || 0)))) )}</span></div>
+          <div><Label>Amount</Label><Input type="number" value={partialPaymentAmount} onChange={e => setPartialPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+          <div>
+            <Label>Method</Label>
+            <select className="h-10 w-full rounded-md border px-3 text-sm" value={partialPaymentMethod} onChange={e => setPartialPaymentMethod(e.target.value as 'cash' | 'online')}>
+              <option value="cash">Cash</option>
+              <option value="online">Online</option>
+            </select>
+          </div>
+          <div><Label>Note</Label><Input value={partialPaymentNote} onChange={e => setPartialPaymentNote(e.target.value)} placeholder="Optional note" /></div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowPaymentPopup(false)}>Cancel</Button>
+            <Button onClick={submitPartialPayment}>Save Payment</Button>
           </div>
         </div>
       </Modal>

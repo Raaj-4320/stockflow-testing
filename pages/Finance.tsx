@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
-import { AppState, CartItem, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, Transaction, UpdatedTransactionRecord } from '../types';
+import { AppState, CartItem, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, PurchaseOrder, Transaction, UpdatedTransactionRecord } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
@@ -393,6 +393,7 @@ const getSessionCashTotals = (
   transactions: Transaction[],
   expenses: Expense[],
   deleteCompensations: DeleteCompensationRecord[],
+  purchaseOrders: PurchaseOrder[],
   sessionStartIso: string,
   sessionEndIso?: string,
   sessionId?: string
@@ -426,13 +427,19 @@ const getSessionCashTotals = (
       return eventTime >= start && eventTime <= end;
     })
     .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
+  const supplierCashPayments = (purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment) => {
+    const paidAt = new Date(payment.paidAt).getTime();
+    if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return inner;
+    if ((payment.method || 'cash') !== 'cash') return inner;
+    return inner + Math.max(0, Number(payment.amount) || 0);
+  }, 0), 0);
 
   const totals = {
     cashSales,
     cashRefunds: cashRefunds + deleteCompensationOutflow,
     cashCollections,
-    expenseTotal,
-    systemCashTotal: cashSales + cashCollections - cashRefunds - deleteCompensationOutflow - expenseTotal
+    expenseTotal: expenseTotal + supplierCashPayments,
+    systemCashTotal: cashSales + cashCollections - cashRefunds - deleteCompensationOutflow - expenseTotal - supplierCashPayments
   };
   financeLog.cash('RESULT', {
     sessionId: sessionId || null,
@@ -627,7 +634,7 @@ export default function Finance() {
     let over = 0;
 
     closed.forEach(session => {
-      const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], session.startTime, session.endTime, session.id);
+      const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id);
       const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
       const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
       if (difference === 0) matched += 1;
@@ -805,12 +812,12 @@ export default function Finance() {
     const key = todayISO();
 
     if (isOpenSessionToday && openSession) {
-      return getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], openSession.startTime, undefined, openSession.id);
+      return getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], data.purchaseOrders || [], openSession.startTime, undefined, openSession.id);
     }
 
     const startOfTodayIso = `${key}T00:00:00`;
     const endOfTodayIso = `${key}T23:59:59`;
-    return getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], startOfTodayIso, endOfTodayIso);
+    return getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], data.purchaseOrders || [], startOfTodayIso, endOfTodayIso);
   }, [data.transactions, expenses, isOpenSessionToday, openSession]);
 
   const closingCountTotal = useMemo(() => {
@@ -1655,7 +1662,7 @@ export default function Finance() {
     if (!Number.isFinite(counted) || counted < 0) return setErrors('Please enter a valid closing cash value.');
 
     const closedAt = new Date().toISOString();
-    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, fresh.deleteCompensations || [], freshOpenSession.startTime, closedAt, freshOpenSession.id);
+    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, fresh.deleteCompensations || [], fresh.purchaseOrders || [], freshOpenSession.startTime, closedAt, freshOpenSession.id);
     const expectedClosing = freshOpenSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
     financeLog.shift('CLOSE', {
@@ -1887,7 +1894,7 @@ export default function Finance() {
     const corrected = (data.cashSessions || []).map(session => {
       if (session.status !== 'closed' || !session.endTime) return session;
 
-      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], session.startTime, session.endTime, session.id);
+      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id);
       const expectedClosing = session.openingBalance + systemCashTotal;
       const difference = (session.closingBalance ?? 0) - expectedClosing;
 
@@ -2364,7 +2371,7 @@ export default function Finance() {
               </CardHeader>
               <CardContent className="space-y-3 pt-5">
                 {filteredCashHistory.map(session => {
-                  const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], session.startTime, session.endTime);
+                  const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime);
                   const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
                   const sessionExpenseTotal = session.sessionExpenseTotal ?? computedTotals.expenseTotal;
                   const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
@@ -2418,7 +2425,7 @@ export default function Finance() {
             </Card>
 
             {activeHistorySession && (() => {
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], activeHistorySession.startTime, activeHistorySession.endTime);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], data.purchaseOrders || [], activeHistorySession.startTime, activeHistorySession.endTime);
               const systemCashTotal = activeHistorySession.systemCashTotal ?? computedTotals.systemCashTotal;
               const sessionExpenseTotal = activeHistorySession.sessionExpenseTotal ?? computedTotals.expenseTotal;
               const difference = activeHistorySession.difference ?? ((activeHistorySession.closingBalance ?? 0) - (activeHistorySession.openingBalance + systemCashTotal));
