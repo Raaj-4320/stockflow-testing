@@ -2,9 +2,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
-import { Product } from '../types';
+import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -50,6 +50,10 @@ export default function Admin() {
   const [purchaseNextBuyPrice, setPurchaseNextBuyPrice] = useState('');
   const [purchaseReference, setPurchaseReference] = useState('');
   const [purchaseNotes, setPurchaseNotes] = useState('');
+  const [purchasePartyName, setPurchasePartyName] = useState('');
+  const [purchasePaidAmount, setPurchasePaidAmount] = useState('');
+  const [purchasePaymentMethod, setPurchasePaymentMethod] = useState<'cash' | 'online'>('cash');
+  const [purchasePaymentNote, setPurchasePaymentNote] = useState('');
   const [purchaseModalTab, setPurchaseModalTab] = useState<'add' | 'history'>('add');
   const [purchaseHistoryVariantFilter, setPurchaseHistoryVariantFilter] = useState('all');
   const [selectedPurchaseVariantKey, setSelectedPurchaseVariantKey] = useState('');
@@ -460,6 +464,21 @@ export default function Admin() {
     const nextBuyPrice = manualBuyPrice ?? weightedAvg;
     const reference = purchaseReference.trim() || undefined;
     const notes = purchaseNotes.trim() || undefined;
+    const partyName = purchasePartyName.trim();
+    const totalAmount = Number((qty * unitPrice).toFixed(2));
+    const paidAmount = Math.max(0, Number(purchasePaidAmount) || 0);
+    if (!partyName) {
+      alert('Supplier/party name is required.');
+      return;
+    }
+    if (paidAmount > totalAmount) {
+      alert('Paid amount cannot exceed total purchase amount.');
+      return;
+    }
+    if (paidAmount > 0 && !purchasePaymentMethod) {
+      alert('Payment method is required when paid amount is greater than zero.');
+      return;
+    }
 
     const updatedVariantRows = isVariantPurchase
       ? (purchaseTarget.stockByVariantColor || []).map((row) => {
@@ -515,6 +534,47 @@ export default function Admin() {
     };
 
     const updated = await updateProduct(updatedProduct);
+    const existingParty = getPurchaseParties().find((p) => p.name.toLowerCase() === partyName.toLowerCase());
+    const party = existingParty || await createPurchaseParty({ name: partyName });
+    const now = new Date().toISOString();
+    const line: PurchaseOrderLine = {
+      id: `line-${Date.now()}`,
+      sourceType: 'inventory',
+      productId: purchaseTarget.id,
+      productName: purchaseTarget.name,
+      category: purchaseTarget.category,
+      image: purchaseTarget.image,
+      variant: isVariantPurchase ? (selectedPurchaseVariantRow?.variant || NO_VARIANT) : NO_VARIANT,
+      color: isVariantPurchase ? (selectedPurchaseVariantRow?.color || NO_COLOR) : NO_COLOR,
+      quantity: qty,
+      unitCost: unitPrice,
+      totalCost: totalAmount,
+    };
+    const order: PurchaseOrder = {
+      id: `po-admin-${Date.now()}`,
+      partyId: party.id,
+      partyName: party.name,
+      partyPhone: party.phone,
+      partyGst: party.gst,
+      partyLocation: party.location,
+      status: 'received',
+      orderDate: now,
+      notes,
+      lines: [line],
+      totalQuantity: qty,
+      totalAmount,
+      paymentHistory: paidAmount > 0 ? [{
+        id: `pop-init-${Date.now()}`,
+        paidAt: now,
+        amount: paidAmount,
+        method: purchasePaymentMethod,
+        note: purchasePaymentNote.trim() || reference || undefined,
+      }] : [],
+      receivedQuantity: qty,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await createPurchaseOrder(order);
     setProducts(updated);
     setPurchaseTarget(null);
     setPurchaseQty('');
@@ -522,6 +582,10 @@ export default function Admin() {
     setPurchaseNextBuyPrice('');
     setPurchaseReference('');
     setPurchaseNotes('');
+    setPurchasePartyName('');
+    setPurchasePaidAmount('');
+    setPurchasePaymentMethod('cash');
+    setPurchasePaymentNote('');
     setSelectedPurchaseVariantKey('');
   };
 
@@ -1255,7 +1319,7 @@ export default function Admin() {
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setPurchasePaidAmount(''); setPurchasePaymentMethod('cash'); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
@@ -1498,30 +1562,30 @@ export default function Admin() {
 
       {purchaseTarget && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
-          <Card className="w-full max-w-lg">
+          <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden">
             <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Add Purchase - {purchaseTarget.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => setPurchaseTarget(null)}><X className="w-4 h-4"/></Button></CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-3 overflow-y-auto max-h-[calc(90vh-84px)]">
               <div className="flex gap-2 border-b pb-2">
                 <Button size="sm" variant={purchaseModalTab === 'add' ? 'default' : 'outline'} onClick={() => setPurchaseModalTab('add')}>Add Purchase</Button>
                 <Button size="sm" variant={purchaseModalTab === 'history' ? 'default' : 'outline'} onClick={() => setPurchaseModalTab('history')}>Purchase History</Button>
               </div>
               {purchaseModalTab === 'add' ? (
                 <>
-              <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="rounded-xl border bg-muted/20 p-4">
                 <div className="flex items-center gap-3">
                   <div className="h-16 w-16 rounded-md border overflow-hidden bg-white flex items-center justify-center">
                     {purchaseTarget.image ? <img src={purchaseTarget.image} alt={purchaseTarget.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
                   </div>
                   <div>
-                    <div className="font-semibold">{purchaseTarget.name}</div>
+                    <div className="font-semibold text-base">{purchaseTarget.name}</div>
                     <div className="text-xs text-muted-foreground">{purchaseTarget.category} • HSN: {purchaseTarget.hsn || 'N/A'}</div>
                   </div>
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                  <div className="rounded border bg-white p-2 font-medium">Current Stock: <span className="text-primary">{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.stock) : purchaseTarget.stock}</span></div>
-                  <div className="rounded border bg-white p-2 font-medium">Current Buy Price: <span className="text-primary">₹{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.buyPrice) : purchaseTarget.buyPrice}</span></div>
-                  <div className="rounded border bg-white p-2">Total Purchase: {toNonNegativeNumber(purchaseTarget.totalPurchase)}</div>
-                  <div className="rounded border bg-white p-2">Total Sold: {toNonNegativeNumber(purchaseTarget.totalSold)}</div>
+                <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                  <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Current Stock</div><div className="font-semibold">{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.stock) : purchaseTarget.stock}</div></div>
+                  <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Current Buy Price</div><div className="font-semibold">₹{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.buyPrice) : purchaseTarget.buyPrice}</div></div>
+                  <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">{toNonNegativeNumber(purchaseTarget.totalPurchase)}</div></div>
+                  <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Sold</div><div className="font-semibold">{toNonNegativeNumber(purchaseTarget.totalSold)}</div></div>
                 </div>
               </div>
 
@@ -1542,22 +1606,47 @@ export default function Admin() {
                 </div>
               )}
 
-              <Input type="number" placeholder="Purchase quantity" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} />
-              <Input type="number" placeholder="Purchase unit price" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
-              <Input placeholder="Reference (optional)" value={purchaseReference} onChange={(e) => setPurchaseReference(e.target.value)} />
-              <textarea
-                value={purchaseNotes}
-                onChange={(e) => setPurchaseNotes(e.target.value)}
-                placeholder="Notes (optional)"
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                rows={2}
-              />
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="rounded-lg border p-3 space-y-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Purchase Details</div>
+                  <div><Label>Purchase Quantity</Label><Input type="number" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} /></div>
+                  <div><Label>Purchase Unit Price</Label><Input type="number" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} /></div>
+                  <div><Label>Supplier / Party Name</Label><Input value={purchasePartyName} onChange={(e) => setPurchasePartyName(e.target.value)} /></div>
+                  <div><Label>Reference (optional)</Label><Input value={purchaseReference} onChange={(e) => setPurchaseReference(e.target.value)} /></div>
+                  <div><Label>Notes (optional)</Label><textarea value={purchaseNotes} onChange={(e) => setPurchaseNotes(e.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" rows={2} /></div>
+                </div>
+                <div className="rounded-lg border p-3 space-y-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Details</div>
+                  <div><Label>Amount Paid Now</Label><Input type="number" value={purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} /></div>
+                  <div>
+                    <Label>Payment Method</Label>
+                    <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={purchasePaymentMethod} onChange={(e) => setPurchasePaymentMethod(e.target.value as 'cash' | 'online')}>
+                      <option value="cash">cash</option>
+                      <option value="online">online</option>
+                    </select>
+                  </div>
+                  <div><Label>Payment Note (optional)</Label><Input value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} /></div>
+                  <div className="grid grid-cols-3 gap-2 text-xs pt-2">
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">₹{(toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)).toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">₹{toNonNegativeNumber(purchasePaidAmount).toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Remaining Due</div><div className="font-semibold">₹{Math.max(0, (toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)) - toNonNegativeNumber(purchasePaidAmount)).toFixed(2)}</div></div>
+                  </div>
+                </div>
+              </div>
               <div className="flex gap-2">
                 <Button type="button" variant="outline" onClick={() => setPurchaseNextBuyPrice(purchaseAveragePrice.toFixed(2))}>Average Price: ₹{purchaseAveragePrice.toFixed(2)}</Button>
                 <Input type="number" placeholder="New buy price (you can edit)" value={purchaseNextBuyPrice} onChange={(e) => setPurchaseNextBuyPrice(e.target.value)} />
               </div>
               <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
-              <Button onClick={handleAddPurchase} className="w-full">Apply Purchase</Button>
+              <div className="sticky bottom-0 mt-2 flex flex-col gap-2 rounded-lg border bg-background/95 p-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm">
+                  <span className="font-semibold">Total:</span> ₹{(toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)).toFixed(2)} · <span className="font-semibold">Paid:</span> ₹{toNonNegativeNumber(purchasePaidAmount).toFixed(2)} · <span className="font-semibold">Due:</span> ₹{Math.max(0, (toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)) - toNonNegativeNumber(purchasePaidAmount)).toFixed(2)}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setPurchaseTarget(null)}>Cancel</Button>
+                  <Button onClick={handleAddPurchase}>Save Purchase</Button>
+                </div>
+              </div>
                 </>
               ) : (
                 <div className="space-y-3">
