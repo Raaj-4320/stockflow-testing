@@ -247,8 +247,15 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.setFont("helvetica", "bold");
     doc.text(transaction.customerName || "Walk-in Customer", 14, 62);
     doc.setFont("helvetica", "normal");
-    const customerPhone = customers.find(c => c.id === transaction.customerId)?.phone || "Walk-in";
+    const customerPhone = transaction.customerPhone || customers.find(c => c.id === transaction.customerId)?.phone || "Walk-in";
     doc.text(`Contact No.: ${customerPhone}`, 14, 68);
+    const gstDetailsStartY = 74;
+    let tableStartY = 75;
+    if (transaction.gstApplied) {
+      doc.text(`GST Name: ${transaction.gstName || '-'}`, 14, gstDetailsStartY);
+      doc.text(`GST Number: ${transaction.gstNumber || '-'}`, 14, gstDetailsStartY + 6);
+      tableStartY = 87;
+    }
 
     doc.setFontSize(10);
     doc.setFont("helvetica", "bold");
@@ -270,7 +277,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     ]);
 
     autoTable(doc, {
-        startY: 75,
+        startY: tableStartY,
         head: [['#', 'Item name', 'HSN/SAC', 'Quantity', 'Price/Unit', 'Discount', 'Amount']],
         body: tableData,
         theme: 'grid',
