@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
+import { addCategory, convertConfirmedOrderToPurchase, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, getFreightPurchases, loadData, receiveFreightPurchaseIntoInventory, updateFreightInquiry } from '../services/storage';
 import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
@@ -9,6 +9,7 @@ type FreightTab = 'orders' | 'inquiries' | 'brokers';
 type WizardStep = 'source' | 'product' | 'variants' | 'pricing' | 'cartons' | 'review' | 'cbm' | 'newInquiry';
 type SourceMode = 'inventory' | 'new';
 type CbmMode = 'perCarton' | 'wholeOrder' | 'undecided';
+type NewInquiryTab = 'classic' | 'costing';
 
 type DraftLine = {
   key: string;
@@ -44,6 +45,27 @@ const formatNumber = (value: number, digits = 2) => {
   return safe.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
+
+const computeCostingMetrics = (entry: DraftLine | undefined, fallbackRate: number | '') => {
+  const pcsPerCtn = toNum(entry?.piecesPerCarton ?? '');
+  const cartons = toNum(entry?.totalCartons ?? '');
+  const totalPcs = pcsPerCtn * cartons;
+  const rmbPerPcs = toNum(entry?.rmbPerPcs ?? '');
+  const totalRmb = totalPcs * rmbPerPcs;
+  const inrRate = toNum(entry?.conversionRate ?? fallbackRate);
+  const inr = totalRmb * inrRate;
+  const ratePerPcs = totalPcs > 0 ? inr / totalPcs : 0;
+  const cbmPerCtn = toNum(entry?.cbmPerCarton ?? '');
+  const totalCbm = cbmPerCtn * cartons;
+  const cbmRate = toNum(entry?.cbmRate ?? '');
+  const totalCbmCost = cbmRate * totalCbm;
+  const cbmPerPcs = totalPcs > 0 ? totalCbmCost / totalPcs : 0;
+  const productCost = ratePerPcs + cbmPerPcs;
+  const totalInr = productCost * totalPcs;
+  const sellingPrice = toNum(entry?.sellingPrice ?? '');
+  const profitPercent = productCost > 0 ? ((sellingPrice - productCost) / productCost) * 100 : 0;
+  return { pcsPerCtn, cartons, totalPcs, rmbPerPcs, totalRmb, inrRate, inr, ratePerPcs, cbmPerCtn, totalCbm, cbmRate, totalCbmCost, cbmPerPcs, productCost, totalInr, sellingPrice, profitPercent };
+};
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
   return (
@@ -95,6 +117,9 @@ export default function FreightBooking() {
   const [newCategoryError, setNewCategoryError] = useState('');
   const [newProductImage, setNewProductImage] = useState('');
   const [newProductDetails, setNewProductDetails] = useState('');
+  const [newInquiryTab, setNewInquiryTab] = useState<NewInquiryTab>('classic');
+  const [showProductPicker, setShowProductPicker] = useState(false);
+  const [costingDate, setCostingDate] = useState(new Date().toISOString().slice(0, 10));
 
   const [orderType, setOrderType] = useState<'in_house' | 'customer_trade'>('in_house');
   const [brokerId, setBrokerId] = useState('');
@@ -113,6 +138,8 @@ export default function FreightBooking() {
   const [cartonCbmDrafts, setCartonCbmDrafts] = useState<Record<string, CartonCbmDraft>>({});
   const [showConfirmSave, setShowConfirmSave] = useState(false);
   const [convertingInquiryId, setConvertingInquiryId] = useState<string | null>(null);
+  const [materializingOrderId, setMaterializingOrderId] = useState<string | null>(null);
+  const [costingErrors, setCostingErrors] = useState<string[]>([]);
 
   const refresh = () => {
     const data = loadData();
@@ -133,6 +160,21 @@ export default function FreightBooking() {
       alert(error?.message || 'Unable to convert inquiry to confirmed order.');
     } finally {
       setConvertingInquiryId(null);
+    }
+  };
+
+  const receiveIntoInventory = async (order: FreightConfirmedOrder) => {
+    if (materializingOrderId) return;
+    setMaterializingOrderId(order.id);
+    try {
+      let purchase = getFreightPurchases().find((p) => p.sourceConfirmedOrderId === order.id && !p.isDeleted);
+      if (!purchase) purchase = await convertConfirmedOrderToPurchase(order.id);
+      await receiveFreightPurchaseIntoInventory(purchase.id);
+      refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Unable to receive into inventory.');
+    } finally {
+      setMaterializingOrderId(null);
     }
   };
 
@@ -172,6 +214,9 @@ export default function FreightBooking() {
     if (!q) return products;
     return products.filter(p => [p.name, p.category, p.barcode].join(' ').toLowerCase().includes(q));
   }, [products, productSearch]);
+
+  const costingEntry = pricingEntries['new-product-default'];
+  const costingMetrics = useMemo(() => computeCostingMetrics(costingEntry, exchangeRate), [costingEntry, exchangeRate]);
 
   const selectedVariants = useMemo(() => {
     if (!selectedProduct) return [] as Array<{ key: string; label: string; stock: number; variant?: string; color?: string }>;
@@ -339,6 +384,9 @@ export default function FreightBooking() {
     setNewCategoryError('');
     setNewProductImage('');
     setNewProductDetails('');
+    setNewInquiryTab('classic');
+    setShowProductPicker(false);
+    setCostingDate(new Date().toISOString().slice(0, 10));
     setOrderType('in_house');
     setBrokerId('');
     setExchangeRate(13.6);
@@ -372,6 +420,7 @@ export default function FreightBooking() {
       setNewProductDetails(inquiry.baseProductDetails || '');
     }
     setOrderType(inquiry.orderType || 'in_house');
+    setCostingDate(((inquiry as any).inquiryDate || inquiry.createdAt || new Date().toISOString()).slice(0, 10));
     setBrokerId(inquiry.brokerId || '');
     setExchangeRate(inquiry.exchangeRate || 13.6);
     setSellingPrice(inquiry.sellingPrice || '');
@@ -595,7 +644,7 @@ export default function FreightBooking() {
       return {
         id: `${line.key}-${idx}-${uid()}`,
         sourceType: sourceMode,
-        sourceProductId: selectedProduct?.id,
+        sourceProductId: selectedProduct?.id || undefined,
         productPhoto: sourceMode === 'inventory' ? (selectedProduct?.image || '') : newProductImage,
         productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName,
         variant: line.variant,
@@ -639,7 +688,7 @@ export default function FreightBooking() {
       id: editingInquiry?.id || `inquiry-${uid()}`,
       status,
       source: sourceMode,
-      sourceProductId: selectedProduct?.id,
+      sourceProductId: selectedProduct?.id || undefined,
       inventoryProductId: sourceMode === 'inventory' ? selectedProduct?.id : undefined,
       productPhoto: sourceMode === 'inventory' ? selectedProduct?.image : newProductImage,
       productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName,
@@ -675,6 +724,7 @@ export default function FreightBooking() {
       freightMode: 'order_level',
       cbmInputMode: cbmMode === 'wholeOrder' ? 'manual_total' : 'from_cartons',
       lines,
+      inquiryDate: costingDate,
       createdAt: editingInquiry?.createdAt || now,
       updatedAt: now,
     };
@@ -738,6 +788,17 @@ export default function FreightBooking() {
                   <div className="text-xs text-muted-foreground">
                     Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
                   </div>
+                  {order.source === 'new' && (
+                    <div className="mt-2">
+                      {order.inventoryProductId ? (
+                        <div className="text-xs text-emerald-700">Added to Inventory · Product ID: {order.inventoryProductId}</div>
+                      ) : (
+                        <Button size="sm" variant="outline" onClick={() => receiveIntoInventory(order)} disabled={materializingOrderId === order.id}>
+                          {materializingOrderId === order.id ? 'Receiving...' : 'Receive into Inventory'}
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
               {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}
@@ -799,7 +860,10 @@ export default function FreightBooking() {
                         <SummaryCard label="Category" value={inquiry.category || '—'} />
                         <SummaryCard label="Pcs" value={formatNumber(totalPcs, 0)} />
                         <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
-                        <SummaryCard label="Total" value={`₹${formatNumber(totalInr)}`} />
+                        <SummaryCard label="Cost/Pcs" value={`₹${formatNumber(inquiry.productCostPerPiece || 0)}`} />
+                        <SummaryCard label="Sell/Pcs" value={`₹${formatNumber(inquiry.sellingPrice || 0)}`} />
+                        <SummaryCard label="Profit %" value={`${formatNumber(inquiry.profitPercent || 0)}%`} />
+                        <SummaryCard label="Total INR" value={`₹${formatNumber(totalInr)}`} />
                       </div>
                       <button onClick={() => openEditInquiry(inquiry)} className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-white">View Details</button>
                     </div>
@@ -841,33 +905,70 @@ export default function FreightBooking() {
         {wizardStep === 'newInquiry' && (
           <div>
             <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="grid gap-4 md:grid-cols-2">
-              <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
-              <div>
-                <Label>Category</Label>
-                <div className="mt-1 flex gap-2">
-                  <Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select or create category" />
-                  <Button type="button" variant="outline" onClick={addCategoryQuick} title="Add category"><Plus className="h-4 w-4" /></Button>
-                </div>
-                <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
-                {newCategoryError && <p className="mt-1 text-xs text-rose-600">{newCategoryError}</p>}
-              </div>
-              <div>
-                <Label>Product Image</Label>
-                <div className="mt-1 flex items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3">
-                  <div className="h-14 w-14 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
-                    {newProductImage ? <img src={newProductImage} alt="Product preview" className="h-full w-full object-cover" /> : null}
-                  </div>
-                  <Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" />
-                </div>
-              </div>
-              <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>
-              <div className="md:col-span-2"><Label>Additional Product Details</Label><textarea value={newProductDetails} onChange={e => setNewProductDetails(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={4} /></div>
+            <div className="mb-4 flex gap-2 border-b pb-2">
+              <Button size="sm" variant={newInquiryTab === 'classic' ? 'default' : 'outline'} onClick={() => setNewInquiryTab('classic')}>Classic Inquiry</Button>
+              <Button size="sm" variant={newInquiryTab === 'costing' ? 'default' : 'outline'} onClick={() => setNewInquiryTab('costing')}>Create Inquiry (Costing Sheet)</Button>
             </div>
-            <div className="mt-5 flex justify-end"><button onClick={() => setWizardStep('pricing')} disabled={!newProductName.trim() || !newProductCategory.trim()} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Continue to Pricing <ArrowRight className="h-4 w-4" /></button></div>
+
+            {newInquiryTab === 'classic' ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
+                <div><Label>Date</Label><Input type="date" value={costingDate} onChange={e => setCostingDate(e.target.value)} /></div>
+                <div>
+                  <Label>Category</Label>
+                  <div className="mt-1 flex gap-2">
+                    <Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select or create category" />
+                    <Button type="button" variant="outline" onClick={addCategoryQuick} title="Add category"><Plus className="h-4 w-4" /></Button>
+                  </div>
+                  <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
+                </div>
+                <div><Label>Party</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select Party</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                <div><Label>Product Image</Label><Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" /></div>
+                <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>
+                <div className="md:col-span-2"><Label>Additional Product Details</Label><textarea value={newProductDetails} onChange={e => setNewProductDetails(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={4} /></div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-[150px_1fr_1fr_1fr]">
+                  <div><Label>Date</Label><Input type="date" value={costingDate} onChange={e => setCostingDate(e.target.value)} /></div>
+                  <div><Label>Item</Label><Button type="button" variant="outline" className="w-full justify-start" onClick={() => setShowProductPicker(true)}>{newProductName || 'Select product'}</Button></div>
+                  <div><Label>Party</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select Party</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                  <div className="rounded-xl border bg-slate-50 p-2">{newProductImage ? <img src={newProductImage} alt="Selected" className="h-14 w-14 rounded object-cover" /> : <div className="text-xs text-slate-500">No image</div>}</div>
+                </div>
+                <div className="overflow-auto rounded-2xl border">
+                  <table className="min-w-[1350px] w-full text-xs">
+                    <thead className="bg-slate-100"><tr>{['Pcs/CTN','Carton','Total Pcs','RMB/Pcs','Total RMB','INR Rate','INR','Rate/Pcs','CBM/CTN','Total CBM','CBM Rate','Total CBM Cost','CBM/Pcs','Product Cost','Total INR','Selling Price','Profit %'].map(h => <th key={h} className="px-2 py-2 text-left">{h}</th>)}</tr></thead>
+                    <tbody><tr className="border-t">
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.piecesPerCarton ?? '')} onChange={e => updatePricingEntry('new-product-default', 'piecesPerCarton', e.target.value)} /></td>
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.totalCartons ?? '')} onChange={e => updatePricingEntry('new-product-default', 'totalCartons', e.target.value)} /></td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.totalPcs,0)}</td>
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.rmbPerPcs ?? '')} onChange={e => updatePricingEntry('new-product-default', 'rmbPerPcs', e.target.value)} /></td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.totalRmb)}</td>
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.conversionRate ?? exchangeRate)} onChange={e => updatePricingEntry('new-product-default', 'conversionRate', e.target.value)} /></td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.inr)}</td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.ratePerPcs)}</td>
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.cbmPerCarton ?? '')} onChange={e => updatePricingEntry('new-product-default', 'cbmPerCarton', e.target.value)} /></td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.totalCbm,3)}</td>
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.cbmRate ?? '')} onChange={e => updatePricingEntry('new-product-default', 'cbmRate', e.target.value)} /></td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.totalCbmCost)}</td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.cbmPerPcs)}</td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.productCost)}</td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.totalInr)}</td>
+                      <td className="px-2 py-2"><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.sellingPrice ?? '')} onChange={e => { updatePricingEntry('new-product-default', 'sellingPrice', e.target.value); setSellingPrice(e.target.value === '' ? '' : Number(e.target.value)); }} /></td>
+                      <td className="px-2 py-2 bg-slate-50">{formatNumber(costingMetrics.profitPercent)}%</td>
+                    </tr></tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={resetWizard}>Reset</Button><button onClick={() => { const errs:string[]=[]; if (!costingDate) errs.push('Date is required.'); if (!newProductName.trim()) errs.push('Item is required.'); if (!brokerId) errs.push('Party is required.'); if (costingMetrics.pcsPerCtn <= 0) errs.push('Pcs/CTN must be greater than 0.'); if (costingMetrics.cartons <= 0) errs.push('Carton must be greater than 0.'); if (costingMetrics.totalPcs <= 0) errs.push('Total Pcs must be greater than 0.'); if (costingMetrics.rmbPerPcs < 0) errs.push('RMB/Pcs must be >= 0.'); if (costingMetrics.inrRate < 0) errs.push('INR Rate must be >= 0.'); if (costingMetrics.cbmPerCtn < 0) errs.push('CBM/CTN must be >= 0.'); if (costingMetrics.cbmRate < 0) errs.push('CBM Rate must be >= 0.'); if (costingMetrics.sellingPrice < 0) errs.push('Selling Price must be >= 0.'); setCostingErrors(errs); if (errs.length) return; setWizardStep('review'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Continue to Review <ArrowRight className="h-4 w-4" /></button></div>{costingErrors.length>0 && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{costingErrors.map(err => <div key={err}>• {err}</div>)}</div>}
           </div>
         )}
 
+        <Modal open={showProductPicker} onClose={() => setShowProductPicker(false)} title="Select Product">
+          <div className="mb-3 relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products..." className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 outline-none focus:border-slate-400" /></div>
+          <div className="grid gap-3 md:grid-cols-2">{filteredProducts.map(product => <button key={product.id} onClick={() => { setSelectedProduct(product); setNewProductName(product.name); setNewProductCategory(product.category || ''); setNewProductImage(product.image || ''); setShowProductPicker(false); setPricingEntries(prev => ({...prev, ['new-product-default']: prev['new-product-default'] || { key: 'new-product-default', label: product.name, stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice: '' }})); }} className="flex items-center gap-3 rounded-xl border p-3 text-left hover:bg-slate-50"><img src={product.image || ''} alt={product.name} className="h-12 w-12 rounded object-cover border" /><div><div className="font-medium">{product.name}</div><div className="text-xs text-slate-500">{product.barcode || 'No barcode'} · {product.category || 'Uncategorized'}</div></div></button>)}</div>
+        </Modal>
         {wizardStep === 'variants' && selectedProduct && (
           <div>
             <button onClick={() => setWizardStep('product')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>

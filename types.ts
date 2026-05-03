@@ -221,6 +221,7 @@ export interface FreightInquiry {
   brokerId?: string;
   brokerName?: string;
   brokerType: 'broker' | 'owner';
+  inquiryDate?: string;
   totalPieces: number;
   piecesPerCartoon: number;
   numberOfCartoons: number;
@@ -339,6 +340,9 @@ export interface FreightPurchase {
   updatedAt: string;
   updatedBy?: string;
   lines: ProcurementLineSnapshot[];
+  materializedProductId?: string;
+  materializedAt?: string;
+  receivedAt?: string;
 }
 
 export interface PurchaseReceiptInventoryDelta {
@@ -421,6 +425,15 @@ export interface PurchaseOrder {
   lines: PurchaseOrderLine[];
   totalQuantity: number;
   totalAmount: number;
+  totalPaid?: number;
+  remainingAmount?: number;
+  paymentHistory?: Array<{
+    id: string;
+    paidAt: string;
+    amount: number;
+    method?: 'cash' | 'online';
+    note?: string;
+  }>;
   receivedQuantity?: number;
   createdAt: string;
   updatedAt: string;
