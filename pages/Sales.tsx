@@ -848,6 +848,13 @@ export default function Sales() {
       exportInvoiceToExcel(transactionComplete);
     }
   };
+  const persistInvoiceCarts = (carts: InvoiceCart[], activeId: string) => {
+    localStorage.setItem(POS_CARTS_STORAGE_KEY, JSON.stringify({ carts, activeCartId: activeId }));
+  };
+  useEffect(() => { persistInvoiceCarts(invoiceCarts, activeCartId); }, [invoiceCarts, activeCartId]);
+  const setActiveCartItems = (updater: (items: CartItem[]) => CartItem[]) => {
+    setInvoiceCarts(prev => prev.map(c => c.id === activeCartId ? { ...c, items: updater(c.items), updatedAt: new Date().toISOString() } : c));
+  };
 
   const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
   const checkoutPreview = buildCheckoutMoney({
