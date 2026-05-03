@@ -52,8 +52,8 @@ export default function Customers() {
   const [collectPaymentError, setCollectPaymentError] = useState<string | null>(null);
   const [customerEditError, setCustomerEditError] = useState<string | null>(null);
   
-  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '' });
-  const [customerEditForm, setCustomerEditForm] = useState({ name: '', phone: '' });
+  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', gstName: '', gstNumber: '' });
+  const [customerEditForm, setCustomerEditForm] = useState({ name: '', phone: '', gstName: '', gstNumber: '' });
   
   // Upfront Order Form State
   const [upfrontOrderForm, setUpfrontOrderForm] = useState({
@@ -203,7 +203,7 @@ export default function Customers() {
 
   const openCustomerEditor = (customer: Customer) => {
     setEditingCustomer(customer);
-    setCustomerEditForm({ name: customer.name, phone: customer.phone });
+    setCustomerEditForm({ name: customer.name, phone: customer.phone, gstName: customer.gstName || '', gstNumber: customer.gstNumber || '' });
     setCustomerEditError(null);
   };
 
@@ -255,6 +255,8 @@ export default function Customers() {
 
     const name = customerEditForm.name.trim();
     const phone = customerEditForm.phone.trim();
+    const gstName = customerEditForm.gstName.trim();
+    const gstNumber = customerEditForm.gstNumber.trim();
 
     if (!name || !phone) {
       setCustomerEditError('Name and phone number are required.');
@@ -266,6 +268,8 @@ export default function Customers() {
         ...editingCustomer,
         name,
         phone,
+        gstName: gstName || undefined,
+        gstNumber: gstNumber || undefined,
       };
       const nextCustomers = updateCustomer(updatedCustomer);
       setCustomers(nextCustomers);
@@ -394,6 +398,8 @@ export default function Customers() {
           id: Date.now().toString(),
           name: name,
           phone: rawPhone,
+          gstName: newCustomer.gstName.trim() || undefined,
+          gstNumber: newCustomer.gstNumber.trim() || undefined,
           totalSpend: 0,
           totalDue: 0,
           visitCount: 0,
@@ -404,7 +410,7 @@ export default function Customers() {
           addCustomer(customer);
           refreshData();
           setIsAddModalOpen(false);
-          setNewCustomer({ name: '', phone: '' });
+          setNewCustomer({ name: '', phone: '', gstName: '', gstNumber: '' });
       } catch (error) {
           console.error('[customers] add customer failed', error);
           const message = error instanceof Error ? error.message : 'Failed to create customer. Please try again.';
@@ -811,7 +817,10 @@ export default function Customers() {
                   />
                 </td>
                 <td className="p-3 font-medium">{customer.name}</td>
-                <td className="p-3">{customer.phone}</td>
+                <td className="p-3">
+                  <div>{customer.phone}</div>
+                  <div className="text-[11px] text-muted-foreground">{customer.gstNumber ? `GST: ${customer.gstNumber}` : 'GST details not added'}</div>
+                </td>
                 <td className="p-3">{customer.visitCount}</td>
                 <td className="p-3">₹{formatMoneyWhole(customer.totalSpend)}</td>
                 <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{formatMoneyWhole(customer.totalDue)}</td>
@@ -865,6 +874,14 @@ export default function Customers() {
                         <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Phone Number</Label>
                         <Input placeholder="9876543210" value={newCustomer.phone} onChange={e => setNewCustomer({...newCustomer, phone: e.target.value})} />
                       </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Name (Optional)</Label>
+                        <Input placeholder="Registered GST name" value={newCustomer.gstName} onChange={e => setNewCustomer({...newCustomer, gstName: e.target.value})} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Number (Optional)</Label>
+                        <Input placeholder="GST number" value={newCustomer.gstNumber} onChange={e => setNewCustomer({...newCustomer, gstNumber: e.target.value.toUpperCase()})} />
+                      </div>
                       <Button className="w-full h-11 shadow-lg bg-primary hover:bg-primary/90 font-bold" onClick={handleAddCustomerSubmit}>
                           Create Profile
                       </Button>
@@ -898,6 +915,14 @@ export default function Customers() {
                         <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Phone Number</Label>
                         <Input value={customerEditForm.phone} onChange={e => setCustomerEditForm(prev => ({ ...prev, phone: e.target.value }))} />
                       </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Name (Optional)</Label>
+                        <Input value={customerEditForm.gstName} onChange={e => setCustomerEditForm(prev => ({ ...prev, gstName: e.target.value }))} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Number (Optional)</Label>
+                        <Input value={customerEditForm.gstNumber} onChange={e => setCustomerEditForm(prev => ({ ...prev, gstNumber: e.target.value.toUpperCase() }))} />
+                      </div>
                       <div className="flex gap-2">
                         <Button variant="outline" className="flex-1" onClick={closeCustomerEditor}>Cancel</Button>
                         <Button variant="outline" className="flex-1" onClick={() => handleSaveCustomerEdit(true)}>
@@ -925,6 +950,10 @@ export default function Customers() {
                                         {viewingCustomer.totalSpend >= highValueThreshold && <Badge className="bg-amber-100 text-amber-800 border-amber-200">VIP</Badge>}
                                     </CardTitle>
                                     <div className="text-sm text-muted-foreground flex items-center gap-2 mt-2"><Phone className="w-3 h-3" /> {viewingCustomer.phone}</div>
+                                    <div className="mt-2 rounded-lg border bg-muted/20 px-2 py-1 text-xs">
+                                      <div><span className="font-semibold">GST Name:</span> {viewingCustomer.gstName || 'Not added'}</div>
+                                      <div><span className="font-semibold">GST Number:</span> {viewingCustomer.gstNumber || 'Not added'}</div>
+                                    </div>
                                 </div>
                           </div>
                           <div className="flex gap-1">
