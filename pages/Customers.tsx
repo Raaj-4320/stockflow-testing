@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input,
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
+import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
 export default function Customers() {
   const CUSTOMERS_PAGE_SIZE = 15;
