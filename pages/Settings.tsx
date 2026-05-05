@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { StoreProfile, TAX_OPTIONS } from '../types';
-import { loadData, updateStoreProfile } from '../services/storage';
+import { AccessControlSettings, StoreProfile, TAX_OPTIONS } from '../types';
+import { loadData, updateAccessControlSettings, updateStoreProfile } from '../services/storage';
 import { logout, getCurrentUser } from '../services/auth';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
 import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText } from 'lucide-react';
@@ -16,11 +16,22 @@ export default function Settings() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [adminPinTouched, setAdminPinTouched] = useState(false);
+  const [accessControl, setAccessControl] = useState<AccessControlSettings>({ adminPasscode: '', protectedPages: [], roles: [] });
+  const [accessControlError, setAccessControlError] = useState<string | null>(null);
+  const [accessControlSuccess, setAccessControlSuccess] = useState<string | null>(null);
+  const [isSavingAccessControl, setIsSavingAccessControl] = useState(false);
+  const APP_PAGES = [
+    { key: 'dashboard', label: 'Dashboard' }, { key: 'admin', label: 'Inventory' }, { key: 'sales', label: 'POS/Sales' },
+    { key: 'transactions', label: 'Transactions' }, { key: 'product-analytics', label: 'Product Analytics' }, { key: 'customers', label: 'Customers' },
+    { key: 'reports', label: 'Reports' }, { key: 'settings', label: 'Settings' }, { key: 'finance', label: 'Finance' }, { key: 'financial', label: 'Financial' },
+    { key: 'freight-booking', label: 'Freight Booking' }, { key: 'purchase-panel', label: 'Purchase Panel' },
+  ];
 
   useEffect(() => {
     const refreshData = () => {
       const data = loadData();
       setProfile(data.profile);
+      setAccessControl(data.accessControlSettings || { adminPasscode: '', protectedPages: [], roles: [] });
       setUserEmail(getCurrentUser());
       setAdminPinTouched(false);
     };
@@ -41,7 +52,7 @@ export default function Settings() {
     const shouldPreserveStoredPin = !adminPinTouched && !hasTypedPin && !!existingStoredPin;
     const nextProfile = shouldPreserveStoredPin
       ? { ...profile, adminPin: latestProfile.adminPin }
-      : profile;
+      : { ...profile, adminPin: accessControl.adminPasscode || '' };
 
     updateStoreProfile(nextProfile);
     setProfile(nextProfile);
@@ -55,6 +66,34 @@ export default function Settings() {
       if (selected) {
           setProfile({ ...profile, defaultTaxLabel: selected.label, defaultTaxRate: selected.value });
       }
+  };
+
+  const handleSaveAccessControl = async () => {
+    setAccessControlError(null);
+    setAccessControlSuccess(null);
+    const hasProtectedPages = accessControl.protectedPages.length > 0;
+    if (hasProtectedPages && !accessControl.adminPasscode.trim()) {
+      setAccessControlError('Set an admin passcode before protecting pages.');
+      return;
+    }
+    const invalidRole = accessControl.roles.find(role =>
+      role.allowedPages.length > 0 && (!role.name.trim() || !role.passcode.trim())
+    );
+    if (invalidRole) {
+      setAccessControlError('Each role with allowed pages must include a role name and numeric passcode.');
+      return;
+    }
+
+    setIsSavingAccessControl(true);
+    try {
+      await updateAccessControlSettings(accessControl);
+      setAccessControlSuccess('Access control saved. Reloading access rules…');
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch {
+      setAccessControlError('Failed to save access control settings. Please try again.');
+    } finally {
+      setIsSavingAccessControl(false);
+    }
   };
 
   const handleImageToDataUrl = (file: File, cb: (dataUrl: string) => void, maxWidth = 400) => {
@@ -195,28 +234,44 @@ export default function Settings() {
         </Card>
 
 
-        <Card>
-           <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Security</CardTitle></CardHeader>
-           <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Manager Unlock PIN (for opening balance edit)</Label>
-                <Input
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={profile.adminPin || ''}
-                  onChange={e => {
-                    setAdminPinTouched(true);
-                    setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) });
-                  }}
-                  placeholder="Enter PIN (e.g. 1234)"
-                />
-                <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
-                {!profile.adminPin?.trim() && (
-                  <p className="text-xs text-amber-700">No manager PIN configured. Opening balance unlock is disabled until you set one.</p>
-                )}
+        <Card className="md:col-span-2">
+          <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Access Control</CardTitle></CardHeader>
+          <CardContent className="space-y-5">
+            <div className="space-y-2">
+              <Label>Admin Passcode</Label>
+              <Input type="password" inputMode="numeric" value={accessControl.adminPasscode} onChange={e => setAccessControl(prev => ({ ...prev, adminPasscode: e.target.value.replace(/[^\d]/g, '').slice(0, 10) }))} placeholder="Set admin passcode" />
+              <p className="text-xs text-muted-foreground">After saving, access rules reload and protected pages will ask for passcode.</p>
+            </div>
+            <div className="space-y-2">
+              <Label>Protected Pages</Label>
+              <div className="grid md:grid-cols-3 gap-2">
+                {APP_PAGES.map(page => <label key={`protected-${page.key}-${page.label}`} className="text-sm flex items-center gap-2"><input type="checkbox" checked={accessControl.protectedPages.includes(page.key)} onChange={(e) => setAccessControl(prev => ({ ...prev, protectedPages: e.target.checked ? [...new Set([...prev.protectedPages, page.key])] : prev.protectedPages.filter(p => p !== page.key) }))} />{page.label}</label>)}
               </div>
-           </CardContent>
+            </div>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between"><Label>Roles</Label><Button type="button" size="sm" variant="outline" onClick={() => setAccessControl(prev => ({ ...prev, roles: [...prev.roles, { id: `role-${Date.now()}`, name: '', passcode: '', allowedPages: [] }] }))}>Add Role</Button></div>
+              {accessControl.roles.map((role) => (
+                <div key={role.id} className="border rounded-lg p-3 space-y-2">
+                  <div className="grid md:grid-cols-3 gap-2">
+                    <Input value={role.name} placeholder="Role name" onChange={e => setAccessControl(prev => ({ ...prev, roles: prev.roles.map(r => r.id === role.id ? { ...r, name: e.target.value } : r) }))} />
+                    <Input type="password" inputMode="numeric" value={role.passcode} placeholder="Numeric passcode" onChange={e => setAccessControl(prev => ({ ...prev, roles: prev.roles.map(r => r.id === role.id ? { ...r, passcode: e.target.value.replace(/[^\d]/g, '').slice(0, 10) } : r) }))} />
+                    <Button type="button" variant="destructive" size="sm" onClick={() => setAccessControl(prev => ({ ...prev, roles: prev.roles.filter(r => r.id !== role.id) }))}>Delete</Button>
+                  </div>
+                  <div className="grid md:grid-cols-3 gap-2">
+                    {APP_PAGES.map(page => <label key={`${role.id}-${page.key}-${page.label}`} className="text-xs flex items-center gap-2"><input type="checkbox" checked={role.allowedPages.includes(page.key)} onChange={(e) => setAccessControl(prev => ({ ...prev, roles: prev.roles.map(r => r.id !== role.id ? r : { ...r, allowedPages: e.target.checked ? [...new Set([...r.allowedPages, page.key])] : r.allowedPages.filter(p => p !== page.key) }) }))} />{page.label}</label>)}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {accessControlError && <p className="text-sm text-red-600">{accessControlError}</p>}
+            {accessControlSuccess && <p className="text-sm text-green-600">{accessControlSuccess}</p>}
+            <div className="pt-1">
+              <Button type="button" onClick={handleSaveAccessControl} disabled={isSavingAccessControl}>
+                <ShieldCheck className="w-4 h-4 mr-2" />
+                {isSavingAccessControl ? 'Saving Access Control…' : 'Save Access Control'}
+              </Button>
+            </div>
+          </CardContent>
         </Card>
 
         <Card className="md:col-span-2">
