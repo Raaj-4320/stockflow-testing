@@ -119,6 +119,19 @@ export interface StoreProfile {
   adminPin?: string;
 }
 
+export interface AccessControlRole {
+  id: string;
+  name: string;
+  passcode: string;
+  allowedPages: string[];
+}
+
+export interface AccessControlSettings {
+  adminPasscode: string;
+  protectedPages: string[];
+  roles: AccessControlRole[];
+}
+
 export interface AdminUser {
   email: string;
   passwordHash: string;
@@ -577,6 +590,7 @@ export interface AppState {
   variantsMaster?: string[];
   colorsMaster?: string[];
   migrationMarkers?: MigrationMarkers;
+  accessControlSettings?: AccessControlSettings;
 }
 
 export const TAX_OPTIONS = [

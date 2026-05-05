@@ -19,6 +19,7 @@ import {
   DeleteCompensationRecord,
   UpdatedTransactionRecord,
   CashAdjustment,
+  AccessControlSettings,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
@@ -1586,7 +1587,12 @@ const initialData: AppState = {
   purchaseParties: [],
   purchaseOrders: [],
   variantsMaster: [],
-  colorsMaster: []
+  colorsMaster: [],
+  accessControlSettings: {
+    adminPasscode: '',
+    protectedPages: [],
+    roles: [],
+  }
 };
 
 const computeCashEstimateFromTransactions = (transactions: Transaction[], deleteCompensations: DeleteCompensationRecord[] = []) => {
@@ -1903,6 +1909,18 @@ const syncFromCloud = async () => {
                 if (!memoryState.profile.invoiceFormat) {
                     memoryState.profile.invoiceFormat = 'standard';
                 }
+                memoryState.accessControlSettings = {
+                  adminPasscode: String(memoryState.accessControlSettings?.adminPasscode || '').replace(/[^\d]/g, ''),
+                  protectedPages: Array.isArray(memoryState.accessControlSettings?.protectedPages) ? memoryState.accessControlSettings!.protectedPages : [],
+                  roles: Array.isArray(memoryState.accessControlSettings?.roles)
+                    ? memoryState.accessControlSettings!.roles.map((role: any) => ({
+                      id: String(role?.id || `role-${Date.now()}`),
+                      name: String(role?.name || 'Role'),
+                      passcode: String(role?.passcode || '').replace(/[^\d]/g, ''),
+                      allowedPages: Array.isArray(role?.allowedPages) ? role.allowedPages : [],
+                    }))
+                    : [],
+                };
                 logLoadedState(memoryState);
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
@@ -2637,6 +2655,21 @@ export const requestStoreProvisioning = async (context?: string) => {
 export const updateStoreProfile = (profile: StoreProfile) => {
     const data = loadData();
     void saveData({ ...data, profile }, { reason: 'updateStoreProfile', auditOperation: 'UPDATE' });
+};
+
+export const updateAccessControlSettings = (settings: AccessControlSettings) => {
+  const data = loadData();
+  const sanitized: AccessControlSettings = {
+    adminPasscode: String(settings.adminPasscode || '').replace(/[^\d]/g, ''),
+    protectedPages: Array.isArray(settings.protectedPages) ? settings.protectedPages : [],
+    roles: Array.isArray(settings.roles) ? settings.roles.map(role => ({
+      id: String(role.id || `role-${Date.now()}`),
+      name: String(role.name || '').trim() || 'Role',
+      passcode: String(role.passcode || '').replace(/[^\d]/g, ''),
+      allowedPages: Array.isArray(role.allowedPages) ? role.allowedPages : [],
+    })) : [],
+  };
+  void saveData({ ...data, accessControlSettings: sanitized }, { reason: 'updateAccessControlSettings', auditOperation: 'UPDATE' });
 };
 
 export const resetData = () => {
