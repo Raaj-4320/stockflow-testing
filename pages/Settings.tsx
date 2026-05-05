@@ -15,14 +15,12 @@ export default function Settings() {
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [adminPinTouched, setAdminPinTouched] = useState(false);
 
   useEffect(() => {
     const refreshData = () => {
       const data = loadData();
       setProfile(data.profile);
       setUserEmail(getCurrentUser());
-      setAdminPinTouched(false);
     };
     refreshData();
     window.addEventListener('storage', refreshData);
@@ -35,17 +33,8 @@ export default function Settings() {
   }, []);
 
   const handleSave = () => {
-    const latestProfile: StoreProfile = loadData().profile || ({} as StoreProfile);
-    const hasTypedPin = !!profile.adminPin?.trim();
-    const existingStoredPin = latestProfile.adminPin?.trim() || '';
-    const shouldPreserveStoredPin = !adminPinTouched && !hasTypedPin && !!existingStoredPin;
-    const nextProfile = shouldPreserveStoredPin
-      ? { ...profile, adminPin: latestProfile.adminPin }
-      : profile;
-
-    updateStoreProfile(nextProfile);
-    setProfile(nextProfile);
-    setAdminPinTouched(false);
+    updateStoreProfile(profile);
+    setProfile(profile);
     setSuccess(true);
     setTimeout(() => setSuccess(false), 3000);
   };
@@ -190,31 +179,6 @@ export default function Settings() {
                   ) : (
                       <p>Standard format generates a professional A4 PDF document for downloading or sharing.</p>
                   )}
-              </div>
-           </CardContent>
-        </Card>
-
-
-        <Card>
-           <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Security</CardTitle></CardHeader>
-           <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Manager Unlock PIN (for opening balance edit)</Label>
-                <Input
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={profile.adminPin || ''}
-                  onChange={e => {
-                    setAdminPinTouched(true);
-                    setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) });
-                  }}
-                  placeholder="Enter PIN (e.g. 1234)"
-                />
-                <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
-                {!profile.adminPin?.trim() && (
-                  <p className="text-xs text-amber-700">No manager PIN configured. Opening balance unlock is disabled until you set one.</p>
-                )}
               </div>
            </CardContent>
         </Card>
