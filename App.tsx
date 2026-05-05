@@ -73,6 +73,35 @@ const ProtectedRoute = ({ isVerified, children }: { isVerified: boolean; childre
   return children;
 };
 
+const PAGE_KEYS: Record<string, string> = {
+  '/': 'admin',
+  '/dashboard': 'dashboard',
+  '/sales': 'sales',
+  '/transactions': 'transactions',
+  '/product-analytics': 'product-analytics',
+  '/customers': 'customers',
+  '/pdf': 'reports',
+  '/settings': 'settings',
+  '/finance': 'finance',
+  '/financial': 'financial',
+  '/freight-booking': 'freight-booking',
+  '/purchase-panel': 'purchase-panel',
+};
+const PAGE_LABELS: Record<string, string> = {
+  admin: 'Inventory',
+  dashboard: 'Dashboard',
+  sales: 'POS/Sales',
+  transactions: 'Transactions',
+  'product-analytics': 'Product Analytics',
+  customers: 'Customers',
+  reports: 'Reports',
+  settings: 'Settings',
+  finance: 'Finance',
+  financial: 'Financial',
+  'freight-booking': 'Freight Booking',
+  'purchase-panel': 'Purchase Panel',
+};
+
 export default function App() {
   const currentBuildId = typeof APP_BUILD_ID === 'string' ? APP_BUILD_ID : 'unknown';
   const { updateAvailable, latestVersionData, dismissUpdate } = useVersionCheck(currentBuildId);
@@ -83,6 +112,11 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
   const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
   const [salesCartCount, setSalesCartCount] = useState(0);
+  const [unlockIdentity, setUnlockIdentity] = useState<{ type: 'admin' | 'role'; roleId?: string } | null>(null);
+  const [accessPrompt, setAccessPrompt] = useState<{ path: string; pageKey: string } | null>(null);
+  const [passcodeInput, setPasscodeInput] = useState('');
+  const [passcodeError, setPasscodeError] = useState('');
+  const [lastAllowedPath, setLastAllowedPath] = useState('/dashboard');
 
   useEffect(() => {
     if (!auth) {
@@ -105,6 +139,65 @@ export default function App() {
 
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const path = (window.location.hash.replace('#', '') || '/').split('?')[0];
+      const data = loadData();
+      const settings = data.accessControlSettings || { adminPasscode: '', protectedPages: [], roles: [] };
+      const pageKey = PAGE_KEYS[path];
+      if (!pageKey || !settings.protectedPages.includes(pageKey) || !settings.adminPasscode) {
+        setLastAllowedPath(path);
+        return;
+      }
+      if (unlockIdentity?.type === 'admin') {
+        setLastAllowedPath(path);
+        return;
+      }
+      if (unlockIdentity?.type === 'role') {
+        const role = settings.roles.find(r => r.id === unlockIdentity.roleId);
+        if (role?.allowedPages?.includes(pageKey)) {
+          setLastAllowedPath(path);
+          return;
+        }
+      }
+      setPasscodeInput('');
+      setPasscodeError('');
+      setAccessPrompt({ path, pageKey });
+      const fallbackPath = lastAllowedPath && lastAllowedPath !== path ? lastAllowedPath : '/dashboard';
+      window.location.hash = fallbackPath;
+    };
+    onHashChange();
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, [unlockIdentity, lastAllowedPath]);
+
+  useEffect(() => {
+    if (!accessPrompt) return;
+    const data = loadData();
+    const settings = data.accessControlSettings || { adminPasscode: '', protectedPages: [], roles: [] };
+    if (!passcodeInput) { setPasscodeError(''); return; }
+    if (passcodeInput === settings.adminPasscode && settings.adminPasscode) {
+      setUnlockIdentity({ type: 'admin' });
+      setAccessPrompt(null);
+      window.location.hash = accessPrompt.path;
+      return;
+    }
+    const matchedRole = (settings.roles || []).find(role => role.passcode && role.passcode === passcodeInput);
+    if (matchedRole) {
+      if (matchedRole.allowedPages.includes(accessPrompt.pageKey)) {
+        setUnlockIdentity({ type: 'role', roleId: matchedRole.id });
+        setAccessPrompt(null);
+        window.location.hash = accessPrompt.path;
+        return;
+      }
+      setPasscodeError('This role does not have access to this page.');
+      return;
+    }
+    const lengths = [settings.adminPasscode, ...(settings.roles || []).map(r => r.passcode)].map(v => (v || '').length).filter(Boolean);
+    const minLength = lengths.length ? Math.min(...lengths) : 4;
+    setPasscodeError(passcodeInput.length >= minLength ? 'Invalid passcode.' : '');
+  }, [passcodeInput, accessPrompt]);
 
   useEffect(() => {
       if (authStatus === 'authenticated') {
@@ -250,6 +343,9 @@ export default function App() {
              <Button variant="ghost" size="sm" onClick={logout} className="w-full text-muted-foreground hover:text-destructive justify-start px-2">
                 <LogOut className="w-4 h-4 mr-2" /> Logout
              </Button>
+             <Button variant="outline" size="sm" onClick={() => setUnlockIdentity(null)} className="w-full justify-start px-2">
+                Lock Access
+             </Button>
           </div>
         </div>
 
@@ -377,6 +473,27 @@ export default function App() {
           </div>
         </main>
       </div>
+      {accessPrompt && (
+        <div className="fixed inset-0 bg-black/60 z-[99] flex items-center justify-center p-4">
+          <Card className="w-full max-w-sm">
+            <CardHeader><CardTitle>Enter Passcode</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <input
+                className="w-full border rounded-md h-10 px-3"
+                type="password"
+                inputMode="numeric"
+                autoFocus
+                value={passcodeInput}
+                onChange={(e) => setPasscodeInput(e.target.value.replace(/[^\d]/g, ''))}
+                placeholder="Numbers only"
+              />
+              {accessPrompt?.pageKey && <p className="text-xs text-muted-foreground">Access required for {PAGE_LABELS[accessPrompt.pageKey] || 'this page'}.</p>}
+              {passcodeError && <p className="text-sm text-red-600">{passcodeError}</p>}
+              <Button variant="outline" onClick={() => { setAccessPrompt(null); setPasscodeInput(''); setPasscodeError(''); window.location.hash = lastAllowedPath || '/dashboard'; }}>Cancel</Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </Router>
   );
 }
