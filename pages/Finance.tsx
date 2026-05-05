@@ -841,6 +841,11 @@ export default function Finance() {
 
   const expectedClosingForOpenSession = openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : 0;
   const closingVariance = openSession ? (closingCountTotal - expectedClosingForOpenSession) : 0;
+
+  useEffect(() => {
+    if (!openSession) return;
+    setClosingBalance((prev) => prev.trim() ? prev : expectedClosingForOpenSession.toFixed(2));
+  }, [openSession?.id, expectedClosingForOpenSession]);
   const buildLayerFinanceBreakdown = (rows: CashbookRow[]) => {
     const grossSales = roundMoney(rows.reduce((sum, row) => sum + row.grossSales, 0));
     const salesReturns = roundMoney(rows.reduce((sum, row) => sum + row.salesReturn, 0));
