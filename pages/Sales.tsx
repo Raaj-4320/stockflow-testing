@@ -18,7 +18,7 @@ import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
 
-const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
+const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => boolean }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
     const [qtyInput, setQtyInput] = useState('1');
     const [flashMsg, setFlashMsg] = useState<string | null>(null);
@@ -30,31 +30,23 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 
     const handleAdd = () => {
         if (isOutOfStock && !isReturnMode) return;
-        
-        // If already in cart, just increment by 1
-        if (cartQty > 0) {
-            if (isReturnMode && cartQty >= maxReturnable) {
-                setFlashMsg(`Limit: ${maxReturnable}`);
-                setTimeout(() => setFlashMsg(null), 1500);
-                return;
-            }
-            if (!isReturnMode && cartQty >= product.stock) {
-                setFlashMsg(`Stock: ${product.stock}`);
-                setTimeout(() => setFlashMsg(null), 1500);
-                return;
-            }
-            onAdd(1);
-            if (navigator.vibrate) navigator.vibrate(50);
+
+        const parsedQty = Math.floor(Number(qtyInput));
+        if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
+            setFlashMsg('Enter a valid quantity');
+            setTimeout(() => setFlashMsg(null), 1500);
             return;
         }
 
-        // Otherwise use the local qty
-        if (isReturnMode && qty > maxReturnable) {
+        if (isReturnMode && (cartQty + parsedQty) > maxReturnable) {
             setFlashMsg(`Limit: ${maxReturnable}`);
             setTimeout(() => setFlashMsg(null), 1500);
             return;
         }
-        onAdd(qty);
+
+        const added = onAdd(parsedQty);
+        if (!added) return;
+
         setQty(1);
         setQtyInput('1');
         if (navigator.vibrate) navigator.vibrate(50);
@@ -118,7 +110,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 </div>
                 <div className="mt-auto flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <Button variant="outline" size="icon" className="h-7 w-7 rounded-lg shrink-0" onClick={handleMinus} disabled={isDisabled}><Minus className="w-3 h-3" /></Button>
-                    <Input value={cartQty > 0 ? String(cartQty) : qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => { const v = e.target.value.replace(/[^\d]/g, ''); setQtyInput(v); if (!cartQty) setQty(Math.max(1, Number(v || 1))); }} />
+                    <Input value={qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => { const v = e.target.value.replace(/[^\d]/g, ''); setQtyInput(v); setQty(Math.max(1, Number(v || 1))); }} />
                     <Button variant="default" size="icon" className={`h-7 w-7 rounded-lg shrink-0 ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} ${cartQty > 0 ? 'bg-primary' : ''}`} onClick={handlePlus} disabled={isDisabled}><Plus className="w-3 h-3" /></Button>
                 </div>
             </div>
@@ -439,11 +431,11 @@ export default function Sales() {
     return getProductStockRows(product).reduce((sum, row) => sum + getReturnableQty(product.id, row.variant, row.color, customerId), 0);
   };
 
-  const handleProductSelect = (scanValue: string, explicitQty: number = 1) => {
+  const handleProductSelect = (scanValue: string, explicitQty: number = 1): boolean => {
     let targetCode = scanValue;
     try { const p = JSON.parse(scanValue); if (p.sku) targetCode = p.sku; if(p.barcode) targetCode = p.barcode; } catch(e) {}
     const product = productLookupByCode.get(targetCode.toLowerCase());
-    if (!product) return;
+    if (!product) return false;
 
     let error = null;
     if (isReturnMode) {
@@ -463,7 +455,7 @@ export default function Sales() {
       if (product.stock <= 0) error = 'Out of Stock!';
       else if (product.stock < (inCart + explicitQty)) error = `Only ${product.stock} in stock.`;
     }
-    if (error) { setCartError(error); return; }
+    if (error) { setCartError(error); return false; }
 
     if (productHasCombinationStock(product)) {
       const rows = getProductStockRows(product).map(row => ({
@@ -473,13 +465,14 @@ export default function Sales() {
         qty: 0
       }));
       setVariantPicker({ open: true, product, rows });
-      return;
+      return false;
     }
 
     if (navigator.vibrate) navigator.vibrate(100);
-    addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
+    return addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
   };
-  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
+  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string): boolean => {
+    let didAdd = false;
     setActiveCartItems(prev => {
         const existing = prev.find(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR));
         if (existing) {
@@ -491,6 +484,7 @@ export default function Sales() {
               setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
               return prev;
             }
+            didAdd = true;
             return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
@@ -500,6 +494,7 @@ export default function Sales() {
           setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
           return prev;
         }
+        didAdd = true;
         return [...prev, {
           ...product,
           buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
@@ -511,6 +506,7 @@ export default function Sales() {
           selectedColor: selectedColor || NO_COLOR
         }];
     });
+    return didAdd;
   };
 
   const updateQuantity = (id: string, delta: number, variant?: string, color?: string) => {
@@ -1252,14 +1248,16 @@ export default function Sales() {
             <div className="space-y-3">
               <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
               {paginatedProducts.map(p => {
-                const cartItem = cart.find(item => item.id === p.id);
+                const cartQty = cart
+                  .filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(p.id, NO_VARIANT, NO_COLOR))
+                  .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
                 const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
                 return (
                   <ProductGridItem
                     key={p.id}
                     product={p}
                     isReturnMode={isReturnMode}
-                    cartQty={cartItem?.quantity || 0}
+                    cartQty={cartQty}
                     returnableQty={returnableQty}
                     onAdd={(qty) => handleProductSelect(`${p.id}`, qty)}
                   />
