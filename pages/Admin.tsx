@@ -92,6 +92,13 @@ export default function Admin() {
 
   const [showSupplierPartyModal, setShowSupplierPartyModal] = useState(false);
   const [supplierPartySearch, setSupplierPartySearch] = useState('');
+  const [showAddSupplierPartyModal, setShowAddSupplierPartyModal] = useState(false);
+  const [newSupplierPartyName, setNewSupplierPartyName] = useState('');
+  const [newSupplierPartyPhone, setNewSupplierPartyPhone] = useState('');
+  const [newSupplierPartyGst, setNewSupplierPartyGst] = useState('');
+  const [newSupplierPartyLocation, setNewSupplierPartyLocation] = useState('');
+  const [newSupplierPartyContactPerson, setNewSupplierPartyContactPerson] = useState('');
+  const [newSupplierPartyNotes, setNewSupplierPartyNotes] = useState('');
   const [showAddCategoryInline, setShowAddCategoryInline] = useState(false);
   const [newInlineCategory, setNewInlineCategory] = useState('');
 
@@ -804,6 +811,30 @@ export default function Admin() {
       const updated = addCategory(newCategoryName.trim());
       setCategories(updated);
       setNewCategoryName('');
+  };
+
+  const handleCreateSupplierParty = async () => {
+    const name = newSupplierPartyName.trim();
+    if (!name) return setError('Party name is required.');
+    const existing = getPurchaseParties().find((p) => p.name.trim().toLowerCase() === name.toLowerCase());
+    const party = existing || await createPurchaseParty({
+      name,
+      phone: newSupplierPartyPhone.trim() || undefined,
+      gst: newSupplierPartyGst.trim() || undefined,
+      location: newSupplierPartyLocation.trim() || undefined,
+      contactPerson: newSupplierPartyContactPerson.trim() || undefined,
+      notes: newSupplierPartyNotes.trim() || undefined,
+    });
+    refreshData();
+    setFormData((prev: any) => ({ ...prev, supplierName: party.name, supplierPartyId: party.id }));
+    setShowAddSupplierPartyModal(false);
+    setShowSupplierPartyModal(false);
+    setNewSupplierPartyName('');
+    setNewSupplierPartyPhone('');
+    setNewSupplierPartyGst('');
+    setNewSupplierPartyLocation('');
+    setNewSupplierPartyContactPerson('');
+    setNewSupplierPartyNotes('');
   };
 
   const handleDeleteCategory = (cat: string) => {
@@ -1736,9 +1767,9 @@ export default function Admin() {
                           const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
                           setFormData({ ...formData, supplierName: value, supplierPartyId: matched?.id || '' });
                         }} placeholder="Select or type supplier name" />
-                        <div className="rounded-md border bg-white mt-1 max-h-36 overflow-auto">
-                          {purchaseParties.filter((party) => party.name.toLowerCase().includes(String(formData.supplierName || '').toLowerCase())).slice(0,4).map((party) => <button type="button" key={party.id} className="w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={() => setFormData({ ...formData, supplierName: party.name, supplierPartyId: party.id })}>{party.name}</button>)}
-                          {!!purchaseParties.length && <button type="button" className="w-full text-left px-3 py-2 text-sm text-primary border-t" onClick={() => setShowSupplierPartyModal(true)}>Show more… <ChevronRight className="inline w-3 h-3" /></button>}
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button type="button" variant="outline" size="sm" onClick={() => setShowSupplierPartyModal(true)}>See All Parties</Button>
+                          <Button type="button" variant="outline" size="sm" onClick={() => setShowAddSupplierPartyModal(true)}>+ Add Party</Button>
                         </div>
                       </div>
                       <div className="space-y-2"><Label>Total Payable</Label><Input type="number" min="0" value={formData.supplierTotalPayable ?? ''} onChange={e => { setSupplierPayableManuallyEdited(true); setFormData({ ...formData, supplierTotalPayable: e.target.value }); }} placeholder="0" /><p className="text-[10px] text-muted-foreground">Auto calculated from quantity × purchase price. You can edit it.</p></div>
@@ -1775,9 +1806,33 @@ export default function Admin() {
           <Card className="w-full max-w-xl max-h-[80vh] overflow-hidden">
             <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Select Party</CardTitle><Button variant="ghost" size="sm" onClick={() => setShowSupplierPartyModal(false)}><X className="w-4 h-4" /></Button></CardHeader>
             <CardContent className="space-y-3">
-              <Input value={supplierPartySearch} onChange={e => setSupplierPartySearch(e.target.value)} placeholder="Search party" />
+              <Input value={supplierPartySearch} onChange={e => setSupplierPartySearch(e.target.value)} placeholder="Search party by name / phone / GST" />
               <div className="max-h-[50vh] overflow-y-auto border rounded-md">
-                {purchaseParties.filter(p => p.name.toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.id}</div></button>)}
+                {getPurchaseParties().filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.phone || 'No phone'} {p.gst ? `• GST ${p.gst}` : ''}</div></button>)}
+                {!getPurchaseParties().filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).length && (
+                  <div className="p-4 text-sm text-muted-foreground">No parties found. <button type="button" className="text-primary" onClick={() => { setShowSupplierPartyModal(false); setShowAddSupplierPartyModal(true); }}>Add Party</button></div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      {showAddSupplierPartyModal && (
+        <div className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Add Party</CardTitle><Button variant="ghost" size="sm" onClick={() => setShowAddSupplierPartyModal(false)}><X className="w-4 h-4" /></Button></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-2"><Label>Party Name *</Label><Input value={newSupplierPartyName} onChange={e => setNewSupplierPartyName(e.target.value)} /></div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-2"><Label>Phone</Label><Input value={newSupplierPartyPhone} onChange={e => setNewSupplierPartyPhone(e.target.value)} /></div>
+                <div className="space-y-2"><Label>GST</Label><Input value={newSupplierPartyGst} onChange={e => setNewSupplierPartyGst(e.target.value)} /></div>
+              </div>
+              <div className="space-y-2"><Label>Location</Label><Input value={newSupplierPartyLocation} onChange={e => setNewSupplierPartyLocation(e.target.value)} /></div>
+              <div className="space-y-2"><Label>Contact Person</Label><Input value={newSupplierPartyContactPerson} onChange={e => setNewSupplierPartyContactPerson(e.target.value)} /></div>
+              <div className="space-y-2"><Label>Notes</Label><Input value={newSupplierPartyNotes} onChange={e => setNewSupplierPartyNotes(e.target.value)} /></div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setShowAddSupplierPartyModal(false)}>Cancel</Button>
+                <Button onClick={handleCreateSupplierParty}>Save Party</Button>
               </div>
             </CardContent>
           </Card>
@@ -1941,6 +1996,7 @@ export default function Admin() {
             groupByCategory: opts.groupByCategory,
             showInStockPrices: opts.showInStockPrices,
             showOutOfStockPrices: opts.showOutOfStockPrices,
+            firstPageImage: loadData().profile?.customerCatalogFirstPage,
           });
           setIsCatalogOptionsOpen(false);
         }}

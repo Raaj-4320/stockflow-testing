@@ -8,7 +8,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
-import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
+import { Button } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
 
@@ -105,6 +105,7 @@ export default function App() {
 
     return () => unsubscribe();
   }, []);
+
 
   useEffect(() => {
       if (authStatus === 'authenticated') {
