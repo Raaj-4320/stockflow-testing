@@ -153,6 +153,8 @@ export interface CashSession {
   sessionExpenseTotal?: number;
   difference?: number;
   closingDenominationCounts?: Record<string, number>;
+  closingEditedAt?: string;
+  closingEditNote?: string;
   status: 'open' | 'closed';
 }
 

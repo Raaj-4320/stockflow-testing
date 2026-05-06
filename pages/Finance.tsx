@@ -546,6 +546,9 @@ export default function Finance() {
   const [unlockPinInput, setUnlockPinInput] = useState('');
   const [openingUnlocked, setOpeningUnlocked] = useState(false);
   const [activeHistoryDetailSessionId, setActiveHistoryDetailSessionId] = useState<string | null>(null);
+  const [editingClosingSessionId, setEditingClosingSessionId] = useState<string | null>(null);
+  const [editingClosingAmount, setEditingClosingAmount] = useState('');
+  const [editingClosingNote, setEditingClosingNote] = useState('');
 
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
@@ -625,6 +628,10 @@ export default function Finance() {
   const activeHistorySession = useMemo(
     () => filteredCashHistory.find(session => session.id === activeHistoryDetailSessionId) ?? null,
     [filteredCashHistory, activeHistoryDetailSessionId],
+  );
+  const editingClosingSession = useMemo(
+    () => cashSessions.find(session => session.id === editingClosingSessionId) ?? null,
+    [cashSessions, editingClosingSessionId],
   );
 
   useEffect(() => {
@@ -1714,6 +1721,35 @@ export default function Finance() {
     setIsOpeningUnlockModalOpen(false);
   };
 
+  const openEditClosingModal = (session: CashSession) => {
+    if (session.status !== 'closed') return;
+    setEditingClosingSessionId(session.id);
+    setEditingClosingAmount((session.closingBalance ?? 0).toFixed(2));
+    setEditingClosingNote(session.closingEditNote || '');
+  };
+
+  const saveEditedClosingAmount = async (expectedClosing: number) => {
+    if (!editingClosingSession || editingClosingSession.status !== 'closed') return;
+    const nextClosing = Number(editingClosingAmount);
+    if (!Number.isFinite(nextClosing) || nextClosing < 0) return setErrors('Please enter a valid closing cash value.');
+    const fresh = loadData();
+    const freshSessions = Array.isArray(fresh.cashSessions) ? fresh.cashSessions : [];
+    const updatedSessions = freshSessions.map(session => {
+      if (session.id !== editingClosingSession.id || session.status !== 'closed') return session;
+      return {
+        ...session,
+        closingBalance: nextClosing,
+        difference: nextClosing - expectedClosing,
+        closingEditedAt: new Date().toISOString(),
+        closingEditNote: editingClosingNote.trim() || undefined,
+      };
+    });
+    await persistState({ ...fresh, cashSessions: updatedSessions });
+    setEditingClosingSessionId(null);
+    setEditingClosingAmount('');
+    setEditingClosingNote('');
+  };
+
   const updateClosingCount = (denom: number, next: number) => {
     const safe = Math.max(0, Math.min(999999, Number.isFinite(next) ? Math.floor(next) : 0));
     setClosingCounts(prev => ({ ...prev, [denom]: safe }));
@@ -2400,6 +2436,35 @@ export default function Finance() {
                 </Card>
               </div>
             )}
+            {editingClosingSession && editingClosingSession.status === 'closed' && (() => {
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], editingClosingSession.startTime, editingClosingSession.endTime);
+              const expectedClosing = editingClosingSession.openingBalance + (editingClosingSession.systemCashTotal ?? computedTotals.systemCashTotal);
+              const previewClosing = Number(editingClosingAmount);
+              const previewVariance = Number.isFinite(previewClosing) ? previewClosing - expectedClosing : (editingClosingSession.difference ?? 0);
+              return (
+                <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                  <Card className="w-full max-w-lg">
+                    <CardHeader><CardTitle>Edit Closing Amount</CardTitle></CardHeader>
+                    <CardContent className="space-y-3">
+                      <p className="text-xs text-muted-foreground">This only corrects the counted closing amount. It does not change transactions or cash movements.</p>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div><span className="text-muted-foreground">Shift</span><div>{new Date(editingClosingSession.startTime).toLocaleString()}</div></div>
+                        <div><span className="text-muted-foreground">Opening</span><div>{formatINR(editingClosingSession.openingBalance)}</div></div>
+                        <div><span className="text-muted-foreground">Expected</span><div>{formatINR(expectedClosing)}</div></div>
+                        <div><span className="text-muted-foreground">Current closing</span><div>{formatINR(editingClosingSession.closingBalance ?? 0)}</div></div>
+                      </div>
+                      <div><Label>New Closing Amount</Label><Input type="number" min="0" value={editingClosingAmount} onChange={e => setEditingClosingAmount(e.target.value)} /></div>
+                      <div><Label>Note (optional)</Label><Input value={editingClosingNote} onChange={e => setEditingClosingNote(e.target.value)} placeholder="Reason for correction" /></div>
+                      <div className="text-sm">Variance Preview: <span className="font-semibold">{formatINR(previewVariance)}</span></div>
+                      <div className="flex gap-2 justify-end">
+                        <Button variant="outline" onClick={() => { setEditingClosingSessionId(null); setEditingClosingAmount(''); setEditingClosingNote(''); }}>Cancel</Button>
+                        <Button onClick={() => saveEditedClosingAmount(expectedClosing)}>Save</Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              );
+            })()}
 
             <Card className="border-slate-200 shadow-sm bg-white">
               <CardHeader className="border-b border-slate-200">
@@ -2461,6 +2526,7 @@ export default function Finance() {
                         </div>
                         <div className="flex items-center gap-2">
                           <Button type="button" variant="outline" size="sm" onClick={() => setActiveHistoryDetailSessionId(prev => (prev === session.id ? null : session.id))}>{isOpen ? 'Hide details' : 'View details'}</Button>
+                          {session.status === 'closed' && <Button type="button" variant="outline" size="sm" onClick={() => openEditClosingModal(session)}>Edit Closing Amount</Button>}
                         </div>
                       </div>
 
@@ -2471,6 +2537,9 @@ export default function Finance() {
                       </div>
                       <div className="px-4 pb-4">
                         <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600">Expenses deducted in this shift: <span className="font-semibold text-slate-900">{formatINR(sessionExpenseTotal)}</span></div>
+                        {session.closingEditedAt && (
+                          <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800">Closing edited {new Date(session.closingEditedAt).toLocaleString()}{session.closingEditNote ? ` • ${session.closingEditNote}` : ''}</div>
+                        )}
                       </div>
 
                     </div>
