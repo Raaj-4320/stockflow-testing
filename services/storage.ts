@@ -366,6 +366,10 @@ const getRequestedStoreCreditUsed = (transaction: Transaction) => {
   if (transaction.type !== 'sale') return 0;
   return Math.min(toFiniteNonNegative(transaction.storeCreditUsed), Math.abs(toFiniteNumber(transaction.total, 0)));
 };
+const getRequestedStoreCreditCreated = (transaction: Transaction) => {
+  if (transaction.type !== 'sale') return 0;
+  return toFiniteNonNegative(transaction.storeCreditCreated);
+};
 const deriveLegacySaleSettlement = (
   paymentMethod: Transaction['paymentMethod'],
   payableAmount: number
@@ -1430,6 +1434,7 @@ const commitProcessTransactionAtomically = async ({
       const currentCustomer = { ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id };
       const amount = Math.abs(transaction.total);
       const storeCreditUsed = getClampedStoreCreditUsed(transaction, currentCustomer);
+      const storeCreditCreated = getRequestedStoreCreditCreated(transaction);
       let newTotalSpend = currentCustomer.totalSpend;
       let newVisitCount = currentCustomer.visitCount;
       let newLastVisit = currentCustomer.lastVisit;
@@ -1444,7 +1449,7 @@ const commitProcessTransactionAtomically = async ({
         newVisitCount += 1;
         newLastVisit = new Date().toISOString();
         totalDue = Math.max(0, totalDue + settlement.creditDue);
-        storeCredit = Math.max(0, storeCredit - storeCreditUsed);
+        storeCredit = Math.max(0, storeCredit - storeCreditUsed) + storeCreditCreated;
       } else if (transaction.type === 'return') {
         const reconciliation = getReturnReconciliationAmounts(transaction, preloadedCustomerTransactionsForLedger, totalDue);
         newTotalSpend -= amount;
@@ -4077,13 +4082,14 @@ export const processTransaction = (transaction: Transaction): AppState => {
       let storeCreditDelta = 0;
       const amount = Math.abs(effectiveTransaction.total);
       const storeCreditUsed = getClampedStoreCreditUsed(effectiveTransaction, c);
+      const storeCreditCreated = getRequestedStoreCreditCreated(effectiveTransaction);
       if (effectiveTransaction.type === 'sale') {
           const settlement = getSaleSettlementBreakdown(effectiveTransaction);
           newTotalSpend += amount;
           newVisitCount += 1;
           newLastVisit = new Date().toISOString();
           totalDue = Math.max(0, totalDue + settlement.creditDue);
-          storeCredit = Math.max(0, storeCredit - storeCreditUsed);
+          storeCredit = Math.max(0, storeCredit - storeCreditUsed) + storeCreditCreated;
           if (settlement.cashPaid > 0) {
             financeLog.cash('INFLOW', { txId: effectiveTransaction.id, amount: settlement.cashPaid, reason: 'cash sale received', paymentMode: 'Cash', source: 'sale' });
           }
@@ -4095,6 +4101,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
             discount: logMoney(effectiveTransaction.discount),
             tax: logMoney(effectiveTransaction.tax),
             storeCreditUsed: logMoney(storeCreditUsed),
+            storeCreditCreated: logMoney(storeCreditCreated),
             cashPaid: logMoney(settlement.cashPaid),
             onlinePaid: logMoney(settlement.onlinePaid),
             creditDue: logMoney(settlement.creditDue),

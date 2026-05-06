@@ -422,10 +422,10 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     summaryY += 13;
     doc.setFont("helvetica", "normal");
     const isCashSale = transaction.type === 'sale' && transaction.paymentMethod === 'Cash';
-    const hasCashDetails = isCashSale && typeof paymentDetails?.cashReceived === 'number';
-    const receivedAmount = hasCashDetails ? paymentDetails!.cashReceived! : roundMoneyWhole(transaction.total);
+    const hasCashDetails = isCashSale && (typeof paymentDetails?.cashReceived === 'number' || typeof transaction.cashReceived === 'number');
+    const receivedAmount = hasCashDetails ? (paymentDetails?.cashReceived ?? transaction.cashReceived ?? roundMoneyWhole(transaction.total)) : roundMoneyWhole(transaction.total);
     const changeAmount = hasCashDetails
-        ? Math.max(0, paymentDetails?.changeReturned ?? (paymentDetails!.cashReceived! - transaction.total))
+        ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? (receivedAmount - transaction.total))
         : 0;
 
     doc.text("Received", totalsX - 45, summaryY);
@@ -434,6 +434,19 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     summaryY += 6;
     doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsX - 45, summaryY);
     doc.text(`Rs. ${formatMoneyPrecise(changeAmount)}`, totalsX, summaryY, { align: "right" });
+
+    const scUsed = Math.max(0, Number((transaction as any).storeCreditUsed || 0));
+    const scAdded = Math.max(0, Number((transaction as any).storeCreditCreated || 0));
+    if (scUsed > 0) {
+      summaryY += 6;
+      doc.text("Store Credit Used", totalsX - 45, summaryY);
+      doc.text(`Rs. ${formatMoneyPrecise(scUsed)}`, totalsX, summaryY, { align: "right" });
+    }
+    if (scAdded > 0) {
+      summaryY += 6;
+      doc.text("Store Credit Added", totalsX - 45, summaryY);
+      doc.text(`Rs. ${formatMoneyPrecise(scAdded)}`, totalsX, summaryY, { align: "right" });
+    }
 
     const youSaved = transaction.discount || 0;
     if (youSaved > 0) {
@@ -682,11 +695,11 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
       </div>
       <div class="row">
         <span>Received</span>
-        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? paymentDetails.cashReceived : transaction.total)}</span>
+        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? (paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) : transaction.total)}</span>
       </div>
       <div class="row">
-        <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? 'Change Returned' : 'Balance'}</span>
-        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? Math.max(0, paymentDetails.changeReturned ?? (paymentDetails.cashReceived - transaction.total)) : 0)}</span>
+        <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? 'Change Returned' : 'Balance'}</span>
+        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? ((paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) - transaction.total)) : 0)}</span>
       </div>
       <div class="row">
         <span>Prev Bal</span>

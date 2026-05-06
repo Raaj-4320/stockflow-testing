@@ -73,6 +73,9 @@ export interface Transaction {
   items: CartItem[];
   total: number;
   storeCreditUsed?: number;
+  storeCreditCreated?: number;
+  cashReceived?: number;
+  changeReturned?: number;
   returnHandlingMode?: 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
   saleSettlement?: {
     cashPaid: number;
