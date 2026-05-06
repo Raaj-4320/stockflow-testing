@@ -81,7 +81,7 @@ export default function Reports() {
     const contentWidth = pageWidth - (margin * 2);
     const cardWidth = (contentWidth - ((cols - 1) * colGap)) / cols;
     // Internal report needs more space for margins/buy price, Customer catalog is compact
-    const cardHeight = reportType === 'internal' ? 70 : 60; 
+    const cardHeight = reportType === 'internal' ? 82 : 60; 
 
     let x = margin;
     let y = 30; // Start Y after header
@@ -142,11 +142,11 @@ export default function Reports() {
         doc.setFontSize(10);
         doc.setTextColor(20, 20, 20);
         // Truncate name if too long
-        const titleLines = doc.splitTextToSize(product.name, cardWidth - 6);
-        doc.text(titleLines[0], x + 3, textStartY);
+        const titleLines = (doc.splitTextToSize(product.name, cardWidth - 6) as string[]).slice(0, 2);
+        titleLines.forEach((line, idx) => doc.text(line, x + 3, textStartY + (idx * 4)));
         
         // SKU/Barcode (Gray, Smaller) - Positioned immediately below title
-        const skuY = textStartY + 4;
+        const skuY = textStartY + (titleLines.length * 4) + 1;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(8);
         doc.setTextColor(100, 100, 100);
@@ -187,22 +187,28 @@ export default function Reports() {
             doc.text(badgeText, badgeX + 3, priceY);
 
         } else {
-            // -- Internal Mode: Explicit Vertical Spacing to avoid overlap --
-            
-            // Stock: Below SKU
-            const stockY = skuY + 5; 
+            // -- Internal Mode: Structured card layout --
+            const stockY = skuY + 4;
             doc.setFont("helvetica", "normal");
             doc.setFontSize(8);
             doc.setTextColor(80, 80, 80);
             doc.text(`Stock: ${product.stock}`, x + 3, stockY);
-            const vc = `${(product.variants || []).join('/') || NO_VARIANT} | ${(product.colors || []).join('/') || NO_COLOR}`;
-            doc.setFontSize(6);
-            doc.text(vc, x + 3, stockY + 4);
-            
-            // Buy Price: Below Stock
-            const buyY = stockY + 5;
-            doc.setFontSize(9);
+            const categoryY = stockY + 4;
+            doc.text(`Category: ${product.category || 'Uncategorized'}`, x + 3, categoryY);
+
+            const variants = (product.variants || []).filter(v => v && v !== NO_VARIANT);
+            const colors = (product.colors || []).filter(c => c && c !== NO_COLOR);
+            const vcLine = [variants.length ? `V: ${variants.join('/')}` : '', colors.length ? `C: ${colors.join('/')}` : ''].filter(Boolean).join('  ');
+            let buyY = categoryY + 4;
+            if (vcLine) {
+              doc.setTextColor(100, 100, 100);
+              doc.setFontSize(7);
+              doc.text(vcLine, x + 3, buyY);
+              buyY += 4;
+            }
+
             doc.setTextColor(50, 50, 50);
+            doc.setFontSize(9);
             doc.text(`Buy: Rs.${product.buyPrice}`, x + 3, buyY);
             
             // Footer Base Y (Bottom of card)
@@ -331,7 +337,8 @@ export default function Reports() {
           const filtered = products
             .filter(p => opts.selectedCategories.includes((p.category || 'Uncategorized').trim() || 'Uncategorized'))
             .filter(p => opts.includeOutOfStock || Number(p.stock || 0) > 0);
-          await generateProductCatalogPDF(filtered, { fileName: 'stockflow-customer-report.pdf', groupByCategory: opts.groupByCategory, showInStockPrices: opts.showInStockPrices, showOutOfStockPrices: opts.showOutOfStockPrices });
+          const profile = loadData().profile || {};
+          await generateProductCatalogPDF(filtered, { fileName: 'stockflow-customer-report.pdf', groupByCategory: opts.groupByCategory, showInStockPrices: opts.showInStockPrices, showOutOfStockPrices: opts.showOutOfStockPrices, firstPageImage: profile.customerCatalogFirstPage });
           setIsCatalogOptionsOpen(false);
         }}
       />

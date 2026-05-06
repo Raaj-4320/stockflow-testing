@@ -47,7 +47,7 @@ const getPdfImageSource = async (image: string | undefined): Promise<string | nu
 
 export const generateProductCatalogPDF = async (
     products: Product[],
-    options?: { fileName?: string; generatedLabel?: string; groupByCategory?: boolean; showInStockPrices?: boolean; showOutOfStockPrices?: boolean },
+    options?: { fileName?: string; generatedLabel?: string; groupByCategory?: boolean; showInStockPrices?: boolean; showOutOfStockPrices?: boolean; firstPageImage?: string },
 ) => {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
@@ -68,6 +68,38 @@ export const generateProductCatalogPDF = async (
     const imageBlockHeight = Math.max(24, Math.min(cardHeight * 0.48, 34));
     const imageCache = new Map<string, string | null>();
     const nowLabel = options?.generatedLabel ?? new Date().toLocaleString();
+    let shouldAddCatalogPageAfterCover = false;
+
+    if (options?.firstPageImage) {
+        const cover = options.firstPageImage;
+        const marginCover = 8;
+        const maxW = pageWidth - marginCover * 2;
+        const maxH = pageHeight - marginCover * 2;
+        let drawW = maxW;
+        let drawH = maxH;
+        try {
+            const imgSize = await new Promise<{ w: number; h: number }>((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve({ w: img.width || 1, h: img.height || 1 });
+                img.onerror = reject;
+                img.src = cover;
+            });
+            const ratio = imgSize.w / imgSize.h;
+            if (maxW / maxH > ratio) {
+                drawH = maxH;
+                drawW = drawH * ratio;
+            } else {
+                drawW = maxW;
+                drawH = drawW / ratio;
+            }
+        } catch {}
+        const drawX = (pageWidth - drawW) / 2;
+        const drawY = (pageHeight - drawH) / 2;
+        const formatMatch = cover.match(/^data:image\/(png|jpeg|jpg)/i);
+        const format = formatMatch?.[1]?.toLowerCase() === 'png' ? 'PNG' : 'JPEG';
+        doc.addImage(cover, format, drawX, drawY, drawW, drawH, undefined, 'FAST');
+        shouldAddCatalogPageAfterCover = true;
+    }
 
     const renderPageHeader = (categoryName: string, continuation: boolean) => {
         doc.setFont('helvetica', 'bold');
@@ -109,7 +141,10 @@ export const generateProductCatalogPDF = async (
             return (Number.isFinite(a.sellPrice) ? a.sellPrice : 0) - (Number.isFinite(b.sellPrice) ? b.sellPrice : 0);
         });
 
-        if (categoryIndex > 0) doc.addPage();
+        if (categoryIndex > 0 || shouldAddCatalogPageAfterCover) {
+            doc.addPage();
+            shouldAddCatalogPageAfterCover = false;
+        }
 
         for (let offset = 0; offset < categoryProducts.length; offset += cardsPerPage) {
             if (offset > 0) doc.addPage();
