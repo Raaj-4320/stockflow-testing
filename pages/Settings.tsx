@@ -15,14 +15,17 @@ export default function Settings() {
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [adminPinTouched, setAdminPinTouched] = useState(false);
 
   useEffect(() => {
     const refreshData = () => {
       const data = loadData();
-      setProfile(data.profile);
+      setProfile({
+        ...data.profile,
+        customerCatalogFirstPage: typeof data.profile?.customerCatalogFirstPage === 'string' ? data.profile.customerCatalogFirstPage : '',
+        customerCatalogFirstPageName: typeof data.profile?.customerCatalogFirstPageName === 'string' ? data.profile.customerCatalogFirstPageName : '',
+        customerCatalogFirstPageMimeType: typeof data.profile?.customerCatalogFirstPageMimeType === 'string' ? data.profile.customerCatalogFirstPageMimeType : '',
+      });
       setUserEmail(getCurrentUser());
-      setAdminPinTouched(false);
     };
     refreshData();
     window.addEventListener('storage', refreshData);
@@ -35,17 +38,14 @@ export default function Settings() {
   }, []);
 
   const handleSave = () => {
-    const latestProfile: StoreProfile = loadData().profile || ({} as StoreProfile);
-    const hasTypedPin = !!profile.adminPin?.trim();
-    const existingStoredPin = latestProfile.adminPin?.trim() || '';
-    const shouldPreserveStoredPin = !adminPinTouched && !hasTypedPin && !!existingStoredPin;
-    const nextProfile = shouldPreserveStoredPin
-      ? { ...profile, adminPin: latestProfile.adminPin }
-      : profile;
-
-    updateStoreProfile(nextProfile);
-    setProfile(nextProfile);
-    setAdminPinTouched(false);
+    const safeProfile: StoreProfile = {
+      ...profile,
+      customerCatalogFirstPage: typeof profile.customerCatalogFirstPage === 'string' ? profile.customerCatalogFirstPage : '',
+      customerCatalogFirstPageName: typeof profile.customerCatalogFirstPageName === 'string' ? profile.customerCatalogFirstPageName : '',
+      customerCatalogFirstPageMimeType: typeof profile.customerCatalogFirstPageMimeType === 'string' ? profile.customerCatalogFirstPageMimeType : '',
+    };
+    updateStoreProfile(safeProfile);
+    setProfile(safeProfile);
     setSuccess(true);
     setTimeout(() => setSuccess(false), 3000);
   };
@@ -87,6 +87,22 @@ export default function Settings() {
     if (!file.type.startsWith('image/')) return;
     handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({ ...prev, logoImage: dataUrl })), 600);
   };
+  const handleCatalogFirstPageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type === 'application/pdf') {
+      setSuccess(false);
+      alert('Please upload an image version of the first page.');
+      return;
+    }
+    if (!file.type.startsWith('image/')) return;
+    handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({
+      ...prev,
+      customerCatalogFirstPage: dataUrl,
+      customerCatalogFirstPageName: file.name,
+      customerCatalogFirstPageMimeType: file.type || 'image/png',
+    })), 1600);
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-20">
@@ -112,6 +128,20 @@ export default function Settings() {
               <div className="space-y-2"><Label>GSTIN</Label><Input value={profile.gstin || ''} onChange={e => setProfile({...profile, gstin: e.target.value})} /></div>
              <div className="space-y-2"><Label>Business Logo</Label><div className="flex items-center gap-3"><div className="h-16 w-24 border rounded bg-muted/20 flex items-center justify-center overflow-hidden">{profile.logoImage ? <img src={profile.logoImage} alt="Logo" className="max-w-full max-h-full object-contain" /> : <span className="text-[10px] text-muted-foreground">No Logo</span>}</div><div className="flex flex-col gap-2"><Input type="file" accept="image/*" onChange={handleLogoUpload} className="text-xs h-auto py-1" />{profile.logoImage && <Button variant="ghost" size="sm" onClick={() => setProfile({...profile, logoImage: ''})} className="text-destructive h-7 px-2">Remove</Button>}</div></div></div>
            </CardContent>
+        </Card>
+        <Card className="md:col-span-2">
+          <CardHeader><CardTitle className="flex items-center gap-2"><FileText className="w-5 h-5 text-primary" /> Customer Catalog Default First Page</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">Upload an image first page for Customer Catalog PDF. Internal Audit/Invoices are unaffected.</p>
+            <Input type="file" accept="image/*" onChange={handleCatalogFirstPageUpload} className="text-xs h-auto py-1" />
+            {profile.customerCatalogFirstPageName && <p className="text-xs text-muted-foreground">Selected: {profile.customerCatalogFirstPageName}</p>}
+            {profile.customerCatalogFirstPage && (
+              <div className="flex items-center gap-2">
+                <div className="h-16 w-24 border rounded bg-muted/20 overflow-hidden">{<img src={profile.customerCatalogFirstPage} alt="Catalog first page" className="h-full w-full object-contain" />}</div>
+                <Button variant="outline" size="sm" onClick={() => setProfile(prev => ({ ...prev, customerCatalogFirstPage: '', customerCatalogFirstPageName: '', customerCatalogFirstPageMimeType: '' }))}>Remove</Button>
+              </div>
+            )}
+          </CardContent>
         </Card>
 
         {/* Tax Configuration Section */}
@@ -190,31 +220,6 @@ export default function Settings() {
                   ) : (
                       <p>Standard format generates a professional A4 PDF document for downloading or sharing.</p>
                   )}
-              </div>
-           </CardContent>
-        </Card>
-
-
-        <Card>
-           <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Security</CardTitle></CardHeader>
-           <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Manager Unlock PIN (for opening balance edit)</Label>
-                <Input
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={profile.adminPin || ''}
-                  onChange={e => {
-                    setAdminPinTouched(true);
-                    setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) });
-                  }}
-                  placeholder="Enter PIN (e.g. 1234)"
-                />
-                <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
-                {!profile.adminPin?.trim() && (
-                  <p className="text-xs text-amber-700">No manager PIN configured. Opening balance unlock is disabled until you set one.</p>
-                )}
               </div>
            </CardContent>
         </Card>

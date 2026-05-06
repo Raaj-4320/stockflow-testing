@@ -47,7 +47,7 @@ const getPdfImageSource = async (image: string | undefined): Promise<string | nu
 
 export const generateProductCatalogPDF = async (
     products: Product[],
-    options?: { fileName?: string; generatedLabel?: string; groupByCategory?: boolean; showInStockPrices?: boolean; showOutOfStockPrices?: boolean },
+    options?: { fileName?: string; generatedLabel?: string; groupByCategory?: boolean; showInStockPrices?: boolean; showOutOfStockPrices?: boolean; firstPageImage?: string },
 ) => {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
@@ -68,6 +68,42 @@ export const generateProductCatalogPDF = async (
     const imageBlockHeight = Math.max(24, Math.min(cardHeight * 0.48, 34));
     const imageCache = new Map<string, string | null>();
     const nowLabel = options?.generatedLabel ?? new Date().toLocaleString();
+    let shouldAddCatalogPageAfterCover = false;
+
+    if (typeof options?.firstPageImage === 'string' && options.firstPageImage.trim()) {
+        const cover = options.firstPageImage.trim();
+        const marginCover = 8;
+        const maxW = pageWidth - marginCover * 2;
+        const maxH = pageHeight - marginCover * 2;
+        let drawW = maxW;
+        let drawH = maxH;
+        try {
+            const imgSize = await new Promise<{ w: number; h: number }>((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve({ w: img.width || 1, h: img.height || 1 });
+                img.onerror = reject;
+                img.src = cover;
+            });
+            const ratio = imgSize.w / imgSize.h;
+            if (maxW / maxH > ratio) {
+                drawH = maxH;
+                drawW = drawH * ratio;
+            } else {
+                drawW = maxW;
+                drawH = drawW / ratio;
+            }
+        } catch {}
+        const drawX = (pageWidth - drawW) / 2;
+        const drawY = (pageHeight - drawH) / 2;
+        const formatMatch = cover.match(/^data:image\/(png|jpeg|jpg)/i);
+        const format = formatMatch?.[1]?.toLowerCase() === 'png' ? 'PNG' : 'JPEG';
+        try {
+            doc.addImage(cover, format, drawX, drawY, drawW, drawH, undefined, 'FAST');
+            shouldAddCatalogPageAfterCover = true;
+        } catch (error) {
+            console.warn('[catalog-pdf] failed to add first page image, continuing without cover', error);
+        }
+    }
 
     const renderPageHeader = (categoryName: string, continuation: boolean) => {
         doc.setFont('helvetica', 'bold');
@@ -109,7 +145,10 @@ export const generateProductCatalogPDF = async (
             return (Number.isFinite(a.sellPrice) ? a.sellPrice : 0) - (Number.isFinite(b.sellPrice) ? b.sellPrice : 0);
         });
 
-        if (categoryIndex > 0) doc.addPage();
+        if (categoryIndex > 0 || shouldAddCatalogPageAfterCover) {
+            doc.addPage();
+            shouldAddCatalogPageAfterCover = false;
+        }
 
         for (let offset = 0; offset < categoryProducts.length; offset += cardsPerPage) {
             if (offset > 0) doc.addPage();
@@ -387,10 +426,10 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     summaryY += 13;
     doc.setFont("helvetica", "normal");
     const isCashSale = transaction.type === 'sale' && transaction.paymentMethod === 'Cash';
-    const hasCashDetails = isCashSale && typeof paymentDetails?.cashReceived === 'number';
-    const receivedAmount = hasCashDetails ? paymentDetails!.cashReceived! : roundMoneyWhole(transaction.total);
+    const hasCashDetails = isCashSale && (typeof paymentDetails?.cashReceived === 'number' || typeof transaction.cashReceived === 'number');
+    const receivedAmount = hasCashDetails ? (paymentDetails?.cashReceived ?? transaction.cashReceived ?? roundMoneyWhole(transaction.total)) : roundMoneyWhole(transaction.total);
     const changeAmount = hasCashDetails
-        ? Math.max(0, paymentDetails?.changeReturned ?? (paymentDetails!.cashReceived! - transaction.total))
+        ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? (receivedAmount - transaction.total))
         : 0;
 
     doc.text("Received", totalsX - 45, summaryY);
@@ -399,6 +438,19 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     summaryY += 6;
     doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsX - 45, summaryY);
     doc.text(`Rs. ${formatMoneyPrecise(changeAmount)}`, totalsX, summaryY, { align: "right" });
+
+    const scUsed = Math.max(0, Number((transaction as any).storeCreditUsed || 0));
+    const scAdded = Math.max(0, Number((transaction as any).storeCreditCreated || 0));
+    if (scUsed > 0) {
+      summaryY += 6;
+      doc.text("Store Credit Used", totalsX - 45, summaryY);
+      doc.text(`Rs. ${formatMoneyPrecise(scUsed)}`, totalsX, summaryY, { align: "right" });
+    }
+    if (scAdded > 0) {
+      summaryY += 6;
+      doc.text("Store Credit Added", totalsX - 45, summaryY);
+      doc.text(`Rs. ${formatMoneyPrecise(scAdded)}`, totalsX, summaryY, { align: "right" });
+    }
 
     const youSaved = transaction.discount || 0;
     if (youSaved > 0) {
@@ -647,11 +699,11 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
       </div>
       <div class="row">
         <span>Received</span>
-        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? paymentDetails.cashReceived : transaction.total)}</span>
+        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? (paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) : transaction.total)}</span>
       </div>
       <div class="row">
-        <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? 'Change Returned' : 'Balance'}</span>
-        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? Math.max(0, paymentDetails.changeReturned ?? (paymentDetails.cashReceived - transaction.total)) : 0)}</span>
+        <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? 'Change Returned' : 'Balance'}</span>
+        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? ((paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) - transaction.total)) : 0)}</span>
       </div>
       <div class="row">
         <span>Prev Bal</span>
