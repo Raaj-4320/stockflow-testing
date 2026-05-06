@@ -76,6 +76,22 @@ export default function Settings() {
     if (!file.type.startsWith('image/')) return;
     handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({ ...prev, logoImage: dataUrl })), 600);
   };
+  const handleCatalogFirstPageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type === 'application/pdf') {
+      setSuccess(false);
+      alert('Please upload an image version of the first page.');
+      return;
+    }
+    if (!file.type.startsWith('image/')) return;
+    handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({
+      ...prev,
+      customerCatalogFirstPage: dataUrl,
+      customerCatalogFirstPageName: file.name,
+      customerCatalogFirstPageMimeType: file.type || 'image/png',
+    })), 1600);
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-20">
@@ -101,6 +117,20 @@ export default function Settings() {
               <div className="space-y-2"><Label>GSTIN</Label><Input value={profile.gstin || ''} onChange={e => setProfile({...profile, gstin: e.target.value})} /></div>
              <div className="space-y-2"><Label>Business Logo</Label><div className="flex items-center gap-3"><div className="h-16 w-24 border rounded bg-muted/20 flex items-center justify-center overflow-hidden">{profile.logoImage ? <img src={profile.logoImage} alt="Logo" className="max-w-full max-h-full object-contain" /> : <span className="text-[10px] text-muted-foreground">No Logo</span>}</div><div className="flex flex-col gap-2"><Input type="file" accept="image/*" onChange={handleLogoUpload} className="text-xs h-auto py-1" />{profile.logoImage && <Button variant="ghost" size="sm" onClick={() => setProfile({...profile, logoImage: ''})} className="text-destructive h-7 px-2">Remove</Button>}</div></div></div>
            </CardContent>
+        </Card>
+        <Card className="md:col-span-2">
+          <CardHeader><CardTitle className="flex items-center gap-2"><FileText className="w-5 h-5 text-primary" /> Customer Catalog Default First Page</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">Upload an image first page for Customer Catalog PDF. Internal Audit/Invoices are unaffected.</p>
+            <Input type="file" accept="image/*,application/pdf" onChange={handleCatalogFirstPageUpload} className="text-xs h-auto py-1" />
+            {profile.customerCatalogFirstPageName && <p className="text-xs text-muted-foreground">Selected: {profile.customerCatalogFirstPageName}</p>}
+            {profile.customerCatalogFirstPage && (
+              <div className="flex items-center gap-2">
+                <div className="h-16 w-24 border rounded bg-muted/20 overflow-hidden">{<img src={profile.customerCatalogFirstPage} alt="Catalog first page" className="h-full w-full object-contain" />}</div>
+                <Button variant="outline" size="sm" onClick={() => setProfile(prev => ({ ...prev, customerCatalogFirstPage: '', customerCatalogFirstPageName: '', customerCatalogFirstPageMimeType: '' }))}>Remove</Button>
+              </div>
+            )}
+          </CardContent>
         </Card>
 
         {/* Tax Configuration Section */}
