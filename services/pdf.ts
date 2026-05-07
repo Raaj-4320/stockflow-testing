@@ -1,7 +1,7 @@
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer, Product } from '../types';
+import { Transaction, Customer, Product, StoreProfile } from '../types';
 import { loadData } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from './numberFormat';
@@ -43,6 +43,165 @@ const getPdfImageSource = async (image: string | undefined): Promise<string | nu
     } catch {
         return null;
     }
+};
+
+type AccountStatementRow = {
+  date: string;
+  description: string;
+  reference: string;
+  debit: number;
+  credit: number;
+  balance: number;
+};
+
+export const generateAccountStatementPDF = async ({
+  profile,
+  entityLabel,
+  entityName,
+  entityMeta,
+  rows,
+  fileName,
+}: {
+  profile: StoreProfile;
+  entityLabel: string;
+  entityName: string;
+  entityMeta: string[];
+  rows: AccountStatementRow[];
+  fileName: string;
+}) => {
+  const doc = new jsPDF({ format: 'a4', unit: 'mm' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 12;
+  const today = new Date();
+  const sortedAsc = [...rows].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const displayRows = [...rows];
+  const openingBalance = sortedAsc.length ? sortedAsc[0].balance - sortedAsc[0].debit + sortedAsc[0].credit : 0;
+  const totalDebit = rows.reduce((sum, row) => sum + (Number(row.debit) || 0), 0);
+  const totalCredit = rows.reduce((sum, row) => sum + (Number(row.credit) || 0), 0);
+  const closingBalance = sortedAsc.length ? sortedAsc[sortedAsc.length - 1].balance : 0;
+  const periodStart = sortedAsc.length ? new Date(sortedAsc[0].date) : today;
+  const periodEnd = sortedAsc.length ? new Date(sortedAsc[sortedAsc.length - 1].date) : today;
+  const formatDate = (d: Date) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const formatINR = (n: number) => `INR ${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const logoData = await getPdfImageSource(profile.logoImage);
+  const logoX = margin;
+  const logoY = 10;
+  const logoBoxW = 24;
+  const logoBoxH = 16;
+  if (logoData) {
+    try {
+      const props = (doc as any).getImageProperties(logoData);
+      const ratio = (props?.width || 1) / (props?.height || 1);
+      let drawW = logoBoxW;
+      let drawH = drawW / ratio;
+      if (drawH > logoBoxH) { drawH = logoBoxH; drawW = drawH * ratio; }
+      doc.addImage(logoData, props?.fileType || 'PNG', logoX, logoY, drawW, drawH, undefined, 'FAST');
+    } catch {}
+  }
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.text(profile.storeName || 'StockFlow', logoData ? 40 : margin, 15);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  const headerLines = [
+    profile.ownerName,
+    profile.addressLine1,
+    profile.addressLine2,
+    profile.phone ? `Phone: ${profile.phone}` : '',
+    profile.email ? `Email: ${profile.email}` : '',
+    profile.gstin ? `GSTIN: ${profile.gstin}` : '',
+  ].filter(Boolean) as string[];
+  if (headerLines.length) doc.text(headerLines, logoData ? 40 : margin, 20);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(17);
+  doc.setTextColor(30, 64, 175);
+  doc.text('ACCOUNT STATEMENT', pageWidth - margin, 14, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(55, 65, 81);
+  doc.text(`Statement Date: ${formatDate(today)}`, pageWidth - margin, 21, { align: 'right' });
+  doc.text(`Statement Period: ${formatDate(periodStart)} to ${formatDate(periodEnd)}`, pageWidth - margin, 26, { align: 'right' });
+
+  doc.setDrawColor(214, 220, 229); doc.line(margin, 34, pageWidth - margin, 34);
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(margin, 38, pageWidth - (margin * 2), 22, 1.8, 1.8, 'F');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(37, 99, 235); doc.text(entityLabel, margin + 3, 44);
+  doc.setFont('helvetica', 'bold'); doc.setTextColor(15, 23, 42); doc.text(entityName, margin + 3, 49.5);
+  const cleanMeta = entityMeta.filter(Boolean);
+  if (cleanMeta.length) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(71, 85, 105);
+    doc.text(cleanMeta, margin + 3, 54);
+  }
+
+  const summaryY = 64;
+  const gap = 2.5;
+  const boxW = (pageWidth - (margin * 2) - (gap * 3)) / 4;
+  const summary = [
+    ['Opening Balance', formatINR(openingBalance)],
+    ['Total Debit', formatINR(totalDebit)],
+    ['Total Credit', formatINR(totalCredit)],
+    ['Closing Balance', formatINR(closingBalance)],
+  ];
+  summary.forEach(([label, value], idx) => {
+    const x = margin + idx * (boxW + gap);
+    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(x, summaryY, boxW, 17, 1.5, 1.5, 'FD');
+    doc.setFontSize(8.5); doc.setTextColor(100); doc.text(label, x + 2.2, summaryY + 5.4);
+    doc.setFontSize(10.5);
+    const color = idx === 1 ? [185, 28, 28] : idx === 2 ? [21, 128, 61] : idx === 3 ? [29, 78, 216] : [30, 41, 59];
+    doc.setTextColor(color[0], color[1], color[2]);
+    doc.text(value, x + 2.2, summaryY + 12);
+  });
+
+  autoTable(doc, {
+    startY: summaryY + 22,
+    head: [['#', 'Date', 'Description', 'Reference', 'Debit', 'Credit', 'Balance']],
+    body: displayRows.length ? displayRows.map((row, idx) => [
+      String(idx + 1),
+      formatDate(new Date(row.date)),
+      row.description,
+      row.reference,
+      row.debit ? formatINR(row.debit) : '-',
+      row.credit ? formatINR(row.credit) : '-',
+      formatINR(row.balance),
+    ]) : [['', '', 'No ledger entries available for selected period.', '', '-', '-', formatINR(closingBalance)]],
+    theme: 'grid',
+    margin: { left: margin, right: margin, bottom: 30 },
+    headStyles: { fillColor: [236, 242, 250], textColor: [30, 41, 59], fontStyle: 'bold', halign: 'center' },
+    styles: { fontSize: 8.6, cellPadding: { top: 2.2, right: 2, bottom: 2.2, left: 2 }, overflow: 'linebreak', textColor: [51, 65, 85], lineColor: [226, 232, 240], lineWidth: 0.1 },
+    columnStyles: { 0: { cellWidth: 9, halign: 'center' }, 1: { cellWidth: 22 }, 2: { cellWidth: 63 }, 3: { cellWidth: 24 }, 4: { halign: 'right', cellWidth: 20 }, 5: { halign: 'right', cellWidth: 20 }, 6: { halign: 'right', cellWidth: 20 } },
+    didParseCell: (data) => {
+      if (data.section === 'body' && data.column.index === 4 && data.cell.raw !== '-') data.cell.styles.textColor = [185, 28, 28];
+      if (data.section === 'body' && data.column.index === 5 && data.cell.raw !== '-') data.cell.styles.textColor = [21, 128, 61];
+    },
+    didDrawCell: (data) => {
+      if (data.section === 'body' && data.column.index === 2 && typeof data.cell.raw === 'string' && data.cell.raw.length > 90) {
+        data.cell.styles.fontSize = 8;
+      }
+    },
+    didDrawPage: () => {
+      doc.setFontSize(8);
+      doc.setTextColor(120);
+      doc.text('This is a system generated statement and does not require a signature.', margin, pageHeight - 8);
+      const pages = doc.getNumberOfPages();
+      const pageNo = doc.getCurrentPageInfo().pageNumber;
+      doc.text(`Page ${pageNo} of ${pages}`, pageWidth - margin, pageHeight - 8, { align: 'right' });
+    },
+  });
+  const finalY = (doc as any).lastAutoTable?.finalY || (summaryY + 70);
+  const summaryFooterY = Math.min(finalY + 6, pageHeight - 24);
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(margin, summaryFooterY, pageWidth - (margin * 2), 12, 1.5, 1.5, 'F');
+  doc.setFontSize(9);
+  doc.setTextColor(51, 65, 85);
+  doc.text('ACCOUNT SUMMARY', margin + 2, summaryFooterY + 4.5);
+  doc.text(`Opening: ${formatINR(openingBalance)}   Debit: ${formatINR(totalDebit)}   Credit: ${formatINR(totalCredit)}   Closing: ${formatINR(closingBalance)}`, margin + 2, summaryFooterY + 9);
+  doc.save(fileName);
 };
 
 export const generateProductCatalogPDF = async (
