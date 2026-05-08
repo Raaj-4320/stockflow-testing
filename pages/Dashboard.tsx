@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
-import { Customer, PurchaseOrder, PurchaseParty, Transaction } from '../types';
-import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getPurchaseOrders, getPurchaseParties, getSaleSettlementBreakdown, loadData, processTransaction, recordPurchaseOrderPayment } from '../services/storage';
+import { Customer, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction } from '../types';
+import { createSupplierPayment, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getPurchaseOrders, getPurchaseParties, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { generateAccountStatementPDF } from '../services/pdf';
@@ -9,6 +9,11 @@ import { generateAccountStatementPDF } from '../services/pdf';
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[] };
 type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund' };
+const formatGroupedSupplierPaymentDescription = (method: string, allocationCount: number) => {
+  const methodLabel = method === 'online' ? 'Online' : 'Cash';
+  if (allocationCount > 1) return `${methodLabel} supplier payment allocated across ${allocationCount} POs`;
+  return `${methodLabel} supplier payment`;
+};
 
 function ActionModal({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: React.ReactNode }) {
   if (!open) return null;
@@ -48,6 +53,7 @@ export default function Dashboard() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [parties, setParties] = useState<PurchaseParty[]>([]);
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
+  const [supplierPayments, setSupplierPayments] = useState<SupplierPaymentLedgerEntry[]>([]);
 
   const [receivingCustomer, setReceivingCustomer] = useState<CustomerReceivableRow | null>(null);
   const [receiveAmount, setReceiveAmount] = useState('');
@@ -72,6 +78,7 @@ export default function Dashboard() {
     setTransactions(data.transactions || []);
     setParties(getPurchaseParties());
     setOrders(getPurchaseOrders());
+    setSupplierPayments(data.supplierPayments || []);
   };
 
   useEffect(() => {
@@ -163,9 +170,8 @@ export default function Dashboard() {
       .filter(order => order.partyId === selectedParty.id && order.status !== 'cancelled')
       .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
 
-    const events: Array<{ id: string; date: string; type: 'purchase' | 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [];
+    const purchaseEvents: Array<{ id: string; date: string; type: 'purchase'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [];
     let totalPurchase = 0;
-    let totalPaid = 0;
     let lastPaymentAt = '';
     let lastPurchaseAt = '';
 
@@ -173,34 +179,36 @@ export default function Dashboard() {
       const orderTotal = Math.max(0, Number(order.totalAmount || 0));
       totalPurchase += orderTotal;
       lastPurchaseAt = order.orderDate || lastPurchaseAt;
-      events.push({
+      purchaseEvents.push({
         id: `order-${order.id}`,
         date: order.orderDate || order.createdAt,
         type: 'purchase',
         ref: order.billNumber || order.id.slice(-6),
-        description: `PO ${order.id.slice(-6)}${order.status ? ` • ${order.status}` : ''}`,
+        description: `PO ${order.id.slice(-6)} received${order.status ? ` • ${order.status}` : ''}`,
         debit: orderTotal,
         credit: 0,
         tone: 'due',
       });
 
-      (order.paymentHistory || []).forEach(payment => {
-        const paid = Math.max(0, Number(payment.amount || 0));
-        totalPaid += paid;
-        lastPaymentAt = payment.paidAt;
-        events.push({
-          id: payment.id,
-          date: payment.paidAt,
-          type: 'payment',
-          ref: order.billNumber || order.id.slice(-6),
-          description: `${payment.method || 'cash'}${payment.note ? ` • ${payment.note}` : ''}`,
-          debit: 0,
-          credit: paid,
-          tone: payment.method === 'cash' ? 'cash' : 'payment',
-        });
+    });
+    const paymentEvents: Array<{ id: string; date: string; type: 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [];
+    const directPayments = supplierPayments.filter(payment => payment.partyId === selectedParty.id && !payment.deletedAt);
+    directPayments.forEach(payment => {
+      if (!lastPaymentAt || new Date(payment.paidAt).getTime() > new Date(lastPaymentAt).getTime()) lastPaymentAt = payment.paidAt;
+      paymentEvents.push({
+        id: `sp-${payment.id}`,
+        date: payment.paidAt,
+        type: 'payment',
+        ref: payment.id.slice(-6),
+        description: formatGroupedSupplierPaymentDescription(payment.method, Math.max(1, payment.allocations?.length || 1)),
+        debit: 0,
+        credit: Math.max(0, Number(payment.amount || 0)),
+        tone: payment.method === 'cash' ? 'cash' : 'payment',
       });
     });
 
+    const totalPaid = Number(paymentEvents.reduce((sum, event) => sum + event.credit, 0).toFixed(2));
+    const events: Array<{ id: string; date: string; type: 'purchase' | 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [...purchaseEvents, ...paymentEvents];
     const sortedEvents = events.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     let runningBalance = 0;
     const rows: LedgerRow[] = sortedEvents.map((event) => {
@@ -221,7 +229,7 @@ export default function Dashboard() {
     const remaining = Math.max(0, Number((totalPurchase - totalPaid).toFixed(2)));
     const displayRows = [...rows].reverse();
     return { rows, displayRows, totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
-  }, [selectedParty, orders]);
+  }, [selectedParty, orders, supplierPayments]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
     setReceivingCustomer(customer);
@@ -269,15 +277,14 @@ export default function Dashboard() {
     if (!Number.isFinite(amount) || amount <= 0) return setPayError('Enter valid amount greater than zero.');
     if (amount > payingParty.payable + 0.0001) return setPayError('Amount cannot exceed party payable.');
 
-    let remaining = Number(amount.toFixed(2));
-    for (const order of payingParty.dueOrders) {
-      if (remaining <= 0) break;
-      const orderRemaining = Math.max(0, Number(order.remainingAmount || 0));
-      if (orderRemaining <= 0) continue;
-      const allocation = Math.min(remaining, orderRemaining);
-      await recordPurchaseOrderPayment(order.id, allocation, payMethod, payNote.trim() || `Dashboard supplier payment | party:${payingParty.name}`);
-      remaining = Number((remaining - allocation).toFixed(2));
-    }
+    await createSupplierPayment({
+      partyId: payingParty.id,
+      partyName: payingParty.name,
+      amount,
+      method: payMethod,
+      paidAt: new Date().toISOString(),
+      note: payNote.trim() || 'Supplier payment',
+    });
 
     setPayingParty(null);
     refresh();
@@ -348,6 +355,50 @@ export default function Dashboard() {
     } finally {
       setIsGeneratingPartyPdf(false);
     }
+  };
+
+  const handleEditSupplierPayment = async (rowId: string) => {
+    const supplierPaymentId = rowId.replace('sp-', '');
+    const payment = supplierPayments.find(item => item.id === supplierPaymentId && !item.deletedAt);
+    if (!payment) return;
+    const amountInput = window.prompt('Edit payment amount', String(payment.amount));
+    if (amountInput == null) return;
+    const amount = Number(amountInput);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    const methodInput = window.prompt('Method (cash/online)', payment.method) || payment.method;
+    const method = methodInput.toLowerCase() === 'online' ? 'online' : 'cash';
+    const note = window.prompt('Note', payment.note || '') ?? payment.note;
+    await updateSupplierPayment(payment.id, { amount, method, note });
+    refresh();
+  };
+
+  const handleDeleteSupplierPayment = async (rowId: string) => {
+    const supplierPaymentId = rowId.replace('sp-', '');
+    if (!window.confirm('Delete this supplier payment entry?')) return;
+    await deleteSupplierPayment(supplierPaymentId);
+    refresh();
+  };
+
+  const handleEditCustomerPayment = async (rowId: string) => {
+    const paymentId = rowId.replace('payment-', '');
+    const tx = transactions.find(item => item.id === paymentId && item.type === 'payment');
+    if (!tx) return;
+    const amountInput = window.prompt('Edit received amount', String(tx.total));
+    if (amountInput == null) return;
+    const total = Number(amountInput);
+    if (!Number.isFinite(total) || total <= 0) return;
+    const methodInput = window.prompt('Method (Cash/Online)', tx.paymentMethod || 'Cash') || tx.paymentMethod || 'Cash';
+    const paymentMethod = methodInput.toLowerCase() === 'online' ? 'Online' : 'Cash';
+    const notes = window.prompt('Note', tx.notes || '') ?? tx.notes;
+    await updateTransaction({ ...tx, total, paymentMethod: paymentMethod as 'Cash' | 'Online', notes });
+    refresh();
+  };
+
+  const handleDeleteCustomerPayment = (rowId: string) => {
+    const paymentId = rowId.replace('payment-', '');
+    if (!window.confirm('Delete this customer payment entry?')) return;
+    deleteTransaction(paymentId);
+    refresh();
   };
 
   return (
@@ -491,7 +542,7 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {customerStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'refund' ? 'bg-red-50 text-red-600' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
+                  {customerStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'refund' ? 'bg-red-50 text-red-600' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}{row.id.startsWith('payment-') && <div className="mt-2 flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditCustomerPayment(row.id)}>Edit</Button><Button size="sm" variant="outline" onClick={() => handleDeleteCustomerPayment(row.id)}>Delete</Button></div>}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
                 </tbody>
               </table>
             </div>
@@ -519,7 +570,7 @@ export default function Dashboard() {
               <table className="w-full min-w-[920px] text-sm">
                 <thead className="sticky top-0 bg-slate-50"><tr><th className="p-3 text-left whitespace-nowrap">Date</th><th className="p-3 text-left">Type</th><th className="p-3 text-left whitespace-nowrap">Ref</th><th className="p-3 text-left min-w-[260px]">Description</th><th className="p-3 text-right whitespace-nowrap">Debit</th><th className="p-3 text-right whitespace-nowrap">Credit</th><th className="p-3 text-right whitespace-nowrap">Balance</th></tr></thead>
                 <tbody>
-                  {partyStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
+                  {partyStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}{row.id.startsWith('sp-') && <div className="mt-2 flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row.id)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row.id)}>Delete</Button></div>}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
                 </tbody>
               </table>
             </div>
