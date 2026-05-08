@@ -199,6 +199,7 @@ export default function Sales() {
   const [storeOverpaymentAsCredit, setStoreOverpaymentAsCredit] = useState(false);
   const [cashPaidInput, setCashPaidInput] = useState('');
   const [onlinePaidInput, setOnlinePaidInput] = useState('');
+  const [creditDueInput, setCreditDueInput] = useState('');
   const [cashReceivedInput, setCashReceivedInput] = useState('');
   const [cashReceivedDirty, setCashReceivedDirty] = useState(false);
   const [returnHandlingMode, setReturnHandlingMode] = useState<ReturnHandlingMode>('refund_cash');
@@ -229,6 +230,7 @@ export default function Sales() {
     hasCustomer,
     cashInput,
     onlineInput,
+    creditInput,
   }: {
     cartItems: CartItem[];
     taxRate: number;
@@ -238,6 +240,7 @@ export default function Sales() {
     hasCustomer: boolean;
     cashInput: string;
     onlineInput: string;
+    creditInput: string;
   }) => {
     const subtotalCents = cartItems.reduce((acc, item) => acc + toMoneyCents(item.sellPrice * item.quantity), 0);
     const discountCents = cartItems.reduce((acc, item) => acc + toMoneyCents(item.discountAmount || 0), 0);
@@ -256,12 +259,14 @@ export default function Sales() {
     const cashPaidCents = Math.max(0, toMoneyCents(Number(cashInput || 0)));
     const onlinePaidCents = Math.max(0, toMoneyCents(Number(onlineInput || 0)));
     const paidNowCents = cashPaidCents + onlinePaidCents;
-    const overpayCents = Math.max(0, paidNowCents - remainingPayableCents);
-    const creditDueCents = returnMode ? 0 : Math.max(0, remainingPayableCents - paidNowCents);
+    const maxCreditDueCents = Math.max(0, remainingPayableCents - paidNowCents);
+    const requestedCreditDueCents = Math.max(0, toMoneyCents(Number(creditInput || 0)));
+    const creditDueCents = returnMode ? 0 : Math.min(maxCreditDueCents, requestedCreditDueCents);
+    const overpayCents = Math.max(0, paidNowCents + creditDueCents - remainingPayableCents);
     const remainingPayableWhole = roundMoneyWhole(fromMoneyCents(remainingPayableCents));
     const settlementPaidNowWhole = roundMoneyWhole(fromMoneyCents(paidNowCents));
     const settlementOverpayWhole = returnMode ? 0 : Math.max(0, settlementPaidNowWhole - remainingPayableWhole);
-    const creditDuePreviewWhole = returnMode ? 0 : Math.max(0, remainingPayableWhole - settlementPaidNowWhole);
+    const creditDuePreviewWhole = returnMode ? 0 : roundMoneyWhole(fromMoneyCents(creditDueCents));
 
     return {
       subtotal: fromMoneyCents(subtotalCents),
@@ -634,10 +639,12 @@ export default function Sales() {
         hasCustomer: false,
         cashInput: '0',
         onlineInput: '0',
+        creditInput: '0',
       });
       const defaultCashToCollect = Math.max(0, Number(defaultCheckout.remainingPayableWhole || 0));
       setCashPaidInput(defaultCashToCollect.toString());
       setOnlinePaidInput('');
+      setCreditDueInput('');
       setCashReceivedInput(defaultCashToCollect.toString());
       setCashReceivedDirty(false);
       setIsCustomerModalOpen(true);
@@ -749,6 +756,7 @@ export default function Sales() {
         hasCustomer: Boolean(finalCustomer),
         cashInput: cashPaidInput,
         onlineInput: onlinePaidInput,
+        creditInput: creditDueInput,
       });
       const requestedStoreCreditAtSubmit = (!isReturnMode && useStoreCreditApplied && finalCustomer)
         ? Math.min(availableCreditAtSubmit, Math.max(0, Number(originalCheckoutAtSubmit.remainingPayable || 0)))
@@ -762,6 +770,7 @@ export default function Sales() {
         hasCustomer: Boolean(finalCustomer),
         cashInput: cashPaidInput,
         onlineInput: onlinePaidInput,
+        creditInput: creditDueInput,
       });
       const total = checkoutMoney.total;
       const subtotal = checkoutMoney.subtotal;
@@ -857,6 +866,7 @@ export default function Sales() {
         setInvoiceGstNumber('');
         setCashPaidInput('');
         setOnlinePaidInput('');
+        setCreditDueInput('');
         setCashReceivedInput('');
         setCashReceivedDirty(false);
         setReturnHandlingMode('refund_cash');
@@ -894,6 +904,7 @@ export default function Sales() {
     hasCustomer: false,
     cashInput: '0',
     onlineInput: '0',
+    creditInput: '0',
   }).remainingPayable || 0));
   const appliedStoreCredit = !isReturnMode && useStoreCreditApplied && !!selectedCustomer
     ? Math.min(availableStoreCredit, originalInvoiceTotal)
@@ -907,6 +918,7 @@ export default function Sales() {
     hasCustomer: Boolean(selectedCustomer),
     cashInput: cashPaidInput,
     onlineInput: onlinePaidInput,
+    creditInput: creditDueInput,
   });
   const subtotal = checkoutPreview.subtotal;
   const totalDiscount = checkoutPreview.totalDiscount;
@@ -940,6 +952,7 @@ export default function Sales() {
     });
     const nextTotalAmount = Math.max(0, Number(recalculated.remainingPayableWhole || 0)).toString();
     setCashPaidInput(nextTotalAmount);
+    setCreditDueInput('');
     if (!cashReceivedDirty) setCashReceivedInput(nextTotalAmount);
   }, [isCustomerModalOpen, isReturnMode, cart, selectedTax.value, appliedStoreCredit, availableStoreCredit, selectedCustomer, cashReceivedDirty]);
   useEffect(() => {
@@ -1674,8 +1687,20 @@ export default function Sales() {
                       }} />
                     </div>
                     <div className="space-y-1.5">
-                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online Paid</Label>
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online/Bank Paid</Label>
                       <Input type="number" min="0" step="0.01" placeholder="0.00" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Credit</Label>
+                      <div className="flex gap-2">
+                        <Input type="number" min="0" step="0.01" placeholder="0.00" value={creditDueInput} onChange={(e) => { setCreditDueInput(e.target.value); setCheckoutError(null); }} />
+                        <Button type="button" variant="outline" onClick={() => {
+                          const remaining = Math.max(0, checkoutPreview.remainingPayableWhole - roundMoneyWhole(cashPaidValue) - roundMoneyWhole(onlinePaidValue));
+                          setCreditDueInput(String(remaining));
+                          setCheckoutError(null);
+                        }}>Credit</Button>
+                      </div>
                     </div>
                     <div className="rounded border bg-white p-2 text-xs space-y-1">
                       <div className="flex justify-between"><span>Cash to collect</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
@@ -1696,7 +1721,7 @@ export default function Sales() {
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
                       <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyWhole(checkoutPreview.settlementPaidNowWhole)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
                       {checkoutPreview.hasWholeOverpay && (
                         <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyWhole(checkoutPreview.settlementOverpayWhole)}</p>
                       )}
