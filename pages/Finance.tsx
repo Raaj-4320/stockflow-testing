@@ -839,7 +839,7 @@ export default function Finance() {
         data.transactions,
         expenses,
         cashAdjustments,
-        data.deleteCompensations || [],
+        [],
         data.purchaseOrders || [],
         openSession.startTime,
         undefined,
