@@ -17,6 +17,11 @@ import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole 
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
 export default function Transactions() {
+  const getTransactionReference = (tx: Transaction) => tx.type === 'sale'
+    ? (tx.invoiceNo || tx.id.slice(-6))
+    : tx.type === 'return'
+      ? (tx.creditNoteNo || tx.id.slice(-6))
+      : tx.id.slice(-6);
   type BackendShadowTransaction = {
     id: string;
     type?: string;
@@ -698,7 +703,7 @@ export default function Transactions() {
       if (excelFilterType !== 'all' && tx.type !== excelFilterType) return false;
 
       if (search) {
-        const billNumber = `bill-${tx.id.slice(-6)}`;
+        const billNumber = `bill-${getTransactionReference(tx)}`;
         const phone = tx.customerId ? (customerPhoneById.get(tx.customerId) || '') : '';
         const haystack = `${tx.customerName || ''} ${phone} ${tx.id} ${billNumber}`.toLowerCase();
         if (!haystack.includes(search)) return false;
@@ -1377,7 +1382,7 @@ export default function Transactions() {
     // Table
     const tableBody = filteredTransactions.map(tx => [
         new Date(tx.date).toLocaleDateString(),
-        tx.id.slice(-6),
+        getTransactionReference(tx),
         tx.type.toUpperCase(),
         tx.customerName || 'Walk-in',
         getDisplayPaymentMethod(tx),
@@ -1724,13 +1729,13 @@ export default function Transactions() {
                                               type="checkbox"
                                               checked={selectedTransactionIds.includes(tx.id)}
                                               onChange={() => handleToggleTransactionSelection(tx.id)}
-                                              aria-label={`Select transaction ${tx.id.slice(-6)}`}
+                                              aria-label={`Select transaction ${getTransactionReference(tx)}`}
                                               className="h-4 w-4 rounded border-slate-300"
                                             />
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="font-medium text-foreground">{new Date(tx.date).toLocaleDateString()}</div>
-                                            <div className="text-[10px] font-mono text-muted-foreground">#{tx.id.slice(-6)}</div>
+                                            <div className="text-[10px] font-mono text-muted-foreground">#{getTransactionReference(tx)}</div>
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="flex items-center gap-2">
@@ -1818,7 +1823,7 @@ export default function Transactions() {
                                     <div className={`h-1.5 w-full ${cardBorder}`}></div>
                                     <div className="p-4 space-y-3">
                                         <div className="flex justify-between items-center">
-                                            <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{tx.id.slice(-6)}</Badge>
+                                            <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{getTransactionReference(tx)}</Badge>
                                             <span className="text-[10px] text-muted-foreground font-medium">{new Date(tx.date).toLocaleDateString()}</span>
                                         </div>
                                         
@@ -1868,7 +1873,7 @@ export default function Transactions() {
                                     <div>
                                         <div className="flex items-center gap-2 mb-1">
                                             <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground bg-muted/50 border-transparent px-1.5">
-                                                #{tx.id.slice(-6)}
+                                                #{getTransactionReference(tx)}
                                             </Badge>
                                             <span className="text-xs text-muted-foreground">
                                                 {new Date(tx.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
@@ -1946,7 +1951,7 @@ export default function Transactions() {
                       <div className="flex justify-between items-center">
                           <CardTitle className="text-lg flex items-center gap-2">
                               {selectedTx.type === 'sale' ? 'Sale Receipt' : 'Return Receipt'}
-                              <span className="text-xs font-normal text-muted-foreground font-mono">#{selectedTx.id}</span>
+                              <span className="text-xs font-normal text-muted-foreground font-mono">#{getTransactionReference(selectedTx)}</span>
                           </CardTitle>
                           <div className="flex items-center gap-1">
                               <Button 

@@ -96,9 +96,17 @@ export interface Transaction {
   taxRate?: number;
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
+  invoiceNo?: string;
+  creditNoteNo?: string;
   notes?: string;
   sourceTransactionId?: string;
   sourceTransactionDate?: string;
+}
+
+export interface DocumentSeriesConfig {
+  nextNumber: number;
+  padding: number;
+  prefix?: string;
 }
 
 export interface StoreProfile {
@@ -587,6 +595,10 @@ export interface AppState {
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;
+  documentSeries?: {
+    salesInvoice?: DocumentSeriesConfig;
+    salesCreditNote?: DocumentSeriesConfig;
+  };
   upfrontOrders: UpfrontOrder[];
   cashSessions?: CashSession[];
   expenses?: Expense[];
