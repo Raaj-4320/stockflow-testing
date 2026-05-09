@@ -9,9 +9,10 @@ type Props = {
   onClose: () => void;
   onDownloadTemplate: () => void;
   onImportFile: (file: File, onProgress?: (progress: ImportProgress) => void) => Promise<ImportResult>;
+  accept?: string;
 };
 
-export function UploadImportModal({ title, open, onClose, onDownloadTemplate, onImportFile }: Props) {
+export function UploadImportModal({ title, open, onClose, onDownloadTemplate, onImportFile, accept = '.xlsx,.xls' }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const resultRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(false);
@@ -87,7 +88,7 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={onDownloadTemplate}><FileDown className="mr-2 h-4 w-4" /> Download Example File</Button>
             <Button onClick={() => inputRef.current?.click()} disabled={loading}><Upload className="mr-2 h-4 w-4" /> {loading ? 'Processing...' : 'Upload File'}</Button>
-            <input ref={inputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={onFilePick} />
+            <input ref={inputRef} type="file" accept={accept} className="hidden" onChange={onFilePick} />
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">

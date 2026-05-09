@@ -12,7 +12,7 @@ import { exportProductsToExcel } from '../services/excel';
 import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
-import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
+import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile, importShopifyCsvFile, repairShopifyImagesFromCsv } from '../services/importExcel';
 
 export default function Admin() {
   const INVENTORY_PAGE_SIZE = 25;
@@ -2314,10 +2314,21 @@ export default function Admin() {
       <UploadImportModal
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
-        title="Import Inventory"
+        title="Import Shopify CSV"
         onDownloadTemplate={downloadInventoryTemplate}
+        accept=".csv"
         onImportFile={async (file) => {
-          const result = await importInventoryFromFile(file);
+          const useRepairMode = window.confirm('Repair Images Only mode?\n\nOK = Repair Images Only (existing products only)\nCancel = Create Missing Only');
+          const dryRun = useRepairMode
+            ? await repairShopifyImagesFromCsv(file, undefined, { dryRun: true })
+            : await importShopifyCsvFile(file, undefined, { dryRun: true });
+          if (dryRun.errors.length) return dryRun;
+          const proceed = window.confirm(`${dryRun.summary}\n\nProceed with ${useRepairMode ? 'Repair Images Only' : 'Create Missing Only'} write?`);
+          if (!proceed) return { ...dryRun, summary: `${dryRun.summary} Write cancelled by user.` };
+          const result = useRepairMode
+            ? await repairShopifyImagesFromCsv(file, undefined, { dryRun: false })
+            : await importShopifyCsvFile(file, undefined, { dryRun: false });
+          result.summary = `${dryRun.summary} Import executed. ${result.summary}`;
           refreshData();
           return result;
         }}

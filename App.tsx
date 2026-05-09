@@ -19,7 +19,6 @@ const Reports = lazy(() => import('./pages/Reports'));
 const Transactions = lazy(() => import('./pages/Transactions'));
 const Customers = lazy(() => import('./pages/Customers'));
 const Finance = lazy(() => import('./pages/Finance'));
-const Financial = lazy(() => import('./pages/Financial'));
 const FreightBooking = lazy(() => import('./pages/FreightBooking'));
 const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 const ProductAnalytics = lazy(() => import('./pages/ProductAnalytics'));
@@ -235,7 +234,6 @@ export default function App() {
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
             <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
-            <NavItem to="/financial" icon={Landmark} label="Financial" />
             <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
             <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Panel" />
 
@@ -367,7 +365,6 @@ export default function App() {
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
                 <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Cashbook /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
-                <Route path="/financial" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Financial /></ProtectedRoute>} />
                 <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
                 <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><PurchasePanel /></ProtectedRoute>} />
                 

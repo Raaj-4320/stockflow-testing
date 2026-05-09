@@ -161,8 +161,11 @@ const isSuspiciousDrop = (previous: AppState, next: AppState) => {
   };
 };
 
+const ENABLE_DB_AUDIT_EVENTS = false;
+// DB audit event writes disabled; operational history datasets remain active.
 // Best-effort audit stream. Durable operation commits are written in-transaction for critical flows.
 const writeAuditEvent = async (operation: AuditOperation, payload: Record<string, unknown>) => {
+  if (!ENABLE_DB_AUDIT_EVENTS) return;
   if (!db || !auth?.currentUser) return;
   try {
     await addDoc(collection(db, 'stores', auth.currentUser.uid, 'auditEvents'), {

@@ -175,6 +175,227 @@ const runThrottled = async <T>(items: T[], worker: (item: T, index: number) => P
   }
 };
 
+const parseCsvLine = (line: string): string[] => {
+  const out: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map(v => v.trim());
+};
+
+const slugify = (value: string) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const toBool = (value: string) => ['true', '1', 'yes'].includes(value.toLowerCase().trim());
+
+export const importShopifyCsvFile = async (file: File, onProgress?: (progress: ImportProgress) => void, options?: { dryRun?: boolean }): Promise<ImportResult> => {
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { totalRows: 0, importedRows: 0, errors: [{ sheet: 'Shopify CSV', row: 1, field: 'File', message: 'Empty CSV' }], summary: 'Empty CSV file.' };
+  const headers = parseCsvLine(lines[0]);
+  const rows = lines.slice(1).map((line, idx) => {
+    const values = parseCsvLine(line);
+    const obj: Record<string, string> = {};
+    headers.forEach((h, i) => { obj[h] = values[i] ?? ''; });
+    obj.__row = String(idx + 2);
+    return obj;
+  });
+
+  const groups = new Map<string, Record<string, string>[]>();
+  const errors: ImportIssue[] = [];
+  rows.forEach((row) => {
+    const handle = toStr(row['Handle']);
+    if (!handle) {
+      errors.push({ sheet: 'Shopify CSV', row: Number(row.__row), field: 'Handle', message: 'Handle is required' });
+      return;
+    }
+    if (!groups.has(handle)) groups.set(handle, []);
+    groups.get(handle)!.push(row);
+  });
+  if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, summary: 'Validation failed. No products imported.' };
+
+  const data = loadData();
+  const existingHandles = new Set((data.products || []).map((p: any) => toStr(p.handle || p.id).toLowerCase()));
+  const handles = Array.from(groups.keys());
+  const products: any[] = [];
+  const warnings: ImportIssue[] = [];
+
+  handles.forEach((handle) => {
+    const grouped = groups.get(handle)!;
+    const first = grouped[0];
+    const slug = slugify(toStr(first['Handle']) || toStr(first['Title']));
+    const images = grouped
+      .filter(r => toStr(r['Image Src']))
+      .map(r => ({
+        src: toStr(r['Image Src']),
+        position: Number(toStr(r['Image Position']) || 9999),
+        alt: toStr(r['Image Alt Text']) || '',
+        source: 'csv'
+      }))
+      .sort((a, b) => a.position - b.position);
+    const galleryImages = images.map(i => i.src);
+    const tags = toStr(first['Tags']).split(',').map(t => t.trim()).filter(Boolean);
+    const product: any = {
+      id: slug,
+      handle: toStr(first['Handle']),
+      slug,
+      title: toStr(first['Title']),
+      name: toStr(first['Title']),
+      descriptionHtml: toStr(first['Body (HTML)']),
+      descriptionText: toStr(first['Body (HTML)']).replace(/<[^>]+>/g, ' ').trim(),
+      vendor: toStr(first['Vendor']),
+      productCategory: toStr(first['Product Category']),
+      type: toStr(first['Type']),
+      tags,
+      published: toBool(toStr(first['Published'])),
+      status: toStr(first['Status']) || 'draft',
+      active: toStr(first['Status']).toLowerCase() === 'active' || toBool(toStr(first['Published'])),
+      price: Number(toStr(first['Variant Price']) || 0),
+      compareAtPrice: Number(toStr(first['Variant Compare At Price']) || 0),
+      sku: toStr(first['Variant SKU']),
+      barcode: toStr(first['Variant Barcode']) || slug,
+      inventory: {
+        tracker: toStr(first['Variant Inventory Tracker']),
+        qty: Number(toStr(first['Variant Inventory Qty']) || 0),
+        policy: toStr(first['Variant Inventory Policy'])
+      },
+      shipping: {
+        requiresShipping: toBool(toStr(first['Variant Requires Shipping'])),
+        taxable: toBool(toStr(first['Variant Taxable'])),
+        fulfillmentService: toStr(first['Variant Fulfillment Service']),
+        grams: Number(toStr(first['Variant Grams']) || 0),
+        weightUnit: toStr(first['Variant Weight Unit'])
+      },
+      options: [1, 2, 3].map((n) => ({ name: toStr(first[`Option${n} Name`]), position: n, values: Array.from(new Set(grouped.map(r => toStr(r[`Option${n} Value`])).filter(Boolean))) })).filter(o => o.name),
+      variants: grouped.map((r, idx) => ({ id: `${slug}-${idx + 1}`, sku: toStr(r['Variant SKU']), price: Number(toStr(r['Variant Price']) || 0), compareAtPrice: Number(toStr(r['Variant Compare At Price']) || 0), barcode: toStr(r['Variant Barcode']), image: toStr(r['Variant Image']) })),
+      images,
+      galleryImages,
+      thumbnailImage: galleryImages[0] || '',
+      seo: { title: toStr(first['SEO Title']), description: toStr(first['SEO Description']) },
+      googleShopping: Object.fromEntries(Object.entries(first).filter(([k]) => k.toLowerCase().includes('google shopping'))),
+      metafields: Object.fromEntries(Object.entries(first).filter(([k]) => k.toLowerCase().includes('metafield'))),
+      source: { type: 'shopify_csv', importedAt: new Date().toISOString(), raw: grouped },
+      image: galleryImages[0] || '',
+      category: toStr(first['Product Category']) || 'Imported',
+      buyPrice: Number(toStr(first['Cost per item']) || 0),
+      sellPrice: Number(toStr(first['Variant Price']) || 0),
+      stock: Number(toStr(first['Variant Inventory Qty']) || 0),
+      description: toStr(first['Body (HTML)']).replace(/<[^>]+>/g, ' ').trim(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (existingHandles.has(handle.toLowerCase()) || existingHandles.has(slug.toLowerCase())) {
+      warnings.push({ sheet: 'Shopify CSV', row: Number(first.__row), field: 'Handle', message: `Skipped existing handle: ${handle}` });
+      return;
+    }
+    products.push(product);
+  });
+
+  onProgress?.({ phase: 'importing', processed: 0, total: products.length, message: `Dry-run summary: ${groups.size} grouped, ${products.length} ready to create` });
+  if (!options?.dryRun) {
+    await runThrottled(products, async (product) => {
+      await addProduct(product as Product);
+    }, onProgress, 'Importing Shopify products');
+  }
+
+  return {
+    totalRows: rows.length,
+    importedRows: options?.dryRun ? 0 : products.length,
+    errors: [],
+    warnings,
+    summary: `Rows: ${rows.length}, grouped products: ${groups.size}, valid: ${products.length}, invalid: ${errors.length}, multiple-images: ${Array.from(groups.values()).filter(g => g.filter(r => toStr(r['Image Src'])).length > 1).length}, existing skipped: ${warnings.length}, ready to create: ${products.length}.${options?.dryRun ? ' Dry-run only: no writes performed.' : ''}`
+  };
+};
+
+export const repairShopifyImagesFromCsv = async (file: File, onProgress?: (progress: ImportProgress) => void, options?: { dryRun?: boolean }): Promise<ImportResult> => {
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { totalRows: 0, importedRows: 0, errors: [{ sheet: 'Shopify CSV', row: 1, field: 'File', message: 'Empty CSV' }], summary: 'Empty CSV file.' };
+  const headers = parseCsvLine(lines[0]);
+  const rows = lines.slice(1).map((line, idx) => {
+    const values = parseCsvLine(line);
+    const obj: Record<string, string> = {};
+    headers.forEach((h, i) => { obj[h] = values[i] ?? ''; });
+    obj.__row = String(idx + 2);
+    return obj;
+  });
+
+  const grouped = new Map<string, Record<string, string>[]>();
+  rows.forEach((row) => {
+    const handle = toStr(row['Handle']);
+    if (!handle) return;
+    if (!grouped.has(handle)) grouped.set(handle, []);
+    grouped.get(handle)!.push(row);
+  });
+
+  const data = loadData();
+  const byHandle = new Map((data.products || []).map((p: any) => [toStr(p.handle).toLowerCase(), p]));
+  const bySlug = new Map((data.products || []).map((p: any) => [toStr(p.slug || p.id).toLowerCase(), p]));
+  const warnings: ImportIssue[] = [];
+  const repairTargets: Array<{ product: any; images: Array<{ src: string; position: number; alt: string; source: string }>; galleryImages: string[] }> = [];
+
+  for (const [handle, handleRows] of grouped.entries()) {
+    const slug = slugify(handle);
+    const existing = byHandle.get(handle.toLowerCase()) || bySlug.get(slug.toLowerCase());
+    if (!existing) {
+      warnings.push({ sheet: 'Shopify CSV', row: Number(handleRows[0].__row), field: 'Handle', message: `No matching existing product for ${handle}` });
+      continue;
+    }
+    const images = handleRows
+      .filter(r => toStr(r['Image Src']))
+      .map(r => ({ src: toStr(r['Image Src']), position: Number(toStr(r['Image Position']) || 9999), alt: toStr(r['Image Alt Text']) || '', source: 'csv' }))
+      .sort((a, b) => a.position - b.position);
+    if (!images.length) {
+      warnings.push({ sheet: 'Shopify CSV', row: Number(handleRows[0].__row), field: 'Image Src', message: `No images found for ${handle}` });
+      continue;
+    }
+    const galleryImages = images.map(i => i.src);
+    const hasDiff = JSON.stringify(existing.galleryImages || []) !== JSON.stringify(galleryImages);
+    if (!hasDiff) {
+      warnings.push({ sheet: 'Shopify CSV', row: Number(handleRows[0].__row), field: 'Image Src', message: `Images already up to date for ${handle}` });
+      continue;
+    }
+    repairTargets.push({ product: existing, images, galleryImages });
+  }
+
+  onProgress?.({ phase: 'importing', processed: 0, total: repairTargets.length, message: `Repair dry-run: ${repairTargets.length} docs would be repaired` });
+  if (!options?.dryRun) {
+    await runThrottled(repairTargets, async (target) => {
+      await updateProduct({
+        ...target.product,
+        images: target.images,
+        galleryImages: target.galleryImages,
+        thumbnailImage: target.galleryImages[0] || '',
+        image: target.galleryImages[0] || '',
+        imageSrc: target.galleryImages[0] || '',
+      } as Product);
+    }, onProgress, 'Repairing product images');
+  }
+
+  const multipleImages = Array.from(grouped.values()).filter(g => g.filter(r => toStr(r['Image Src'])).length > 1).length;
+  return {
+    totalRows: rows.length,
+    importedRows: options?.dryRun ? 0 : repairTargets.length,
+    errors: [],
+    warnings,
+    summary: `Repair mode — products in CSV: ${grouped.size}, matching existing docs: ${grouped.size - warnings.filter(w => w.message.startsWith('No matching')).length}, products with multiple images: ${multipleImages}, docs that would be repaired: ${repairTargets.length}, docs skipped: ${warnings.length}.${options?.dryRun ? ' Dry-run only: no writes performed.' : ''}`
+  };
+};
+
 export const downloadInventoryTemplate = () => writeTemplate(
   'Inventory',
   ['Product ID', 'Barcode', 'Product Name', 'Category', 'Buy Price', 'Sell Price', 'Total Purchase', 'Total Sold', 'Current Stock', 'HSN/SAC', 'Image Source', 'Description'],

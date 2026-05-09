@@ -530,10 +530,10 @@ function MoneyTile({ label, value, tone = 'neutral' }: { label: string; value: s
 export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<FinanceTabKey>('cashbook');
+  const [activeTab, setActiveTab] = useState<FinanceTabKey>('dashboard');
   // Cash tab summary cards depend on the same canonical cashbook rows used by cashbook/profit tabs.
   // Keep derivation gated to tabs that actually render those metrics so other tabs stay lightweight.
-  const shouldComputeDetailedCashbook = activeTab === 'cashbook' || activeTab === 'profit' || activeTab === 'cash';
+  const shouldComputeDetailedCashbook = activeTab === 'cash';
 
   const [openingBalance, setOpeningBalance] = useState('');
   const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
@@ -2082,11 +2082,9 @@ export default function Finance() {
   const chartMax = Math.max(monthlySummary.netSales, monthlySummary.todayExpenses, Math.abs(monthlySummary.grossProfit), 1);
 
   const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
-    { key: 'cashbook', label: 'Cashbook', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
+    { key: 'dashboard', label: 'Dashboard', icon: <Wallet className="w-4 h-4" /> },
     { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
-    { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
-    { key: 'credit', label: 'Credit Management', icon: <DollarSign className="w-4 h-4" /> },
-    { key: 'profit', label: 'Profit Summary', icon: <BarChart3 className="w-4 h-4" /> }
+    { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> }
   ];
 
   return (
