@@ -96,9 +96,18 @@ export interface Transaction {
   taxRate?: number;
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
+  invoiceNo?: string;
+  creditNoteNo?: string;
+  receiptNo?: string;
   notes?: string;
   sourceTransactionId?: string;
   sourceTransactionDate?: string;
+}
+
+export interface DocumentSeriesConfig {
+  nextNumber: number;
+  padding: number;
+  prefix?: string;
 }
 
 export interface StoreProfile {
@@ -466,6 +475,7 @@ export interface PurchaseOrder {
 
 export interface SupplierPaymentLedgerEntry {
   id: string;
+  voucherNo?: string;
   partyId: string;
   partyName: string;
   amount: number;
@@ -587,6 +597,12 @@ export interface AppState {
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;
+  documentSeries?: {
+    salesInvoice?: DocumentSeriesConfig;
+    salesCreditNote?: DocumentSeriesConfig;
+    customerPaymentReceipt?: DocumentSeriesConfig;
+    supplierPaymentVoucher?: DocumentSeriesConfig;
+  };
   upfrontOrders: UpfrontOrder[];
   cashSessions?: CashSession[];
   expenses?: Expense[];

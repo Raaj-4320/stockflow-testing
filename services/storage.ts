@@ -1569,6 +1569,103 @@ const defaultProfile: StoreProfile = {
   invoiceFormat: 'standard'
 };
 
+const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
+const DEFAULT_SALES_CREDIT_NOTE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'CN-' });
+const DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'RV-' });
+const DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'SPV-' });
+
+const formatSeriesNumber = (nextNumber: number, padding: number, prefix = ''): string => {
+  const safePadding = Number.isFinite(padding) && padding > 0 ? Math.floor(padding) : 5;
+  const safeNumber = Number.isFinite(nextNumber) && nextNumber > 0 ? Math.floor(nextNumber) : 1;
+  return `${prefix}${String(safeNumber).padStart(safePadding, '0')}`;
+};
+
+const ensureDocumentSeriesDefaults = (state: AppState): AppState => ({
+  ...state,
+  documentSeries: {
+    salesInvoice: {
+      ...DEFAULT_SALES_INVOICE_SERIES,
+      ...(state.documentSeries?.salesInvoice || {}),
+    },
+    salesCreditNote: {
+      ...DEFAULT_SALES_CREDIT_NOTE_SERIES,
+      ...(state.documentSeries?.salesCreditNote || {}),
+    },
+    customerPaymentReceipt: {
+      ...DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES,
+      ...(state.documentSeries?.customerPaymentReceipt || {}),
+    },
+    supplierPaymentVoucher: {
+      ...DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES,
+      ...(state.documentSeries?.supplierPaymentVoucher || {}),
+    },
+  },
+});
+
+const allocateSalesInvoiceNumber = (state: AppState): { state: AppState; invoiceNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.salesInvoice!;
+  const invoiceNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || '');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        salesInvoice: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    invoiceNo,
+  };
+};
+
+const allocateSalesCreditNoteNumber = (state: AppState): { state: AppState; creditNoteNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.salesCreditNote!;
+  const creditNoteNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'CN-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        salesCreditNote: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    creditNoteNo,
+  };
+};
+
+const allocateCustomerPaymentReceiptNumber = (state: AppState): { state: AppState; receiptNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.customerPaymentReceipt!;
+  const receiptNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'RV-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        customerPaymentReceipt: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    receiptNo,
+  };
+};
+
+const allocateSupplierPaymentVoucherNumber = (state: AppState): { state: AppState; voucherNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.supplierPaymentVoucher!;
+  const voucherNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'SPV-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        supplierPaymentVoucher: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    voucherNo,
+  };
+};
+
 const initialData: AppState = {
   products: [],
   transactions: [],
@@ -1592,6 +1689,12 @@ const initialData: AppState = {
   purchaseParties: [],
   purchaseOrders: [],
   supplierPayments: [],
+  documentSeries: {
+    salesInvoice: { ...DEFAULT_SALES_INVOICE_SERIES },
+    salesCreditNote: { ...DEFAULT_SALES_CREDIT_NOTE_SERIES },
+    customerPaymentReceipt: { ...DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES },
+    supplierPaymentVoucher: { ...DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES },
+  },
   variantsMaster: [],
   colorsMaster: []
 };
@@ -3885,12 +3988,18 @@ const stripSupplierPaymentAllocations = (orders: PurchaseOrder[], supplierPaymen
 });
 
 export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerEntry, 'id' | 'createdAt' | 'updatedAt' | 'allocations'>) => {
-  const data = loadData();
+  let data = ensureDocumentSeriesDefaults(loadData());
   const now = new Date().toISOString();
   const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const amount = Math.max(0, Number(payload.amount) || 0);
   const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, amount, payload.method, payload.note, payload.paidAt || now);
-  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations };
+  let voucherNo = payload.voucherNo;
+  if (!voucherNo) {
+    const allocated = allocateSupplierPaymentVoucherNumber(data);
+    data = allocated.state;
+    voucherNo = allocated.voucherNo;
+  }
+  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, voucherNo, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations };
   await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])] }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
   return payment;
 };
@@ -4164,8 +4273,8 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 };
 
 export const processTransaction = (transaction: Transaction): AppState => {
-  const data = loadData();
-  const effectiveTransaction: Transaction = transaction.type === 'sale'
+  let data = ensureDocumentSeriesDefaults(loadData());
+  let effectiveTransaction: Transaction = transaction.type === 'sale'
     ? { ...transaction, saleSettlement: getSaleSettlementBreakdown(transaction) }
     : transaction.type === 'return'
       ? { ...transaction, returnHandlingMode: getResolvedReturnHandlingMode(transaction) }
@@ -4192,6 +4301,20 @@ export const processTransaction = (transaction: Transaction): AppState => {
   assertPaymentMethodByType(effectiveTransaction.type, effectiveTransaction.paymentMethod);
   assertTransactionFinancials(effectiveTransaction);
   assertTransactionInventoryRules(effectiveTransaction, data.products, data.transactions);
+
+  if (effectiveTransaction.type === 'sale' && !effectiveTransaction.invoiceNo) {
+    const allocated = allocateSalesInvoiceNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, invoiceNo: allocated.invoiceNo };
+  } else if (effectiveTransaction.type === 'return' && !effectiveTransaction.creditNoteNo) {
+    const allocated = allocateSalesCreditNoteNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, creditNoteNo: allocated.creditNoteNo };
+  } else if (effectiveTransaction.type === 'payment' && !effectiveTransaction.receiptNo) {
+    const allocated = allocateCustomerPaymentReceiptNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, receiptNo: allocated.receiptNo };
+  }
 
   const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];

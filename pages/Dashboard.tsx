@@ -199,7 +199,7 @@ export default function Dashboard() {
         id: `sp-${payment.id}`,
         date: payment.paidAt,
         type: 'payment',
-        ref: payment.id.slice(-6),
+        ref: payment.voucherNo || payment.id.slice(-6),
         description: formatGroupedSupplierPaymentDescription(payment.method, Math.max(1, payment.allocations?.length || 1)),
         debit: 0,
         credit: Math.max(0, Number(payment.amount || 0)),
