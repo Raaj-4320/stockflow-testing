@@ -15,6 +15,34 @@ import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileT
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
+const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
+const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
+const detectHistoricalTransactionType = (tx: Transaction): 'sale' | 'return' | 'payment' | 'unknown' => {
+  const t = String((tx as any)?.type || '').toLowerCase();
+  if (t === 'sale' || t === 'return' || t === 'payment') return t as any;
+  const ref = `${(tx as any)?.creditNoteNo || ''} ${(tx as any)?.returnHandlingMode || ''} ${(tx as any)?.notes || ''}`.toLowerCase();
+  if (ref.includes('credit note') || ref.includes('return')) return 'return';
+  const payHint = `${(tx as any)?.receiptNo || ''} ${(tx as any)?.paymentMethod || ''} ${(tx as any)?.paidAmount || ''}`.toLowerCase();
+  if (payHint.includes('receipt') || payHint.includes('payment')) return 'payment';
+  if (t === 'historical_reference') return 'sale';
+  return 'unknown';
+};
+
+
+const getLineProductName = (item: any): string => {
+  const raw = item?.productName || item?.name || item?.itemName || item?.medicineName || item?.title || item?.sku || item?.barcode || '';
+  const name = String(raw || '').trim();
+  return name || 'Unknown Product';
+};
+
+const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => {
+  const items = Array.isArray((tx as any)?.items) ? (tx as any).items : [];
+  if (!items.length) return 'No product details';
+  const labels = items.map((item: any) => formatItemNameWithVariant(getLineProductName(item), item?.selectedVariant, item?.selectedColor));
+  const unique = Array.from(new Set(labels));
+  const shown = unique.slice(0, maxItems).join(', ');
+  return unique.length > maxItems ? `${shown} +${unique.length - maxItems} more` : shown;
+};
 export default function Customers() {
   const CUSTOMERS_PAGE_SIZE = 15;
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -307,8 +335,10 @@ export default function Customers() {
   }, [transactions, upfrontOrders, viewingCustomer]);
   const customerLedgerRows = useMemo(() => {
       if (!viewingCustomer) return [];
+      const candidateName = normalizeName(viewingCustomer.name);
+      const candidatePhone = normalizePhone(viewingCustomer.phone);
       const txHistory = transactions
-        .filter(tx => tx.customerId === viewingCustomer.id)
+        .filter(tx => tx.customerId === viewingCustomer.id || (normalizePhone(tx.customerPhone) && normalizePhone(tx.customerPhone) === candidatePhone) || (normalizeName(tx.customerName) && normalizeName(tx.customerName) === candidateName))
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
       return buildCustomerLedgerRows(txHistory);
   }, [transactions, viewingCustomer]);
@@ -542,20 +572,14 @@ export default function Customers() {
       const txRows = [...customerLedgerRows];
       const profile = loadData().profile;
       const rows = txRows
-        .map(row => {
-          let description = 'Ledger Entry';
-          if (row.tx.type === 'sale') description = 'Sale Invoice';
-          else if (row.tx.type === 'payment') description = 'Payment Received';
-          else if (row.tx.type === 'return') description = 'Sales Return';
-          return {
-            date: row.tx.date,
-            description,
-            reference: row.tx.id.slice(-6),
-            debit: row.debit,
-            credit: row.credit,
-            balance: row.netAfter,
-          };
-        })
+        .map(row => ({
+          date: row.tx.date,
+          description: row.statementDescription,
+          reference: row.reference,
+          debit: row.debit,
+          credit: row.credit,
+          balance: row.netAfter,
+        }))
         .reverse();
       await generateAccountStatementPDF({
         profile,
@@ -1368,6 +1392,7 @@ const getSaleSettlementView = (tx: Transaction) => {
 
 type CustomerLedgerRow = {
   tx: Transaction;
+  reference: string;
   debit: number;
   credit: number;
   saleTotal: number;
@@ -1394,34 +1419,39 @@ const buildCustomerLedgerRows = (transactions: Transaction[]): CustomerLedgerRow
     let saleTotal = 0;
     let paymentAmount = 0;
 
-    if (tx.type === 'sale') {
+    const txKind = detectHistoricalTransactionType(tx);
+    if (txKind === 'sale') {
       const settlement = getSaleSettlementBreakdown(tx);
       const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
       runningDue = Math.max(0, runningDue + settlement.creditDue);
       runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
       saleTotal = amount;
-      statementDescription = `Invoice #${tx.id.slice(-6)} (Total ${formatINRPrecise(amount)}, Paid ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)}, Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? `, Used SC ${formatINRPrecise(storeCreditUsed)}` : ''})`;
-      listDescription = `Sale ${formatINRPrecise(amount)} • Paid now ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)} • Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? ` • Used SC ${formatINRPrecise(storeCreditUsed)}` : ''}`;
-    } else if (tx.type === 'payment') {
+      statementDescription = `Sale Invoice #${tx.invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} (Total ${formatINRPrecise(amount)}, Paid ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)}, Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? `, Used SC ${formatINRPrecise(storeCreditUsed)}` : ''})`;
+      listDescription = `${getTransactionProductSummary(tx)} • Sale ${formatINRPrecise(amount)} • Paid now ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)} • Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? ` • Used SC ${formatINRPrecise(storeCreditUsed)}` : ''}`;
+    } else if (txKind === 'payment') {
       const dueReduced = Math.min(runningDue, amount);
       const storeCreditAdded = Math.max(0, amount - dueReduced);
       runningDue = Math.max(0, runningDue - dueReduced);
       runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
       paymentAmount = amount;
-      statementDescription = `Payment #${tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}, Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? `, SC +${formatINRPrecise(storeCreditAdded)}` : ''})`;
+      statementDescription = `Payment Receipt #${tx.receiptNo || tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}, Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? `, SC +${formatINRPrecise(storeCreditAdded)}` : ''})`;
       listDescription = `${tx.paymentMethod || 'Cash'} payment ${formatINRPrecise(amount)} • Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` • Store credit +${formatINRPrecise(storeCreditAdded)}` : ''}`;
-    } else {
+    } else if (txKind === 'return') {
       const allocation = getCanonicalReturnAllocation(tx, processed, runningDue);
       runningDue = Math.max(0, runningDue - allocation.dueReduction);
       runningStoreCredit = Math.max(0, runningStoreCredit + allocation.storeCreditIncrease);
-      statementDescription = `Return #${tx.id.slice(-6)} (${allocation.mode.replace('_', ' ')}: Cash ${formatINRPrecise(allocation.cashRefund)}, Online ${formatINRPrecise(allocation.onlineRefund)}, Due -${formatINRPrecise(allocation.dueReduction)}, SC +${formatINRPrecise(allocation.storeCreditIncrease)})`;
+      statementDescription = `Credit Note #${tx.creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} (${allocation.mode.replace('_', ' ')}: Cash ${formatINRPrecise(allocation.cashRefund)}, Online ${formatINRPrecise(allocation.onlineRefund)}, Due -${formatINRPrecise(allocation.dueReduction)}, SC +${formatINRPrecise(allocation.storeCreditIncrease)})`;
       listDescription = `Return ${allocation.mode.replace('_', ' ')} • Cash ${formatINRPrecise(allocation.cashRefund)} • Online ${formatINRPrecise(allocation.onlineRefund)} • Due -${formatINRPrecise(allocation.dueReduction)}${allocation.storeCreditIncrease > 0 ? ` • SC +${formatINRPrecise(allocation.storeCreditIncrease)}` : ''}`;
+    } else {
+      statementDescription = `Historical Reference #${tx.id.slice(-6)} (unclassified)`;
+      listDescription = `Historical reference row (unclassified)`;
     }
 
     const netAfter = runningDue - runningStoreCredit;
     const netDelta = netAfter - netBefore;
     rows.push({
       tx,
+      reference: tx.type === 'sale' ? (tx.invoiceNo || tx.id.slice(-6)) : tx.type === 'return' ? (tx.creditNoteNo || tx.id.slice(-6)) : (tx.receiptNo || tx.id.slice(-6)),
       debit: netDelta > 0 ? netDelta : 0,
       credit: netDelta < 0 ? Math.abs(netDelta) : 0,
       saleTotal,
