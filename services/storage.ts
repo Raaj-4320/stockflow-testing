@@ -1569,6 +1569,61 @@ const defaultProfile: StoreProfile = {
   invoiceFormat: 'standard'
 };
 
+const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
+const DEFAULT_SALES_CREDIT_NOTE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'CN-' });
+
+const formatSeriesNumber = (nextNumber: number, padding: number, prefix = ''): string => {
+  const safePadding = Number.isFinite(padding) && padding > 0 ? Math.floor(padding) : 5;
+  const safeNumber = Number.isFinite(nextNumber) && nextNumber > 0 ? Math.floor(nextNumber) : 1;
+  return `${prefix}${String(safeNumber).padStart(safePadding, '0')}`;
+};
+
+const ensureDocumentSeriesDefaults = (state: AppState): AppState => ({
+  ...state,
+  documentSeries: {
+    salesInvoice: {
+      ...DEFAULT_SALES_INVOICE_SERIES,
+      ...(state.documentSeries?.salesInvoice || {}),
+    },
+    salesCreditNote: {
+      ...DEFAULT_SALES_CREDIT_NOTE_SERIES,
+      ...(state.documentSeries?.salesCreditNote || {}),
+    },
+  },
+});
+
+const allocateSalesInvoiceNumber = (state: AppState): { state: AppState; invoiceNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.salesInvoice!;
+  const invoiceNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || '');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        salesInvoice: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    invoiceNo,
+  };
+};
+
+const allocateSalesCreditNoteNumber = (state: AppState): { state: AppState; creditNoteNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.salesCreditNote!;
+  const creditNoteNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'CN-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        salesCreditNote: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    creditNoteNo,
+  };
+};
+
 const initialData: AppState = {
   products: [],
   transactions: [],
@@ -1592,6 +1647,10 @@ const initialData: AppState = {
   purchaseParties: [],
   purchaseOrders: [],
   supplierPayments: [],
+  documentSeries: {
+    salesInvoice: { ...DEFAULT_SALES_INVOICE_SERIES },
+    salesCreditNote: { ...DEFAULT_SALES_CREDIT_NOTE_SERIES },
+  },
   variantsMaster: [],
   colorsMaster: []
 };
@@ -4164,8 +4223,8 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 };
 
 export const processTransaction = (transaction: Transaction): AppState => {
-  const data = loadData();
-  const effectiveTransaction: Transaction = transaction.type === 'sale'
+  let data = ensureDocumentSeriesDefaults(loadData());
+  let effectiveTransaction: Transaction = transaction.type === 'sale'
     ? { ...transaction, saleSettlement: getSaleSettlementBreakdown(transaction) }
     : transaction.type === 'return'
       ? { ...transaction, returnHandlingMode: getResolvedReturnHandlingMode(transaction) }
@@ -4192,6 +4251,16 @@ export const processTransaction = (transaction: Transaction): AppState => {
   assertPaymentMethodByType(effectiveTransaction.type, effectiveTransaction.paymentMethod);
   assertTransactionFinancials(effectiveTransaction);
   assertTransactionInventoryRules(effectiveTransaction, data.products, data.transactions);
+
+  if (effectiveTransaction.type === 'sale' && !effectiveTransaction.invoiceNo) {
+    const allocated = allocateSalesInvoiceNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, invoiceNo: allocated.invoiceNo };
+  } else if (effectiveTransaction.type === 'return' && !effectiveTransaction.creditNoteNo) {
+    const allocated = allocateSalesCreditNoteNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, creditNoteNo: allocated.creditNoteNo };
+  }
 
   const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];

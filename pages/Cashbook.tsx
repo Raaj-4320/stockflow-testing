@@ -18,7 +18,7 @@ const asPlainObject = (value: unknown): Record<string, unknown> => (value && typ
 const toNum = (v: unknown) => Number.isFinite(Number(v)) ? Number(v) : 0;
 const CASHBOOK_RECONCILE_DEBUG = import.meta.env.DEV && import.meta.env.VITE_CASHBOOK_RECONCILE_DEBUG === 'true';
 
-const getCashbookReference = (tx: any) => [tx?.invoiceNo, tx?.receiptNo, tx?.billNo, tx?.reference, tx?.orderId, tx?.id].find((v) => typeof v === 'string' && v.trim()) || String(tx?.id || '').slice(-6) || 'UNKNOWN';
+const getCashbookReference = (tx: any) => [tx?.invoiceNo, tx?.creditNoteNo, tx?.receiptNo, tx?.billNo, tx?.reference, tx?.orderId, tx?.id].find((v) => typeof v === 'string' && v.trim()) || String(tx?.id || '').slice(-6) || 'UNKNOWN';
 const getCashbookCustomerName = (tx: any, customerMap: Map<string, string>) => customerMap.get(tx?.customerId) || tx?.customerName || tx?.customer?.name || tx?.customerPhone || 'Walk-in Customer';
 const getCashbookPaymentMethod = (tx: any): PayType => {
   const m = String(tx?.paymentMethod || tx?.paymentDetails?.method || tx?.method || tx?.mode || '').toLowerCase();

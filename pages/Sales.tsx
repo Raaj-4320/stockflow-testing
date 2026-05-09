@@ -1928,7 +1928,13 @@ export default function Sales() {
                           <CheckCircle className="w-10 h-10" />
                       </div>
                       <h2 className="text-2xl font-bold">Successful!</h2>
-                      <p className="text-muted-foreground text-sm">Receipt #{transactionComplete.id.slice(-6)} has been generated.</p>
+                      <p className="text-muted-foreground text-sm">
+                        Receipt #{transactionComplete.type === 'sale'
+                          ? (transactionComplete.invoiceNo || transactionComplete.id.slice(-6))
+                          : transactionComplete.type === 'return'
+                            ? (transactionComplete.creditNoteNo || transactionComplete.id.slice(-6))
+                            : transactionComplete.id.slice(-6)} has been generated.
+                      </p>
                       {transactionCashDetails && (
                         <div className="text-sm bg-muted rounded-lg p-3 space-y-1">
                           <p>Total: {formatINRWhole(transactionComplete.total)}</p>
