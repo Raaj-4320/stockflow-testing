@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
-import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, PurchaseOrder, Transaction, UpdatedTransactionRecord } from '../types';
+import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
@@ -397,8 +397,10 @@ const getSessionCashTotals = (
   purchaseOrders: PurchaseOrder[],
   sessionStartIso: string,
   sessionEndIso?: string,
-  sessionId?: string
+  sessionId?: string,
+  upfrontOrdersInput?: UpfrontOrder[]
 ) => {
+  const upfrontOrders = Array.isArray(upfrontOrdersInput) ? upfrontOrdersInput : (loadData().upfrontOrders || []);
   const start = new Date(sessionStartIso).getTime();
   const end = sessionEndIso ? new Date(sessionEndIso).getTime() : Number.POSITIVE_INFINITY;
 
@@ -445,13 +447,21 @@ const getSessionCashTotals = (
   const cashWithdrawn = scopedCashAdjustments
     .filter(entry => entry.type === 'cash_withdrawal')
     .reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
+  // Include custom-order cash receipts in shift/system cash. Online/unknown and legacy-info rows are excluded.
+  const customOrderCashIn = buildUpfrontOrderLedgerEffects(upfrontOrders, loadData().customers || [])
+    .filter((effect) => effect.type === 'custom_order_payment' && Math.max(0, Number(effect.cashIn || 0)) > 0)
+    .filter((effect) => {
+      const at = new Date(effect.date).getTime();
+      return Number.isFinite(at) && at >= start && at <= end;
+    })
+    .reduce((sum, effect) => sum + Math.max(0, Number(effect.cashIn || 0)), 0);
 
   const totals = {
     cashSales,
     cashRefunds: cashRefunds + deleteCompensationOutflow,
-    cashCollections,
+    cashCollections: cashCollections + customOrderCashIn,
     expenseTotal: expenseTotal + supplierCashPayments + cashWithdrawn,
-    systemCashTotal: cashSales + cashCollections + cashAdded - cashWithdrawn - cashRefunds - deleteCompensationOutflow - expenseTotal - supplierCashPayments
+    systemCashTotal: cashSales + cashCollections + customOrderCashIn + cashAdded - cashWithdrawn - cashRefunds - deleteCompensationOutflow - expenseTotal - supplierCashPayments
   };
   financeLog.cash('RESULT', {
     sessionId: sessionId || null,
@@ -507,7 +517,7 @@ const buildShiftCashMovementBreakdown = (
   supplierPayments.forEach((p) => {
     const at = new Date(p.paidAt).getTime();
     if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || p.method !== 'cash') return;
-    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
+    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.voucherNo || p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
   });
   const legacySupplierMap = new Map<string, { date: string; party: string; note: string; amount: number }>();
   (state.purchaseOrders || []).forEach((o) => (o.paymentHistory || []).forEach((ph: any) => {
