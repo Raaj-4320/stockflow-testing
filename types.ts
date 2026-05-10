@@ -83,7 +83,7 @@ export interface Transaction {
     creditDue: number;
   };
   date: string;
-  type: 'sale' | 'return' | 'payment';
+  type: 'sale' | 'return' | 'payment' | 'historical_reference';
   customerId?: string;
   customerName?: string;
   customerPhone?: string;
@@ -95,10 +95,24 @@ export interface Transaction {
   tax?: number;
   taxRate?: number;
   taxLabel?: string;
-  paymentMethod?: 'Cash' | 'Credit' | 'Online';
+  paymentMethod?: 'Cash' | 'Credit' | 'Online' | 'Mixed';
+  source?: 'live' | 'historical_import';
+  isHistorical?: boolean;
+  legacyRef?: string;
+  sourceRef?: string;
+  invoiceNo?: string;
+  creditNoteNo?: string;
+  receiptNo?: string;
+  billRef?: string;
   notes?: string;
   sourceTransactionId?: string;
   sourceTransactionDate?: string;
+}
+
+export interface DocumentSeriesConfig {
+  nextNumber: number;
+  padding: number;
+  prefix?: string;
 }
 
 export interface StoreProfile {
@@ -146,6 +160,19 @@ export interface UpfrontOrder {
   reminderDate?: string;
   status: 'unpaid' | 'cleared';
   notes?: string;
+  initialAdvancePaid?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  paymentHistory?: Array<{
+    id: string;
+    paidAt: string;
+    amount: number;
+    method?: 'Cash' | 'Online' | 'Credit' | 'Advance' | string;
+    note?: string;
+    kind: 'initial_advance' | 'additional_payment';
+    remainingAfterPayment: number;
+    advancePaidAfterPayment: number;
+  }>;
 }
 
 
@@ -466,6 +493,7 @@ export interface PurchaseOrder {
 
 export interface SupplierPaymentLedgerEntry {
   id: string;
+  voucherNo?: string;
   partyId: string;
   partyName: string;
   amount: number;
@@ -587,6 +615,12 @@ export interface AppState {
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;
+  documentSeries?: {
+    salesInvoice?: DocumentSeriesConfig;
+    salesCreditNote?: DocumentSeriesConfig;
+    customerPaymentReceipt?: DocumentSeriesConfig;
+    supplierPaymentVoucher?: DocumentSeriesConfig;
+  };
   upfrontOrders: UpfrontOrder[];
   cashSessions?: CashSession[];
   expenses?: Expense[];
