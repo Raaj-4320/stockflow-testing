@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product } from '../types';
+import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
 import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
@@ -17,6 +17,11 @@ import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole 
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
 export default function Transactions() {
+  const getTransactionReference = (tx: Transaction) => tx.type === 'sale'
+    ? (tx.invoiceNo || tx.id.slice(-6))
+    : tx.type === 'return'
+      ? (tx.creditNoteNo || tx.id.slice(-6))
+      : (tx.receiptNo || tx.id.slice(-6));
   type BackendShadowTransaction = {
     id: string;
     type?: string;
@@ -37,6 +42,7 @@ export default function Transactions() {
   const [deletedTransactions, setDeletedTransactions] = useState<DeletedTransactionRecord[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -139,7 +145,38 @@ export default function Transactions() {
     };
   }), [backendShadowTransactions]);
   const backendLoadedForRender = backendShadowFetched && !backendShadowError;
-  const renderedTransactions = backendRenderEnabled && backendLoadedForRender ? backendRenderableTransactions : transactions;
+  const baseRenderedTransactions = backendRenderEnabled && backendLoadedForRender ? backendRenderableTransactions : transactions;
+  const virtualUpfrontOrderTransactions = useMemo<Transaction[]>(() => upfrontOrders.map((order) => ({
+    id: `upfront-${order.id}`,
+    type: 'historical_reference',
+    date: order.date || new Date().toISOString(),
+    total: Math.max(0, Number(order.totalCost || 0)),
+    items: [{
+      id: `upfront-item-${order.id}`,
+      barcode: '',
+      name: order.productName || 'Unknown Product',
+      description: order.notes || '',
+      buyPrice: 0,
+      sellPrice: Math.max(0, Number(order.customerPrice || 0)),
+      stock: 0,
+      image: '',
+      category: 'Custom Order',
+      quantity: Math.max(0, Number(order.quantity || 0)),
+      selectedVariant: order.isCarton ? 'Carton' : 'Unit',
+      selectedColor: '',
+    }],
+    customerId: order.customerId,
+    customerName: customers.find(c => c.id === order.customerId)?.name || 'Customer',
+    paymentMethod: 'Credit',
+    notes: `Advance Customer Order • Product: ${order.productName || 'Unknown Product'} • Total: ₹${formatMoneyWhole(order.totalCost || 0)} • Advance Paid: ₹${formatMoneyWhole(order.advancePaid || 0)} • Remaining: ₹${formatMoneyWhole(order.remainingAmount || 0)} • Ref: ${order.id}`,
+    source: 'historical_import',
+    isHistorical: true,
+    legacyRef: order.id,
+  })), [upfrontOrders, customers]);
+  const renderedTransactions = useMemo(
+    () => [...baseRenderedTransactions, ...virtualUpfrontOrderTransactions],
+    [baseRenderedTransactions, virtualUpfrontOrderTransactions]
+  );
 
   const formatRoleLabel = (role?: string) => {
     const source = (role || 'Admin').trim();
@@ -170,6 +207,7 @@ export default function Transactions() {
         setDeletedTransactions(deletedWindow.rows);
         setCustomers(data.customers);
         setProducts(data.products || []);
+        setUpfrontOrders(data.upfrontOrders || []);
         setTransactionsWindowCursor(txWindow.nextCursor);
         setDeletedWindowCursor(deletedWindow.nextCursor);
         setHasMoreTransactionsWindow(txWindow.hasMore);
@@ -659,6 +697,7 @@ export default function Transactions() {
         tx.customerId || '',
       ].join(' ').toLowerCase();
       if (baseHaystack.includes(query)) return true;
+      if ((tx.notes || '').toLowerCase().includes(query)) return true;
 
       return (tx.items || []).some((item) => {
         const product = productsById.get(item.id);
@@ -674,6 +713,7 @@ export default function Transactions() {
     });
   }, [dateFilteredTransactions, searchTerm, customerPhoneById, productsById]);
   const getDisplayPaymentMethod = (tx: Transaction) => {
+    if (tx.id.startsWith('upfront-')) return 'Advance';
     const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
     if (txType !== 'sale' && txType !== 'historical_reference') return tx.paymentMethod || 'Cash';
     const settlement = getSaleSettlementBreakdown(tx);
@@ -698,7 +738,7 @@ export default function Transactions() {
       if (excelFilterType !== 'all' && tx.type !== excelFilterType) return false;
 
       if (search) {
-        const billNumber = `bill-${tx.id.slice(-6)}`;
+        const billNumber = `bill-${getTransactionReference(tx)}`;
         const phone = tx.customerId ? (customerPhoneById.get(tx.customerId) || '') : '';
         const haystack = `${tx.customerName || ''} ${phone} ${tx.id} ${billNumber}`.toLowerCase();
         if (!haystack.includes(search)) return false;
@@ -754,7 +794,9 @@ export default function Transactions() {
       isReturn,
       isPayment,
       itemCount,
-      typeLabel: isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT',
+      typeLabel: tx.id.startsWith('upfront-')
+        ? 'ADVANCE ORDER'
+        : (isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT'),
       typeVariant: 'outline',
       amountClass: isSale ? 'text-green-700' : isReturn ? 'text-red-700' : 'text-blue-700',
     };
@@ -1312,6 +1354,11 @@ export default function Transactions() {
   }, [filteredTransactions, products]);
 
   const getSaleSettlementText = (tx: Transaction) => {
+    if (tx.id.startsWith('upfront-')) {
+      const order = upfrontOrders.find(o => `upfront-${o.id}` === tx.id);
+      if (!order) return null;
+      return `Total ${formatINRPrecise(order.totalCost)} • Advance ${formatINRPrecise(order.advancePaid)} • Remaining ${formatINRPrecise(order.remainingAmount)}`;
+    }
     const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
     if (txType !== 'sale' && txType !== 'historical_reference') return null;
     const settlement = getSaleSettlementBreakdown(tx);
@@ -1377,7 +1424,7 @@ export default function Transactions() {
     // Table
     const tableBody = filteredTransactions.map(tx => [
         new Date(tx.date).toLocaleDateString(),
-        tx.id.slice(-6),
+        getTransactionReference(tx),
         tx.type.toUpperCase(),
         tx.customerName || 'Walk-in',
         getDisplayPaymentMethod(tx),
@@ -1724,13 +1771,13 @@ export default function Transactions() {
                                               type="checkbox"
                                               checked={selectedTransactionIds.includes(tx.id)}
                                               onChange={() => handleToggleTransactionSelection(tx.id)}
-                                              aria-label={`Select transaction ${tx.id.slice(-6)}`}
+                                              aria-label={`Select transaction ${getTransactionReference(tx)}`}
                                               className="h-4 w-4 rounded border-slate-300"
                                             />
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="font-medium text-foreground">{new Date(tx.date).toLocaleDateString()}</div>
-                                            <div className="text-[10px] font-mono text-muted-foreground">#{tx.id.slice(-6)}</div>
+                                            <div className="text-[10px] font-mono text-muted-foreground">#{getTransactionReference(tx)}</div>
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="flex items-center gap-2">
@@ -1776,8 +1823,8 @@ export default function Transactions() {
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedTx(tx)}><Eye className="w-3.5 h-3.5" /></Button>
-                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>
-                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>
+                                                {!tx.id.startsWith('upfront-') && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
+                                                {!tx.id.startsWith('upfront-') && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>
@@ -1818,7 +1865,7 @@ export default function Transactions() {
                                     <div className={`h-1.5 w-full ${cardBorder}`}></div>
                                     <div className="p-4 space-y-3">
                                         <div className="flex justify-between items-center">
-                                            <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{tx.id.slice(-6)}</Badge>
+                                            <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{getTransactionReference(tx)}</Badge>
                                             <span className="text-[10px] text-muted-foreground font-medium">{new Date(tx.date).toLocaleDateString()}</span>
                                         </div>
                                         
@@ -1868,7 +1915,7 @@ export default function Transactions() {
                                     <div>
                                         <div className="flex items-center gap-2 mb-1">
                                             <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground bg-muted/50 border-transparent px-1.5">
-                                                #{tx.id.slice(-6)}
+                                                #{getTransactionReference(tx)}
                                             </Badge>
                                             <span className="text-xs text-muted-foreground">
                                                 {new Date(tx.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
@@ -1946,7 +1993,7 @@ export default function Transactions() {
                       <div className="flex justify-between items-center">
                           <CardTitle className="text-lg flex items-center gap-2">
                               {selectedTx.type === 'sale' ? 'Sale Receipt' : 'Return Receipt'}
-                              <span className="text-xs font-normal text-muted-foreground font-mono">#{selectedTx.id}</span>
+                              <span className="text-xs font-normal text-muted-foreground font-mono">#{getTransactionReference(selectedTx)}</span>
                           </CardTitle>
                           <div className="flex items-center gap-1">
                               <Button 
