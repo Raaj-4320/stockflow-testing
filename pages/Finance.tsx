@@ -507,7 +507,7 @@ const buildShiftCashMovementBreakdown = (
   supplierPayments.forEach((p) => {
     const at = new Date(p.paidAt).getTime();
     if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || p.method !== 'cash') return;
-    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
+    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.voucherNo || p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
   });
   const legacySupplierMap = new Map<string, { date: string; party: string; note: string; amount: number }>();
   (state.purchaseOrders || []).forEach((o) => (o.paymentHistory || []).forEach((ph: any) => {
