@@ -1011,6 +1011,46 @@ export default function FreightBooking() {
                     </div>
                   </div>
                 </div>
+                {isExistingProductPickerOpen && (
+                  <div className="rounded-2xl border border-slate-300 bg-white p-4 shadow-sm">
+                    <div className="mb-3 flex items-center justify-between">
+                      <div className="text-sm font-semibold text-slate-900">{existingPickerMode === 'products' ? 'Select Existing Product' : `Select Variant · ${pickerProductForVariant?.name || ''}`}</div>
+                      <div className="flex gap-2">
+                        {existingPickerMode === 'variants' && <Button type="button" variant="outline" size="sm" onClick={() => setExistingPickerMode('products')}>Back</Button>}
+                        <Button type="button" variant="outline" size="sm" onClick={() => { setIsExistingProductPickerOpen(false); setExistingPickerMode('products'); setPickerProductForVariant(null); }}>Close</Button>
+                      </div>
+                    </div>
+                    {existingPickerMode === 'products' ? (
+                      <div>
+                        <div className="mb-3 relative w-full md:max-w-md"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products..." className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 outline-none focus:border-slate-400" /></div>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          {filteredProducts.map(product => (
+                            <div key={product.id} className="rounded-2xl border border-slate-200 p-3">
+                              <div className="flex items-center gap-3">
+                                <img src={product.image || ''} alt={product.name} className="h-12 w-12 rounded object-cover" />
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-sm font-semibold">{product.name}</div>
+                                  <div className="text-xs text-slate-500">{product.category || 'Uncategorized'} • Stock {product.stock}</div>
+                                </div>
+                                <Button type="button" size="sm" onClick={() => { if (hasMeaningfulVariants(product)) { setPickerProductForVariant(product); setExistingPickerMode('variants'); } else { applyExistingProductSelection(product); } }}>+ Add</Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {filteredProducts.length === 0 && <div className="rounded-xl border border-dashed p-4 text-sm text-slate-500">No products found.</div>}
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {(pickerProductForVariant ? getProductStockRows(pickerProductForVariant).filter((r) => isMeaningfulValue(r.variant) || isMeaningfulValue(r.color)) : []).map((variant, idx) => (
+                          <div key={`${variant.variant}-${variant.color}-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-200 p-3">
+                            <div className="text-sm">{formatFreightProductDisplayName(pickerProductForVariant?.name, variant.variant, variant.color)} <span className="text-xs text-slate-500">• Stock {variant.stock}</span></div>
+                            <Button type="button" size="sm" onClick={() => pickerProductForVariant && applyExistingProductSelection(pickerProductForVariant, { variant: variant.variant, color: variant.color })}>+ Add</Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={resetWizard}>Reset</Button><button onClick={() => { const errs:string[]=[]; if (!costingDate) errs.push('Date is required.'); if (!newProductName.trim()) errs.push('Item is required.'); if (!brokerId) errs.push('Party is required.'); if (costingMetrics.pcsPerCtn <= 0) errs.push('Pcs/CTN must be greater than 0.'); if (costingMetrics.cartons <= 0) errs.push('Carton must be greater than 0.'); if (costingMetrics.totalPcs <= 0) errs.push('Total Pcs must be greater than 0.'); if (costingMetrics.rmbPerPcs < 0) errs.push('RMB/Pcs must be >= 0.'); if (costingMetrics.inrRate < 0) errs.push('INR Rate must be >= 0.'); if (costingMetrics.cbmPerCtn < 0) errs.push('CBM/CTN must be >= 0.'); if (costingMetrics.cbmRate < 0) errs.push('CBM Rate must be >= 0.'); if (costingMetrics.sellingPrice < 0) errs.push('Selling Price must be >= 0.'); setCostingErrors(errs); if (errs.length) return; setWizardStep('review'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Continue to Review <ArrowRight className="h-4 w-4" /></button></div>{costingErrors.length>0 && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{costingErrors.map(err => <div key={err}>• {err}</div>)}</div>}
