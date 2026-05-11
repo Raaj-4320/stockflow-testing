@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, convertConfirmedOrderToPurchase, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, getFreightPurchases, loadData, receiveFreightPurchaseIntoInventory, updateFreightInquiry } from '../services/storage';
+import { addCategory, convertConfirmedOrderToPurchase, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, getFreightPurchases, loadData, receiveFreightPurchaseIntoInventory, updateFreightInquiry, uploadImageFileToCloudinary } from '../services/storage';
 import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
@@ -105,8 +105,8 @@ export default function FreightBooking() {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingInquiry, setEditingInquiry] = useState<FreightInquiry | null>(null);
-  const [wizardStep, setWizardStep] = useState<WizardStep>('source');
-  const [sourceMode, setSourceMode] = useState<SourceMode>('inventory');
+  const [wizardStep, setWizardStep] = useState<WizardStep>('newInquiry');
+  const [sourceMode, setSourceMode] = useState<SourceMode>('new');
 
   const [productSearch, setProductSearch] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -117,8 +117,8 @@ export default function FreightBooking() {
   const [newCategoryError, setNewCategoryError] = useState('');
   const [newProductImage, setNewProductImage] = useState('');
   const [newProductDetails, setNewProductDetails] = useState('');
-  const [newInquiryTab, setNewInquiryTab] = useState<NewInquiryTab>('classic');
-  const [showProductPicker, setShowProductPicker] = useState(false);
+  const [newInquiryTab, setNewInquiryTab] = useState<NewInquiryTab>('costing');
+  const [newProductImageFile, setNewProductImageFile] = useState<File | null>(null);
   const [costingDate, setCostingDate] = useState(new Date().toISOString().slice(0, 10));
 
   const [orderType, setOrderType] = useState<'in_house' | 'customer_trade'>('in_house');
@@ -374,8 +374,8 @@ export default function FreightBooking() {
 
   const resetWizard = () => {
     setEditingInquiry(null);
-    setWizardStep('source');
-    setSourceMode('inventory');
+    setWizardStep('newInquiry');
+    setSourceMode('new');
     setProductSearch('');
     setSelectedProduct(null);
     setSelectedVariantKeys([]);
@@ -384,8 +384,8 @@ export default function FreightBooking() {
     setNewCategoryError('');
     setNewProductImage('');
     setNewProductDetails('');
-    setNewInquiryTab('classic');
-    setShowProductPicker(false);
+    setNewInquiryTab('costing');
+    setNewProductImageFile(null);
     setCostingDate(new Date().toISOString().slice(0, 10));
     setOrderType('in_house');
     setBrokerId('');
@@ -604,12 +604,8 @@ export default function FreightBooking() {
   const handleNewProductImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      setNewProductImage(result);
-    };
-    reader.readAsDataURL(file);
+    setNewProductImage(URL.createObjectURL(file));
+    setNewProductImageFile(file);
   };
 
   const ensureCategory = async (name: string) => {
@@ -621,6 +617,15 @@ export default function FreightBooking() {
   };
 
   const saveInquiry = async (status: 'draft' | 'saved') => {
+    let uploadedImageUrl = newProductImage;
+    if (sourceMode === 'new' && newProductImageFile) {
+      try {
+        uploadedImageUrl = await uploadImageFileToCloudinary(newProductImageFile);
+      } catch (error) {
+        alert('Image upload failed. Please try again or remove the image.');
+        throw error;
+      }
+    }
     const cartonMap = new Map(draftCartons.map(c => [c.id, c.label]));
     const lines: ProcurementLineSnapshot[] = effectiveDistributedLines.map((line, idx) => {
       const totalInr = line.totalInr;
@@ -645,7 +650,7 @@ export default function FreightBooking() {
         id: `${line.key}-${idx}-${uid()}`,
         sourceType: sourceMode,
         sourceProductId: selectedProduct?.id || undefined,
-        productPhoto: sourceMode === 'inventory' ? (selectedProduct?.image || '') : newProductImage,
+        productPhoto: sourceMode === 'inventory' ? (selectedProduct?.image || '') : uploadedImageUrl,
         productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName,
         variant: line.variant,
         color: line.color,
@@ -690,7 +695,7 @@ export default function FreightBooking() {
       source: sourceMode,
       sourceProductId: selectedProduct?.id || undefined,
       inventoryProductId: sourceMode === 'inventory' ? selectedProduct?.id : undefined,
-      productPhoto: sourceMode === 'inventory' ? selectedProduct?.image : newProductImage,
+      productPhoto: sourceMode === 'inventory' ? selectedProduct?.image : uploadedImageUrl,
       productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName,
       variant: lines.length === 1 ? lines[0].variant : undefined,
       color: lines.length === 1 ? lines[0].color : undefined,
@@ -880,12 +885,7 @@ export default function FreightBooking() {
         onClose={() => { setIsModalOpen(false); resetWizard(); }}
         title={wizardStep === 'source' ? 'Create Inquiry' : wizardStep === 'product' ? 'Step 1 · Select Product' : wizardStep === 'variants' ? 'Step 2 · Select Variants' : wizardStep === 'pricing' ? 'Step 3 · Enter Pricing' : wizardStep === 'cartons' ? 'Step 4 · Carton Planning' : wizardStep === 'review' ? 'Step 5 · Review & Save' : wizardStep === 'cbm' ? 'Step 6 · CBM Setup' : 'Create New Product'}
       >
-        {wizardStep === 'source' && (
-          <div className="grid gap-4 md:grid-cols-2">
-            <button onClick={() => { setSourceMode('inventory'); setWizardStep('product'); }} className="rounded-3xl border border-slate-200 p-5 text-left transition hover:border-slate-300 hover:bg-slate-50"><div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100"><Package className="h-6 w-6 text-slate-700" /></div><div className="text-base font-semibold text-slate-900">Use Existing Product</div><div className="mt-1 text-sm text-slate-500">Select from inventory products already available in the system.</div></button>
-            <button onClick={() => { setSourceMode('new'); setWizardStep('newInquiry'); }} className="rounded-3xl border border-slate-200 p-5 text-left transition hover:border-slate-300 hover:bg-slate-50"><div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100"><Plus className="h-6 w-6 text-slate-700" /></div><div className="text-base font-semibold text-slate-900">Create New Product Inquiry</div><div className="mt-1 text-sm text-slate-500">Capture a new product inquiry dynamically and continue with the same flow.</div></button>
-          </div>
-        )}
+        
 
         {wizardStep === 'product' && (
           <div>
@@ -904,37 +904,16 @@ export default function FreightBooking() {
 
         {wizardStep === 'newInquiry' && (
           <div>
-            <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="mb-4 flex gap-2 border-b pb-2">
-              <Button size="sm" variant={newInquiryTab === 'classic' ? 'default' : 'outline'} onClick={() => setNewInquiryTab('classic')}>Classic Inquiry</Button>
-              <Button size="sm" variant={newInquiryTab === 'costing' ? 'default' : 'outline'} onClick={() => setNewInquiryTab('costing')}>Create Inquiry (Costing Sheet)</Button>
-            </div>
-
-            {newInquiryTab === 'classic' ? (
-              <div className="grid gap-4 md:grid-cols-2">
-                <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
-                <div><Label>Date</Label><Input type="date" value={costingDate} onChange={e => setCostingDate(e.target.value)} /></div>
-                <div>
-                  <Label>Category</Label>
-                  <div className="mt-1 flex gap-2">
-                    <Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select or create category" />
-                    <Button type="button" variant="outline" onClick={addCategoryQuick} title="Add category"><Plus className="h-4 w-4" /></Button>
-                  </div>
-                  <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
-                </div>
-                <div><Label>Party</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select Party</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
-                <div><Label>Product Image</Label><Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" /></div>
-                <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>
-                <div className="md:col-span-2"><Label>Additional Product Details</Label><textarea value={newProductDetails} onChange={e => setNewProductDetails(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={4} /></div>
-              </div>
-            ) : (
+            <div>
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-[150px_1fr_1fr_1fr]">
                   <div><Label>Date</Label><Input type="date" value={costingDate} onChange={e => setCostingDate(e.target.value)} /></div>
-                  <div><Label>Item</Label><Button type="button" variant="outline" className="w-full justify-start" onClick={() => setShowProductPicker(true)}>{newProductName || 'Select product'}</Button></div>
+                  <div><Label>Item</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
                   <div><Label>Party</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select Party</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
                   <div className="rounded-xl border bg-slate-50 p-2">{newProductImage ? <img src={newProductImage} alt="Selected" className="h-14 w-14 rounded object-cover" /> : <div className="text-xs text-slate-500">No image</div>}</div>
                 </div>
+                <div className="grid gap-3 md:grid-cols-2"><div><Label>Category</Label><Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select category" /></div><div><Label>Product Image</Label><Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" /></div></div>
+                <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
                 <div className="overflow-auto rounded-2xl border">
                   <table className="min-w-[1350px] w-full text-xs">
                     <thead className="bg-slate-100"><tr>{['Pcs/CTN','Carton','Total Pcs','RMB/Pcs','Total RMB','INR Rate','INR','Rate/Pcs','CBM/CTN','Total CBM','CBM Rate','Total CBM Cost','CBM/Pcs','Product Cost','Total INR','Selling Price','Profit %'].map(h => <th key={h} className="px-2 py-2 text-left">{h}</th>)}</tr></thead>
@@ -960,7 +939,7 @@ export default function FreightBooking() {
                   </table>
                 </div>
               </div>
-            )}
+            </div>
             <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={resetWizard}>Reset</Button><button onClick={() => { const errs:string[]=[]; if (!costingDate) errs.push('Date is required.'); if (!newProductName.trim()) errs.push('Item is required.'); if (!brokerId) errs.push('Party is required.'); if (costingMetrics.pcsPerCtn <= 0) errs.push('Pcs/CTN must be greater than 0.'); if (costingMetrics.cartons <= 0) errs.push('Carton must be greater than 0.'); if (costingMetrics.totalPcs <= 0) errs.push('Total Pcs must be greater than 0.'); if (costingMetrics.rmbPerPcs < 0) errs.push('RMB/Pcs must be >= 0.'); if (costingMetrics.inrRate < 0) errs.push('INR Rate must be >= 0.'); if (costingMetrics.cbmPerCtn < 0) errs.push('CBM/CTN must be >= 0.'); if (costingMetrics.cbmRate < 0) errs.push('CBM Rate must be >= 0.'); if (costingMetrics.sellingPrice < 0) errs.push('Selling Price must be >= 0.'); setCostingErrors(errs); if (errs.length) return; setWizardStep('review'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Continue to Review <ArrowRight className="h-4 w-4" /></button></div>{costingErrors.length>0 && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{costingErrors.map(err => <div key={err}>• {err}</div>)}</div>}
           </div>
         )}
