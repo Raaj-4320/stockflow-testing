@@ -364,7 +364,7 @@ export default function Dashboard() {
     if (!receivingCustomer) return;
     const amount = Number(receiveAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setReceiveError('Enter valid amount greater than zero.');
-    if (amount > receivingCustomer.receivable + 0.0001) return setReceiveError('Amount cannot exceed customer receivable.');
+    if (!receiveMethod || (receiveMethod !== 'Cash' && receiveMethod !== 'Online')) return setReceiveError('Please select a valid payment method.');
 
     const paymentDate = receiveDateTime ? new Date(receiveDateTime) : new Date();
     if (Number.isNaN(paymentDate.getTime())) return setReceiveError('Please select a valid payment date.');
@@ -407,6 +407,12 @@ export default function Dashboard() {
     setPayingParty(null);
     refresh();
   };
+
+  const receiveAmountValue = Number(receiveAmount);
+  const receiveAmountValid = Number.isFinite(receiveAmountValue) && receiveAmountValue > 0;
+  const receiveCurrentDue = Math.max(0, Number(receivingCustomer?.receivable || 0));
+  const receiveExtraToStoreCredit = receiveAmountValid ? Math.max(0, receiveAmountValue - receiveCurrentDue) : 0;
+  const receiveRemainingDueAfterPayment = receiveAmountValid ? Math.max(0, receiveCurrentDue - receiveAmountValue) : receiveCurrentDue;
 
   const downloadCustomerStatementPdf = async () => {
     if (!selectedCustomer || !customerStatement) return;
@@ -608,11 +614,24 @@ export default function Dashboard() {
         {receivingCustomer && (
           <div className="space-y-3">
             <div className="text-sm"><span className="font-medium">Customer:</span> {receivingCustomer.name}</div>
-            <div className="text-sm"><span className="font-medium">Receivable:</span> {formatINRPrecise(receivingCustomer.receivable)}</div>
+            <div className="text-sm"><span className="font-medium">Current Due:</span> {formatINRPrecise(receivingCustomer.receivable)}</div>
             <div>
               <Label>Amount</Label>
               <Input type="number" min="0" step="0.01" value={receiveAmount} onChange={(e) => setReceiveAmount(e.target.value)} />
             </div>
+            {receiveAmountValid && (
+              receiveExtraToStoreCredit > 0 ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  <div className="font-semibold">Extra Store Credit: {formatINRPrecise(receiveExtraToStoreCredit)}</div>
+                  <div>Amount is {formatINRPrecise(receiveExtraToStoreCredit)} more than current due. Extra {formatINRPrecise(receiveExtraToStoreCredit)} will be saved as Store Credit.</div>
+                  <div className="mt-1 text-[11px]">Extra amount will be saved as customer store credit.</div>
+                </div>
+              ) : (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                  Remaining Due After Payment: {formatINRPrecise(receiveRemainingDueAfterPayment)}
+                </div>
+              )
+            )}
             <div>
               <Label>Payment Date</Label>
               <Input type="datetime-local" value={receiveDateTime} onChange={(e) => setReceiveDateTime(e.target.value)} />
@@ -629,7 +648,9 @@ export default function Dashboard() {
               <Input value={receiveNote} onChange={(e) => setReceiveNote(e.target.value)} placeholder="Optional reference" />
             </div>
             {receiveError && <p className="text-xs text-red-600">{receiveError}</p>}
-            <Button className="w-full" onClick={handleReceive}>Receive</Button>
+            <Button className="w-full" onClick={handleReceive}>
+              {receiveExtraToStoreCredit > 0 ? 'Receive & Save Extra as Store Credit' : 'Receive Payment'}
+            </Button>
           </div>
         )}
       </ActionModal>
