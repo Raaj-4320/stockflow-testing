@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { Customer, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerPaymentAllocationForDisplayedReceivable, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { generateAccountStatementPDF } from '../services/pdf';
@@ -192,34 +192,6 @@ export default function Dashboard() {
     let totalStoreCreditUsed = 0;
     let totalStoreCreditAdded = 0;
     const processed: Transaction[] = [];
-    customerTx.forEach(tx => {
-      const txTypeRaw = String((tx as any).type || '').toLowerCase();
-      const txKind: 'sale' | 'payment' | 'return' = txTypeRaw === 'historical_reference' ? 'sale' : (tx.type as any);
-      if (txKind === 'sale') {
-        const settlement = getHistoricalAwareSaleSettlement(tx);
-        const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
-        const dueInc = Math.max(0, settlement.creditDue);
-        runningBalance += dueInc;
-        totalCreditSales += dueInc;
-        totalStoreCreditUsed += storeCreditUsed;
-        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Sale Invoice #${(tx as any).invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
-      } else if (txKind === 'payment') {
-        const amount = Math.max(0, Number(tx.total || 0));
-        const dueReduced = Math.min(runningBalance, amount);
-        const storeCreditAdded = Math.max(0, amount - dueReduced);
-        runningBalance = Math.max(0, runningBalance - dueReduced);
-        totalPayments += amount;
-        totalStoreCreditAdded += storeCreditAdded;
-        rows.push({ id: `payment-${tx.id}`, date: tx.date, type: 'Payment', ref: tx.id.slice(-6), description: `${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}${storeCreditAdded > 0 ? ` • SC added ${formatINRPrecise(storeCreditAdded)}` : ''}`, debit: 0, credit: dueReduced, balance: runningBalance, tone: tx.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
-      } else {
-        const alloc = getCanonicalReturnAllocation(tx, processed, runningBalance);
-        const creditReduction = Math.max(0, alloc.dueReduction);
-        runningBalance = Math.max(0, runningBalance - creditReduction);
-        totalStoreCreditAdded += Math.max(0, alloc.storeCreditIncrease);
-        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Credit Note #${(tx as any).creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
-      }
-      processed.push(tx);
-    });
     buildUpfrontOrderLedgerEffects(upfrontOrders.filter((o) => o.customerId === selectedCustomer.id), [selectedCustomer]).forEach((effect) => {
       if (effect.type === 'legacy_custom_order_info') return;
       if (effect.type === 'custom_order_receivable') {
@@ -233,10 +205,44 @@ export default function Dashboard() {
         rows.push({ id: effect.id, date: effect.date, type: 'Order Payment', ref: (effect.paymentId || effect.orderId).slice(-6), description: `Custom Order Payment — ${effect.productName} — ${effect.paymentMethod}`, debit: 0, credit, balance: runningBalance, tone: effect.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
       }
     });
+    customerTx.forEach(tx => {
+      const txTypeRaw = String((tx as any).type || '').toLowerCase();
+      const txKind: 'sale' | 'payment' | 'return' = txTypeRaw === 'historical_reference' ? 'sale' : (tx.type as any);
+      if (txKind === 'sale') {
+        const settlement = getHistoricalAwareSaleSettlement(tx);
+        const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+        const dueInc = Math.max(0, settlement.creditDue);
+        runningBalance += dueInc;
+        totalCreditSales += dueInc;
+        totalStoreCreditUsed += storeCreditUsed;
+        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Sale Invoice #${(tx as any).invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
+      } else if (txKind === 'payment') {
+        const amount = Math.max(0, Number(tx.total || 0));
+        const explicitApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || 0));
+        const explicitStoreCredit = Math.max(0, Number((tx as any).storeCreditCreated || 0));
+        const dueReduced = explicitApplied > 0 ? Math.min(amount, explicitApplied) : Math.min(runningBalance, amount);
+        const storeCreditAdded = explicitApplied > 0 || explicitStoreCredit > 0
+          ? Math.max(0, explicitStoreCredit || (amount - dueReduced))
+          : Math.max(0, amount - dueReduced);
+        runningBalance = Math.max(0, runningBalance - dueReduced);
+        totalPayments += amount;
+        totalStoreCreditAdded += storeCreditAdded;
+        rows.push({ id: `payment-${tx.id}`, date: tx.date, type: 'Payment', ref: tx.id.slice(-6), description: `${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}${storeCreditAdded > 0 ? ` • SC added ${formatINRPrecise(storeCreditAdded)}` : ''}`, debit: 0, credit: dueReduced, balance: runningBalance, tone: tx.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
+      } else {
+        const alloc = getCanonicalReturnAllocation(tx, processed, runningBalance);
+        const creditReduction = Math.max(0, alloc.dueReduction);
+        runningBalance = Math.max(0, runningBalance - creditReduction);
+        totalStoreCreditAdded += Math.max(0, alloc.storeCreditIncrease);
+        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Credit Note #${(tx as any).creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
+      }
+      processed.push(tx);
+    });
+    const customDue = Math.max(0, Number(customReceivableByCustomer.get(selectedCustomer.id) || 0));
     const canonicalDue = Math.max(0, Number(canonicalSnapshot.balances.get(selectedCustomer.id)?.totalDue || 0));
+    const balanceDue = Math.max(0, canonicalDue + customDue);
     const displayRows = [...rows].reverse();
-    return { rows, displayRows, totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue: canonicalDue };
-  }, [selectedCustomer, transactions, canonicalSnapshot]);
+    return { rows, displayRows, totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue };
+  }, [selectedCustomer, transactions, canonicalSnapshot, upfrontOrders, customReceivableByCustomer]);
 
   const partyStatement = useMemo(() => {
     if (!selectedParty) return null;
@@ -380,6 +386,9 @@ export default function Dashboard() {
       paymentMethod: receiveMethod,
       notes: receiveNote.trim() || 'Dashboard receive',
     };
+    const allocation = getCustomerPaymentAllocationForDisplayedReceivable({ paymentAmount: amount, displayedReceivable: receiveCurrentDue });
+    (tx as any).paymentAppliedToReceivable = allocation.paymentAppliedToReceivable;
+    (tx as any).storeCreditCreated = allocation.storeCreditCreated;
     processTransaction(tx);
     setReceivingCustomer(null);
     refresh();
