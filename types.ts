@@ -74,6 +74,9 @@ export interface Transaction {
   total: number;
   storeCreditUsed?: number;
   storeCreditCreated?: number;
+  paymentAppliedToReceivable?: number;
+  paymentAppliedToCanonicalReceivable?: number;
+  paymentAppliedToCustomOrderReceivable?: number;
   cashReceived?: number;
   changeReturned?: number;
   returnHandlingMode?: 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
