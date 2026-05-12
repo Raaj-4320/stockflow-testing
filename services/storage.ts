@@ -312,6 +312,59 @@ export const clampCreditDueAmount = (value: number) => {
   if (rounded > 0 && rounded < MICRO_CREDIT_DUE_THRESHOLD) return 0;
   return rounded;
 };
+
+export const getCustomerCustomOrderPaymentApplications = (customerId: string, transactions: Transaction[]) => (
+  transactions
+    .filter((tx) => tx.type === 'payment' && tx.customerId === customerId)
+    .reduce((sum, tx) => sum + Math.max(0, toFiniteNumber((tx as any).paymentAppliedToCustomOrderReceivable, 0)), 0)
+);
+
+export const getCustomerCompositeReceivableBreakdown = (
+  customerId: string,
+  customers: Customer[],
+  transactions: Transaction[],
+  upfrontOrders: UpfrontOrder[],
+) => {
+  const snapshot = getCanonicalCustomerBalanceSnapshot(customers, transactions);
+  const canonicalDue = Math.max(0, Number(snapshot.balances.get(customerId)?.totalDue || 0));
+  const storeCredit = Math.max(0, Number(snapshot.balances.get(customerId)?.storeCredit || 0));
+  const customOrderDueFromUpfrontEffects = buildUpfrontOrderLedgerEffects(
+    upfrontOrders.filter((o) => o.customerId === customerId),
+    customers.filter((c) => c.id === customerId),
+  ).reduce((sum, effect) => {
+    if (effect.type === 'legacy_custom_order_info') return sum;
+    return sum + Math.max(0, Number(effect.receivableIncrease || 0)) - Math.max(0, Number(effect.receivableDecrease || 0));
+  }, 0);
+  const externalCustomOrderPaymentApplications = getCustomerCustomOrderPaymentApplications(customerId, transactions);
+  const customOrderDue = Math.max(0, roundCurrency(customOrderDueFromUpfrontEffects - externalCustomOrderPaymentApplications));
+  const totalDue = Math.max(0, roundCurrency(canonicalDue + customOrderDue));
+  return { canonicalDue, customOrderDue, totalDue, storeCredit };
+};
+
+export const allocateCustomerPaymentAgainstCompositeReceivable = ({
+  paymentAmount,
+  canonicalDue,
+  customOrderDue,
+}: {
+  paymentAmount: number;
+  canonicalDue: number;
+  customOrderDue: number;
+}) => {
+  const safePayment = Math.max(0, toFiniteNumber(paymentAmount, 0));
+  const safeCanonicalDue = Math.max(0, toFiniteNumber(canonicalDue, 0));
+  const safeCustomOrderDue = Math.max(0, toFiniteNumber(customOrderDue, 0));
+  const appliedToCanonicalReceivable = Math.min(safePayment, safeCanonicalDue);
+  const afterCanonical = Math.max(0, safePayment - appliedToCanonicalReceivable);
+  const appliedToCustomOrderReceivable = Math.min(afterCanonical, safeCustomOrderDue);
+  const paymentAppliedToReceivable = roundCurrency(appliedToCanonicalReceivable + appliedToCustomOrderReceivable);
+  const storeCreditCreated = roundCurrency(Math.max(0, safePayment - paymentAppliedToReceivable));
+  return {
+    appliedToCanonicalReceivable: roundCurrency(appliedToCanonicalReceivable),
+    appliedToCustomOrderReceivable: roundCurrency(appliedToCustomOrderReceivable),
+    paymentAppliedToReceivable,
+    storeCreditCreated,
+  };
+};
 const toWholeMoney = (value: number) => roundMoneyWhole(toFiniteNumber(value, 0));
 const getWholePayableAfterStoreCredit = (transaction: Transaction) =>
   Math.max(0, toWholeMoney(Math.abs(toFiniteNumber(transaction.total, 0)) - getRequestedStoreCreditUsed(transaction)));
@@ -673,9 +726,11 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
       } else if (tx.type === 'payment') {
         activePaymentsTotal += amount;
-        const paymentToDue = Math.min(runningDue, amount);
-        runningDue = roundCurrency(runningDue - paymentToDue);
-        const paymentRemainder = roundCurrency(Math.max(0, amount - paymentToDue));
+        const explicitApplied = Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0));
+        const explicitStoreCredit = Math.max(0, toFiniteNumber((tx as any).storeCreditCreated, 0));
+        const paymentToDue = explicitApplied > 0 ? Math.min(amount, explicitApplied) : Math.min(runningDue, amount);
+        runningDue = roundCurrency(Math.max(0, runningDue - paymentToDue));
+        const paymentRemainder = roundCurrency(explicitApplied > 0 || explicitStoreCredit > 0 ? Math.max(0, explicitStoreCredit || (amount - paymentToDue)) : Math.max(0, amount - paymentToDue));
         if (paymentRemainder > 0) runningStoreCredit = roundCurrency(runningStoreCredit + paymentRemainder);
       } else if (tx.type === 'return') {
         activeReturnsTotal += amount;
