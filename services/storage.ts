@@ -673,9 +673,11 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
       } else if (tx.type === 'payment') {
         activePaymentsTotal += amount;
-        const paymentToDue = Math.min(runningDue, amount);
-        runningDue = roundCurrency(runningDue - paymentToDue);
-        const paymentRemainder = roundCurrency(Math.max(0, amount - paymentToDue));
+        const explicitApplied = Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0));
+        const explicitStoreCredit = Math.max(0, toFiniteNumber((tx as any).storeCreditCreated, 0));
+        const paymentToDue = explicitApplied > 0 ? Math.min(amount, explicitApplied) : Math.min(runningDue, amount);
+        runningDue = roundCurrency(Math.max(0, runningDue - paymentToDue));
+        const paymentRemainder = roundCurrency(explicitApplied > 0 || explicitStoreCredit > 0 ? Math.max(0, explicitStoreCredit || (amount - paymentToDue)) : Math.max(0, amount - paymentToDue));
         if (paymentRemainder > 0) runningStoreCredit = roundCurrency(runningStoreCredit + paymentRemainder);
       } else if (tx.type === 'return') {
         activeReturnsTotal += amount;
