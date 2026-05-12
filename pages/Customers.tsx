@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerPaymentAllocationForDisplayedReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -1585,8 +1585,13 @@ const buildCustomerLedgerRows = (transactions: Transaction[], upfrontEffects: Ar
       statementDescription = `Sale Invoice #${tx.invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} (Total ${formatINRPrecise(amount)}, Paid ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)}, Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? `, Used SC ${formatINRPrecise(storeCreditUsed)}` : ''})`;
       listDescription = `${getTransactionProductSummary(tx)} • Sale ${formatINRPrecise(amount)} • Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? ` • Used SC ${formatINRPrecise(storeCreditUsed)}` : ''}`;
     } else if (txKind === 'payment') {
-      const dueReduced = Math.min(runningDue, amount);
-      const storeCreditAdded = Math.max(0, amount - dueReduced);
+      const explicitApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || 0));
+      const explicitStoreCredit = Math.max(0, Number((tx as any).storeCreditCreated || 0));
+      const alloc = explicitApplied > 0 || explicitStoreCredit > 0
+        ? { paymentAppliedToReceivable: Math.min(amount, explicitApplied), storeCreditCreated: Math.max(0, explicitStoreCredit || (amount - Math.min(amount, explicitApplied))) }
+        : getCustomerPaymentAllocationForDisplayedReceivable({ paymentAmount: amount, displayedReceivable: runningDue });
+      const dueReduced = alloc.paymentAppliedToReceivable;
+      const storeCreditAdded = alloc.storeCreditCreated;
       runningDue = Math.max(0, runningDue - dueReduced);
       runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
       paymentAmount = amount;
