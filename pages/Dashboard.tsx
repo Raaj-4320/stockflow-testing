@@ -192,6 +192,19 @@ export default function Dashboard() {
     let totalStoreCreditUsed = 0;
     let totalStoreCreditAdded = 0;
     const processed: Transaction[] = [];
+    buildUpfrontOrderLedgerEffects(upfrontOrders.filter((o) => o.customerId === selectedCustomer.id), [selectedCustomer]).forEach((effect) => {
+      if (effect.type === 'legacy_custom_order_info') return;
+      if (effect.type === 'custom_order_receivable') {
+        runningBalance += Math.max(0, effect.receivableIncrease);
+        totalCreditSales += Math.max(0, effect.receivableIncrease);
+        rows.push({ id: effect.id, date: effect.date, type: 'Custom Order', ref: effect.orderId.slice(-6), description: `Custom Order — ${effect.productName}`, debit: Math.max(0, effect.receivableIncrease), credit: 0, balance: runningBalance, tone: 'due' });
+      } else {
+        const credit = Math.max(0, effect.receivableDecrease);
+        runningBalance = Math.max(0, runningBalance - credit);
+        totalPayments += credit;
+        rows.push({ id: effect.id, date: effect.date, type: 'Order Payment', ref: (effect.paymentId || effect.orderId).slice(-6), description: `Custom Order Payment — ${effect.productName} — ${effect.paymentMethod}`, debit: 0, credit, balance: runningBalance, tone: effect.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
+      }
+    });
     customerTx.forEach(tx => {
       const txTypeRaw = String((tx as any).type || '').toLowerCase();
       const txKind: 'sale' | 'payment' | 'return' = txTypeRaw === 'historical_reference' ? 'sale' : (tx.type as any);
@@ -205,8 +218,12 @@ export default function Dashboard() {
         rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Sale Invoice #${(tx as any).invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
       } else if (txKind === 'payment') {
         const amount = Math.max(0, Number(tx.total || 0));
-        const dueReduced = Math.min(runningBalance, amount);
-        const storeCreditAdded = Math.max(0, amount - dueReduced);
+        const explicitApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || 0));
+        const explicitStoreCredit = Math.max(0, Number((tx as any).storeCreditCreated || 0));
+        const dueReduced = explicitApplied > 0 ? Math.min(amount, explicitApplied) : Math.min(runningBalance, amount);
+        const storeCreditAdded = explicitApplied > 0 || explicitStoreCredit > 0
+          ? Math.max(0, explicitStoreCredit || (amount - dueReduced))
+          : Math.max(0, amount - dueReduced);
         runningBalance = Math.max(0, runningBalance - dueReduced);
         totalPayments += amount;
         totalStoreCreditAdded += storeCreditAdded;
@@ -219,19 +236,6 @@ export default function Dashboard() {
         rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Credit Note #${(tx as any).creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
       }
       processed.push(tx);
-    });
-    buildUpfrontOrderLedgerEffects(upfrontOrders.filter((o) => o.customerId === selectedCustomer.id), [selectedCustomer]).forEach((effect) => {
-      if (effect.type === 'legacy_custom_order_info') return;
-      if (effect.type === 'custom_order_receivable') {
-        runningBalance += Math.max(0, effect.receivableIncrease);
-        totalCreditSales += Math.max(0, effect.receivableIncrease);
-        rows.push({ id: effect.id, date: effect.date, type: 'Custom Order', ref: effect.orderId.slice(-6), description: `Custom Order — ${effect.productName}`, debit: Math.max(0, effect.receivableIncrease), credit: 0, balance: runningBalance, tone: 'due' });
-      } else {
-        const credit = Math.max(0, effect.receivableDecrease);
-        runningBalance = Math.max(0, runningBalance - credit);
-        totalPayments += credit;
-        rows.push({ id: effect.id, date: effect.date, type: 'Order Payment', ref: (effect.paymentId || effect.orderId).slice(-6), description: `Custom Order Payment — ${effect.productName} — ${effect.paymentMethod}`, debit: 0, credit, balance: runningBalance, tone: effect.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
-      }
     });
     const canonicalDue = Math.max(0, Number(canonicalSnapshot.balances.get(selectedCustomer.id)?.totalDue || 0));
     const displayRows = [...rows].reverse();
@@ -364,7 +368,7 @@ export default function Dashboard() {
     if (!receivingCustomer) return;
     const amount = Number(receiveAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setReceiveError('Enter valid amount greater than zero.');
-    if (amount > receivingCustomer.receivable + 0.0001) return setReceiveError('Amount cannot exceed customer receivable.');
+    if (!receiveMethod || (receiveMethod !== 'Cash' && receiveMethod !== 'Online')) return setReceiveError('Please select a valid payment method.');
 
     const paymentDate = receiveDateTime ? new Date(receiveDateTime) : new Date();
     if (Number.isNaN(paymentDate.getTime())) return setReceiveError('Please select a valid payment date.');
@@ -380,6 +384,8 @@ export default function Dashboard() {
       paymentMethod: receiveMethod,
       notes: receiveNote.trim() || 'Dashboard receive',
     };
+    (tx as any).paymentAppliedToReceivable = Math.min(amount, receiveCurrentDue);
+    (tx as any).storeCreditCreated = Math.max(0, amount - Math.min(amount, receiveCurrentDue));
     processTransaction(tx);
     setReceivingCustomer(null);
     refresh();
@@ -407,6 +413,12 @@ export default function Dashboard() {
     setPayingParty(null);
     refresh();
   };
+
+  const receiveAmountValue = Number(receiveAmount);
+  const receiveAmountValid = Number.isFinite(receiveAmountValue) && receiveAmountValue > 0;
+  const receiveCurrentDue = Math.max(0, Number(receivingCustomer?.receivable || 0));
+  const receiveExtraToStoreCredit = receiveAmountValid ? Math.max(0, receiveAmountValue - receiveCurrentDue) : 0;
+  const receiveRemainingDueAfterPayment = receiveAmountValid ? Math.max(0, receiveCurrentDue - receiveAmountValue) : receiveCurrentDue;
 
   const downloadCustomerStatementPdf = async () => {
     if (!selectedCustomer || !customerStatement) return;
@@ -608,11 +620,24 @@ export default function Dashboard() {
         {receivingCustomer && (
           <div className="space-y-3">
             <div className="text-sm"><span className="font-medium">Customer:</span> {receivingCustomer.name}</div>
-            <div className="text-sm"><span className="font-medium">Receivable:</span> {formatINRPrecise(receivingCustomer.receivable)}</div>
+            <div className="text-sm"><span className="font-medium">Current Due:</span> {formatINRPrecise(receivingCustomer.receivable)}</div>
             <div>
               <Label>Amount</Label>
               <Input type="number" min="0" step="0.01" value={receiveAmount} onChange={(e) => setReceiveAmount(e.target.value)} />
             </div>
+            {receiveAmountValid && (
+              receiveExtraToStoreCredit > 0 ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  <div className="font-semibold">Extra Store Credit: {formatINRPrecise(receiveExtraToStoreCredit)}</div>
+                  <div>Amount is {formatINRPrecise(receiveExtraToStoreCredit)} more than current due. Extra {formatINRPrecise(receiveExtraToStoreCredit)} will be saved as Store Credit.</div>
+                  <div className="mt-1 text-[11px]">Extra amount will be saved as customer store credit.</div>
+                </div>
+              ) : (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                  Remaining Due After Payment: {formatINRPrecise(receiveRemainingDueAfterPayment)}
+                </div>
+              )
+            )}
             <div>
               <Label>Payment Date</Label>
               <Input type="datetime-local" value={receiveDateTime} onChange={(e) => setReceiveDateTime(e.target.value)} />
@@ -629,7 +654,9 @@ export default function Dashboard() {
               <Input value={receiveNote} onChange={(e) => setReceiveNote(e.target.value)} placeholder="Optional reference" />
             </div>
             {receiveError && <p className="text-xs text-red-600">{receiveError}</p>}
-            <Button className="w-full" onClick={handleReceive}>Receive</Button>
+            <Button className="w-full" onClick={handleReceive}>
+              {receiveExtraToStoreCredit > 0 ? 'Receive & Save Extra as Store Credit' : 'Receive Payment'}
+            </Button>
           </div>
         )}
       </ActionModal>
