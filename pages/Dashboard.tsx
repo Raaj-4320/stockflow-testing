@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
-import { Customer, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
+import { CashAdjustment, Customer, DeleteCompensationRecord, Expense, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
 import { allocateCustomerPaymentAgainstCompositeReceivable, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
@@ -90,6 +90,10 @@ export default function Dashboard() {
   const [supplierPayments, setSupplierPayments] = useState<SupplierPaymentLedgerEntry[]>([]);
   const [partyCreditLedger, setPartyCreditLedger] = useState<PartyCreditLedgerEntry[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [cashAdjustments, setCashAdjustments] = useState<CashAdjustment[]>([]);
+  const [deleteCompensations, setDeleteCompensations] = useState<DeleteCompensationRecord[]>([]);
+  const [cashSessions, setCashSessions] = useState<any[]>([]);
 
   const [receivingCustomer, setReceivingCustomer] = useState<CustomerReceivableRow | null>(null);
   const [receiveAmount, setReceiveAmount] = useState('');
@@ -121,6 +125,10 @@ export default function Dashboard() {
     setSupplierPayments(data.supplierPayments || []);
     setPartyCreditLedger(data.partyCreditLedger || []);
     setUpfrontOrders(data.upfrontOrders || []);
+    setExpenses(data.expenses || []);
+    setCashAdjustments(data.cashAdjustments || []);
+    setDeleteCompensations(data.deleteCompensations || []);
+    setCashSessions(data.cashSessions || []);
   };
 
   useEffect(() => {
@@ -215,6 +223,28 @@ export default function Dashboard() {
   const payAmountValid = Number.isFinite(payAmountValue) && payAmountValue > 0;
   const payCurrentPayable = Math.max(0, Number(payingParty?.payable || 0));
   const payExtraToPartyCredit = payAmountValid ? Math.max(0, payAmountValue - payCurrentPayable) : 0;
+  const openCashSession = useMemo(() => (cashSessions || []).find((session: any) => session?.status === 'open' && !session?.deletedAt), [cashSessions]);
+  const availableDrawerCash = useMemo(() => {
+    if (!openCashSession?.startTime) return null;
+    const start = new Date(openCashSession.startTime).getTime();
+    if (!Number.isFinite(start)) return null;
+    const inWindow = (iso: string) => {
+      const at = new Date(iso).getTime();
+      return Number.isFinite(at) && at >= start;
+    };
+    const cashSales = transactions.filter((tx) => inWindow(tx.date) && tx.type === 'sale').reduce((sum, tx) => sum + Math.max(0, Number(getSaleSettlementBreakdown(tx).cashPaid || 0)), 0);
+    const cashCollections = transactions.filter((tx) => inWindow(tx.date) && tx.type === 'payment' && tx.paymentMethod === 'Cash').reduce((sum, tx) => sum + Math.max(0, Math.abs(Number(tx.total || 0))), 0);
+    const cashRefunds = transactions.filter((tx) => inWindow(tx.date) && tx.type === 'return' && tx.paymentMethod === 'Cash').reduce((sum, tx) => sum + Math.max(0, Math.abs(Number(tx.total || 0))), 0);
+    const expenseCash = expenses.filter((e) => inWindow(e.createdAt)).reduce((sum, e) => sum + Math.max(0, Number(e.amount || 0)), 0);
+    const deleteCompCash = deleteCompensations.filter((d) => inWindow(d.createdAt)).reduce((sum, d) => sum + Math.max(0, Number(d.amount || 0)), 0);
+    const supplierCash = supplierPayments.filter((p) => !p.deletedAt && (p.method || 'cash') === 'cash' && inWindow(p.paidAt || p.createdAt)).reduce((sum, p) => sum + Math.max(0, Number(p.amount || 0)), 0);
+    const cashAdded = cashAdjustments.filter((a) => inWindow(a.createdAt) && a.type === 'cash_addition').reduce((sum, a) => sum + Math.max(0, Number(a.amount || 0)), 0);
+    const cashWithdrawn = cashAdjustments.filter((a) => inWindow(a.createdAt) && a.type === 'cash_withdrawal').reduce((sum, a) => sum + Math.max(0, Number(a.amount || 0)), 0);
+    const customOrderCash = buildUpfrontOrderLedgerEffects(upfrontOrders).filter((effect) => effect.type === 'custom_order_payment' && effect.isLegacyInfoOnly !== true && inWindow(effect.date)).reduce((sum, effect) => sum + Math.max(0, Number(effect.cashIn || 0)), 0);
+    return Number(openCashSession.openingBalance || 0) + cashSales + cashCollections + customOrderCash + cashAdded - cashWithdrawn - cashRefunds - deleteCompCash - expenseCash - supplierCash;
+  }, [openCashSession, transactions, expenses, deleteCompensations, supplierPayments, cashAdjustments, upfrontOrders]);
+  const cashOverdrawAmount = payMethod === 'cash' && payAmountValid && availableDrawerCash !== null ? Math.max(0, payAmountValue - Math.max(0, availableDrawerCash)) : 0;
+  const isCashOverdraw = payMethod === 'cash' && cashOverdrawAmount > 0;
 
   
 const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
@@ -473,6 +503,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     if (!payingParty) return;
     const amount = Number(payAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setPayError('Enter valid amount greater than zero.');
+    if (payMethod === 'cash' && availableDrawerCash !== null && amount > Math.max(0, availableDrawerCash)) {
+      return setPayError(`Cash payment exceeds available drawer cash by ${formatINRPrecise(amount - Math.max(0, availableDrawerCash))}.`);
+    }
     const paymentDate = payDateTime ? new Date(payDateTime) : new Date();
     if (Number.isNaN(paymentDate.getTime())) return setPayError('Please select a valid payment date.');
 
@@ -784,12 +817,24 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
                 <option value="online">Online</option>
               </Select>
             </div>
+            {payMethod === 'cash' && (
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                {availableDrawerCash === null
+                  ? 'No active cash shift found. Cash availability guard is not active.'
+                  : `Available drawer cash: ${formatINRPrecise(Math.max(0, availableDrawerCash))}`}
+              </div>
+            )}
+            {isCashOverdraw && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                Cash payment exceeds available drawer cash by {formatINRPrecise(cashOverdrawAmount)}. Add cash to drawer or edit opening balance before paying.
+              </div>
+            )}
             <div>
               <Label>Note</Label>
               <Input value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="Optional reference" />
             </div>
             {payError && <p className="text-xs text-red-600">{payError}</p>}
-            <Button className="w-full" onClick={() => void handlePay()}>{payExtraToPartyCredit > 0 ? 'Pay & Save Extra as Party Credit' : 'Pay'}</Button>
+            <Button className="w-full" disabled={!payAmountValid || isCashOverdraw} onClick={() => void handlePay()}>{payExtraToPartyCredit > 0 ? 'Pay & Save Extra as Party Credit' : 'Pay'}</Button>
           </div>
         )}
       </ActionModal>
