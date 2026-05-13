@@ -168,6 +168,16 @@ const getCashbookAuditSignals = (
 
 const FINANCE_DIAGNOSTIC_DEBUG_ENABLED = String((import.meta as any).env?.VITE_FINANCE_DIAGNOSTIC_DEBUG || '').toLowerCase() === 'true';
 const FINANCE_SHIFT_RECON_DEBUG_ENABLED = Boolean((import.meta as any).env?.DEV) && String((import.meta as any).env?.VITE_FINANCE_SHIFT_DEBUG || '').toLowerCase() === 'true';
+const getSupplierPaymentMethodForDrawer = (rawMethod: unknown): 'cash' | 'non_cash' => {
+  const method = String(rawMethod || '').trim().toLowerCase();
+  if (method === 'cash') return 'cash';
+  if (method === 'online' || method === 'bank') return 'non_cash';
+  return 'cash';
+};
+const getSupplierPaymentTimestamp = (payment: any): number => {
+  const at = new Date(payment?.paidAt || payment?.paymentDate || payment?.date || payment?.createdAt).getTime();
+  return Number.isFinite(at) ? at : Number.NaN;
+};
 const financeShiftDiag = (tag: string, payload: Record<string, unknown>) => {
   if (!FINANCE_DIAGNOSTIC_DEBUG_ENABLED) return;
   console.log(tag, payload);
@@ -449,17 +459,19 @@ const getSessionCashTotals = (
   // Prefer active supplierPayments ledger for cash-out; fallback to legacy PO paymentHistory rows
   // only when no supplierPaymentId exists.
   const supplierCashPaymentsFromLedger = supplierPayments.reduce((sum, payment) => {
-    const paidAt = new Date(payment.paidAt || payment.createdAt).getTime();
+    const paidAt = getSupplierPaymentTimestamp(payment);
     if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return sum;
     if (payment.deletedAt) return sum;
-    if ((payment.method || 'cash') !== 'cash') return sum;
+    const normalizedMethod = getSupplierPaymentMethodForDrawer(payment.method);
+    if (normalizedMethod !== 'cash') return sum;
+    if (FINANCE_SHIFT_RECON_DEBUG_ENABLED) console.log('[FINANCE_SUPPLIER_CASH_OUT]', { id: payment.id, partyName: payment.partyName || 'Supplier', amount: Number(payment.amount) || 0, method: payment.method, normalizedMethod, date: payment.paidAt || payment.paymentDate || payment.date || payment.createdAt, included: true, reason: 'active_supplier_payment_cash' });
     return sum + Math.max(0, Number(payment.amount) || 0);
   }, 0);
   const legacySupplierCashPayments = (purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment: any) => {
     if (payment?.supplierPaymentId) return inner;
     const paidAt = new Date(payment.paidAt).getTime();
     if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return inner;
-    if ((payment.method || 'cash') !== 'cash') return inner;
+    if (getSupplierPaymentMethodForDrawer(payment.method) !== 'cash') return inner;
     return inner + Math.max(0, Number(payment.amount) || 0);
   }, 0), 0);
   const supplierCashPayments = supplierCashPaymentsFromLedger + legacySupplierCashPayments;
@@ -558,9 +570,10 @@ const buildShiftCashMovementBreakdown = (
   });
   const supplierPayments = ((state as any).supplierPayments || []) as any[];
   supplierPayments.forEach((p) => {
-    const at = new Date(p.paidAt).getTime();
-    if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || p.method !== 'cash') return;
-    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.voucherNo || p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
+    const at = getSupplierPaymentTimestamp(p);
+    const normalizedMethod = getSupplierPaymentMethodForDrawer(p.method);
+    if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || normalizedMethod !== 'cash') return;
+    pushRow({ id: `sp-${p.id}`, date: p.paidAt || p.paymentDate || p.date || p.createdAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.voucherNo || p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
   });
   const legacySupplierMap = new Map<string, { date: string; party: string; note: string; amount: number }>();
   (state.purchaseOrders || []).forEach((o) => (o.paymentHistory || []).forEach((ph: any) => {
@@ -1043,12 +1056,20 @@ export default function Finance() {
       const at = new Date(d.createdAt).getTime();
       return Number.isFinite(at) && at >= start && at <= end;
     }).reduce((sum, d) => sum + Math.max(0, Number(d.amount) || 0), 0);
-    const supplierCashPayments = (data.purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment) => {
+    const supplierCashPaymentsFromLedger = ((data as any).supplierPayments || []).reduce((sum: number, payment: any) => {
+      const paidAt = getSupplierPaymentTimestamp(payment);
+      if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return sum;
+      if (payment?.deletedAt || getSupplierPaymentMethodForDrawer(payment?.method) !== 'cash') return sum;
+      return sum + Math.max(0, Number(payment?.amount) || 0);
+    }, 0);
+    const legacySupplierCashPayments = (data.purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment) => {
+      if ((payment as any)?.supplierPaymentId) return inner;
       const paidAt = new Date(payment.paidAt).getTime();
       if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return inner;
-      if ((payment.method || 'cash') !== 'cash') return inner;
+      if (getSupplierPaymentMethodForDrawer((payment as any).method) !== 'cash') return inner;
       return inner + Math.max(0, Number(payment.amount) || 0);
     }, 0), 0);
+    const supplierCashPayments = supplierCashPaymentsFromLedger + legacySupplierCashPayments;
     const customerCashCollections = (data.transactions || []).filter(t => {
       if (t.type !== 'payment' || t.paymentMethod !== 'Cash') return false;
       const txTime = resolveTransactionTimeForSession(t);
