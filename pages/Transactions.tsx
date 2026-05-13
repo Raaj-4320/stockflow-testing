@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder } from '../types';
+import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder, SupplierPaymentLedgerEntry } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
 import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
@@ -23,6 +23,7 @@ export default function Transactions() {
       ? (tx.creditNoteNo || tx.id.slice(-6))
       : (tx.receiptNo || tx.id.slice(-6));
   const isUpfrontVirtualTransaction = (tx?: Transaction | null) => !!tx?.id?.startsWith('upfront-');
+  const isSupplierPaymentVirtualTransaction = (tx?: Transaction | null) => !!tx?.id?.startsWith('supplier-payment-');
   const isCustomOrderPaymentRow = (tx?: Transaction | null) => !!tx && isUpfrontVirtualTransaction(tx) && String(tx.notes || '').toLowerCase().includes('order payment');
   const isCustomOrderReceivableRow = (tx?: Transaction | null) => !!tx && isUpfrontVirtualTransaction(tx) && !isCustomOrderPaymentRow(tx);
   type BackendShadowTransaction = {
@@ -46,6 +47,7 @@ export default function Transactions() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
+  const [supplierPayments, setSupplierPayments] = useState<SupplierPaymentLedgerEntry[]>([]);
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -149,6 +151,28 @@ export default function Transactions() {
   }), [backendShadowTransactions]);
   const backendLoadedForRender = backendShadowFetched && !backendShadowError;
   const baseRenderedTransactions = backendRenderEnabled && backendLoadedForRender ? backendRenderableTransactions : transactions;
+  const virtualSupplierPaymentTransactions = useMemo<Transaction[]>(() => (supplierPayments || [])
+    .filter((payment) => !payment.deletedAt)
+    .map((payment) => {
+      const methodRaw = String(payment.method || '').trim().toLowerCase();
+      const method = methodRaw === 'online' || methodRaw === 'bank' ? 'Online' : 'Cash';
+      const date = payment.paidAt || (payment as any).paymentDate || (payment as any).date || payment.createdAt || new Date().toISOString();
+      const amount = Math.max(0, Number(payment.amount || 0));
+      const payableReduced = Math.max(0, Number((payment as any).paymentAppliedToPayable ?? payment.payableApplied ?? 0));
+      const partyCreditAdded = Math.max(0, Number(payment.partyCreditCreated || 0));
+      return {
+        id: `supplier-payment-${payment.id}`,
+        type: 'payment',
+        date,
+        total: amount,
+        items: [],
+        customerId: payment.partyId || '',
+        customerName: payment.partyName || 'Supplier',
+        paymentMethod: method,
+        receiptNo: payment.voucherNo || undefined,
+        notes: `Supplier Payment — ${payment.partyName || 'Supplier'} — ${method.toLowerCase()}${payableReduced > 0 ? ` • Payable reduced ₹${formatMoneyWhole(payableReduced)}` : ''}${partyCreditAdded > 0 ? ` • Party credit added ₹${formatMoneyWhole(partyCreditAdded)}` : ''}${payment.note ? ` • Note: ${payment.note}` : ''}`,
+      } as Transaction;
+    }), [supplierPayments]);
   const virtualUpfrontOrderTransactions = useMemo<Transaction[]>(() => upfrontOrders.flatMap((order) => {
     const customerName = customers.find(c => c.id === order.customerId)?.name || 'Customer';
     const baseItem: CartItem = {
@@ -222,8 +246,8 @@ export default function Transactions() {
     return [...groupedInitial, ...additionalRows];
   }), [upfrontOrders, customers]);
   const renderedTransactions = useMemo(
-    () => [...baseRenderedTransactions, ...virtualUpfrontOrderTransactions],
-    [baseRenderedTransactions, virtualUpfrontOrderTransactions]
+    () => [...baseRenderedTransactions, ...virtualUpfrontOrderTransactions, ...virtualSupplierPaymentTransactions],
+    [baseRenderedTransactions, virtualUpfrontOrderTransactions, virtualSupplierPaymentTransactions]
   );
 
   const formatRoleLabel = (role?: string) => {
@@ -256,6 +280,7 @@ export default function Transactions() {
         setCustomers(data.customers);
         setProducts(data.products || []);
         setUpfrontOrders(data.upfrontOrders || []);
+        setSupplierPayments((data as any).supplierPayments || []);
         setTransactionsWindowCursor(txWindow.nextCursor);
         setDeletedWindowCursor(deletedWindow.nextCursor);
         setHasMoreTransactionsWindow(txWindow.hasMore);
@@ -743,6 +768,8 @@ export default function Transactions() {
         tx.customerName || '',
         customerPhone,
         tx.customerId || '',
+        tx.receiptNo || '',
+        tx.paymentMethod || '',
       ].join(' ').toLowerCase();
       if (baseHaystack.includes(query)) return true;
       if ((tx.notes || '').toLowerCase().includes(query)) return true;
@@ -844,6 +871,8 @@ export default function Transactions() {
       itemCount,
       typeLabel: tx.id.startsWith('upfront-')
         ? (String(tx.notes || '').toLowerCase().includes('order payment') ? 'ORDER PAYMENT' : String(tx.notes || '').toLowerCase().includes('legacy paid order') ? 'LEGACY PAID ORDER' : 'ADVANCE ORDER')
+        : tx.id.startsWith('supplier-payment-')
+          ? 'SUPPLIER PAYMENT'
         : (isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT'),
       typeVariant: 'outline',
       amountClass: isSale ? 'text-green-700' : isReturn ? 'text-red-700' : 'text-blue-700',
@@ -1875,8 +1904,8 @@ export default function Transactions() {
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedTx(tx)}><Eye className="w-3.5 h-3.5" /></Button>
-                                                {!tx.id.startsWith('upfront-') && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
-                                                {!tx.id.startsWith('upfront-') && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
+                                                {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
+                                                {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>
