@@ -4327,6 +4327,19 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
   const data = loadData();
   const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
   if (!existing) throw new Error('Supplier payment not found.');
+  const linkedCredits = (data.partyCreditLedger || []).filter((entry) => entry.type === 'supplier_overpayment' && (
+    entry.sourcePaymentId === paymentId
+    || (existing.voucherNo && entry.sourceVoucherNo === existing.voucherNo)
+  ));
+  if (linkedCredits.length > 0) {
+    const usedCredit = linkedCredits.some((entry) => {
+      const usedFromHistory = (entry.usageHistory || []).reduce((sum, usage) => sum + Math.max(0, Number(usage.amount) || 0), 0);
+      return usedFromHistory > 0 || Math.max(0, Number(entry.remainingAmount || 0)) < Math.max(0, Number(entry.amountCreated || 0));
+    });
+    if (usedCredit) {
+      throw new Error('Editing supplier overpayments with party credit is not yet supported. Delete and recreate the payment if the credit is unused.');
+    }
+  }
   const strippedOrders = stripSupplierPaymentAllocations(data.purchaseOrders || [], paymentId);
   const nextEntry: SupplierPaymentLedgerEntry = { ...existing, ...updates, amount: Number(Math.max(0, Number(updates.amount ?? existing.amount) || 0).toFixed(2)), updatedAt: new Date().toISOString() };
   const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(strippedOrders, nextEntry.partyId, paymentId, nextEntry.amount, nextEntry.method, nextEntry.note, nextEntry.paidAt);
@@ -4340,9 +4353,21 @@ export const deleteSupplierPayment = async (paymentId: string) => {
   const data = loadData();
   const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
   if (!existing) throw new Error('Supplier payment not found.');
+  const linkedCredits = (data.partyCreditLedger || []).filter((entry) => entry.type === 'supplier_overpayment' && (
+    entry.sourcePaymentId === paymentId
+    || (existing.voucherNo && entry.sourceVoucherNo === existing.voucherNo)
+  ));
+  const linkedUsedCredit = linkedCredits.some((entry) => {
+    const usedFromHistory = (entry.usageHistory || []).reduce((sum, usage) => sum + Math.max(0, Number(usage.amount) || 0), 0);
+    return usedFromHistory > 0 || Math.max(0, Number(entry.remainingAmount || 0)) < Math.max(0, Number(entry.amountCreated || 0));
+  });
+  if (linkedUsedCredit) {
+    throw new Error('This supplier payment created party credit that has already been used. Delete is blocked until credit usage reversal is implemented.');
+  }
   const strippedOrders = stripSupplierPaymentAllocations(data.purchaseOrders || [], paymentId);
   const nextSupplierPayments = (data.supplierPayments || []).map((item) => item.id === paymentId ? { ...item, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : item);
-  await saveData({ ...data, purchaseOrders: strippedOrders, supplierPayments: nextSupplierPayments }, { throwOnError: true, reason: 'deleteSupplierPayment', auditOperation: 'DELETE' });
+  const nextPartyCredits = (data.partyCreditLedger || []).filter((entry) => !linkedCredits.some((linked) => linked.id === entry.id));
+  await saveData({ ...data, purchaseOrders: strippedOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'deleteSupplierPayment', auditOperation: 'DELETE' });
 };
 
 export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orderId: string; paymentId: string }>) => {
