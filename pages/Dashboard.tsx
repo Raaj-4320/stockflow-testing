@@ -110,6 +110,12 @@ export default function Dashboard() {
   const [payError, setPayError] = useState<string | null>(null);
   const [statementCustomerId, setStatementCustomerId] = useState<string | null>(null);
   const [statementPartyId, setStatementPartyId] = useState<string | null>(null);
+  const [editingSupplierPayment, setEditingSupplierPayment] = useState<SupplierPaymentLedgerEntry | null>(null);
+  const [editSupplierAmount, setEditSupplierAmount] = useState('');
+  const [editSupplierMethod, setEditSupplierMethod] = useState<'cash' | 'online' | 'bank'>('cash');
+  const [editSupplierNote, setEditSupplierNote] = useState('');
+  const [editSupplierDateTime, setEditSupplierDateTime] = useState(() => toDateTimeLocalValue(new Date()));
+  const [editSupplierError, setEditSupplierError] = useState<string | null>(null);
   const [isGeneratingCustomerPdf, setIsGeneratingCustomerPdf] = useState(false);
   const [isGeneratingPartyPdf, setIsGeneratingPartyPdf] = useState(false);
   const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
@@ -283,6 +289,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   }, [parties, orders]);
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => {
     const partyMap = new Map<string, PartyPayableRow>();
+    const activeSupplierPaymentIds = new Set((supplierPayments || []).filter((sp) => !sp.deletedAt).map((sp) => sp.id));
+    const activeSupplierVouchers = new Set((supplierPayments || []).filter((sp) => !sp.deletedAt && !!sp.voucherNo).map((sp) => String(sp.voucherNo)));
     parties.forEach((p) => partyMap.set(p.id, { ...p, payable: 0, dueOrders: [], partyCredit: 0 }));
     orders.forEach((o) => {
       if (!partyMap.has(o.partyId)) {
@@ -298,7 +306,15 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     partyMap.forEach((party, id) => {
       const partyDueOrders = dueOrders.filter((o) => o.partyId === id);
       const payable = partyDueOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
-      const partyCredit = (partyCreditLedger || []).filter((entry) => entry.partyId === id).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const partyCredit = (partyCreditLedger || []).filter((entry) => {
+        if (entry.partyId !== id) return false;
+        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        const linkedActivePayment = (entry.sourcePaymentId && activeSupplierPaymentIds.has(entry.sourcePaymentId))
+          || (entry.sourceVoucherNo && activeSupplierVouchers.has(String(entry.sourceVoucherNo)));
+        if (linkedActivePayment) return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        const usedAmount = (entry.usageHistory || []).reduce((acc, usage) => acc + Math.max(0, Number(usage.amount) || 0), 0);
+        return usedAmount > 0;
+      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
       partyMap.set(id, { ...party, payable, dueOrders: partyDueOrders, partyCredit });
     });
     return Array.from(partyMap.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -617,15 +633,27 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const supplierPaymentId = row.id.replace('sp-', '');
     const payment = supplierPayments.find(item => item.id === supplierPaymentId && !item.deletedAt);
     if (!payment) return;
-    const amountInput = window.prompt('Edit payment amount', String(payment.amount));
-    if (amountInput == null) return;
-    const amount = Number(amountInput);
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    const methodInput = window.prompt('Method (cash/online)', payment.method) || payment.method;
-    const method = methodInput.toLowerCase() === 'online' ? 'online' : 'cash';
-    const note = window.prompt('Note', payment.note || '') ?? payment.note;
-    await updateSupplierPayment(payment.id, { amount, method, note });
-    refresh();
+    setEditSupplierError(null);
+    setEditingSupplierPayment(payment);
+    setEditSupplierAmount(String(payment.amount || 0));
+    setEditSupplierMethod(((String(payment.method || 'cash').toLowerCase() === 'online' || String(payment.method || 'cash').toLowerCase() === 'bank') ? String(payment.method || 'cash').toLowerCase() : 'cash') as 'cash' | 'online' | 'bank');
+    setEditSupplierNote(payment.note || '');
+    setEditSupplierDateTime(toDateTimeLocalValue(new Date(payment.paidAt || payment.createdAt || new Date().toISOString())));
+  };
+  const handleSaveEditedSupplierPayment = async () => {
+    if (!editingSupplierPayment) return;
+    setEditSupplierError(null);
+    const amount = Number(editSupplierAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return setEditSupplierError('Enter valid amount greater than zero.');
+    const paymentDate = editSupplierDateTime ? new Date(editSupplierDateTime) : new Date();
+    if (Number.isNaN(paymentDate.getTime())) return setEditSupplierError('Please select a valid payment date.');
+    try {
+      await updateSupplierPayment(editingSupplierPayment.id, { amount, method: editSupplierMethod === 'bank' ? 'online' : editSupplierMethod, note: editSupplierNote.trim(), paidAt: paymentDate.toISOString() });
+      setEditingSupplierPayment(null);
+      refresh();
+    } catch (error) {
+      setEditSupplierError(error instanceof Error ? error.message : 'Unable to update supplier payment.');
+    }
   };
 
   const handleDeleteSupplierPayment = async (row: LedgerRow) => {
@@ -870,6 +898,22 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </div>
         )}
       </StatementModal>
+      <ActionModal open={!!editingSupplierPayment} title="Edit Supplier Payment" onClose={() => setEditingSupplierPayment(null)}>
+        {editingSupplierPayment && (
+          <div className="space-y-3">
+            <div className="text-sm"><span className="font-medium">Party:</span> {editingSupplierPayment.partyName}</div>
+            <div className="text-sm"><span className="font-medium">Existing Amount:</span> {formatINRPrecise(editingSupplierPayment.amount || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Payable Applied:</span> {formatINRPrecise(editingSupplierPayment.paymentAppliedToPayable || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Party Credit:</span> {formatINRPrecise(editingSupplierPayment.partyCreditCreated || 0)}</div>
+            <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editSupplierAmount} onChange={(e) => setEditSupplierAmount(e.target.value)} /></div>
+            <div><Label>Payment Date</Label><Input type="datetime-local" value={editSupplierDateTime} onChange={(e) => setEditSupplierDateTime(e.target.value)} /></div>
+            <div><Label>Method</Label><Select value={editSupplierMethod} onChange={(e) => setEditSupplierMethod(e.target.value as 'cash' | 'online' | 'bank')}><option value="cash">Cash</option><option value="online">Online</option><option value="bank">Bank</option></Select></div>
+            <div><Label>Note</Label><Input value={editSupplierNote} onChange={(e) => setEditSupplierNote(e.target.value)} /></div>
+            {editSupplierError && <p className="text-xs text-red-600">{editSupplierError}</p>}
+            <Button className="w-full" disabled={!Number.isFinite(Number(editSupplierAmount)) || Number(editSupplierAmount) <= 0} onClick={() => void handleSaveEditedSupplierPayment()}>Save Changes</Button>
+          </div>
+        )}
+      </ActionModal>
 
       <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? `${selectedParty.name} • ${selectedParty.phone || '-'}` : undefined} onClose={() => setStatementPartyId(null)}>
         {selectedParty && partyStatement && (
