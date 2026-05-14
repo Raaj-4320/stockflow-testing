@@ -283,6 +283,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   }, [parties, orders]);
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => {
     const partyMap = new Map<string, PartyPayableRow>();
+    const activeSupplierPaymentIds = new Set((supplierPayments || []).filter((sp) => !sp.deletedAt).map((sp) => sp.id));
+    const activeSupplierVouchers = new Set((supplierPayments || []).filter((sp) => !sp.deletedAt && !!sp.voucherNo).map((sp) => String(sp.voucherNo)));
     parties.forEach((p) => partyMap.set(p.id, { ...p, payable: 0, dueOrders: [], partyCredit: 0 }));
     orders.forEach((o) => {
       if (!partyMap.has(o.partyId)) {
@@ -298,7 +300,15 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     partyMap.forEach((party, id) => {
       const partyDueOrders = dueOrders.filter((o) => o.partyId === id);
       const payable = partyDueOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
-      const partyCredit = (partyCreditLedger || []).filter((entry) => entry.partyId === id).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const partyCredit = (partyCreditLedger || []).filter((entry) => {
+        if (entry.partyId !== id) return false;
+        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        const linkedActivePayment = (entry.sourcePaymentId && activeSupplierPaymentIds.has(entry.sourcePaymentId))
+          || (entry.sourceVoucherNo && activeSupplierVouchers.has(String(entry.sourceVoucherNo)));
+        if (linkedActivePayment) return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        const usedAmount = (entry.usageHistory || []).reduce((acc, usage) => acc + Math.max(0, Number(usage.amount) || 0), 0);
+        return usedAmount > 0;
+      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
       partyMap.set(id, { ...party, payable, dueOrders: partyDueOrders, partyCredit });
     });
     return Array.from(partyMap.values()).sort((a, b) => a.name.localeCompare(b.name));
