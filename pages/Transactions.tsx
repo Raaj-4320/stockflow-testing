@@ -16,6 +16,24 @@ import { downloadTransactionsData, downloadTransactionsTemplate, importHistorica
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
+function ConfirmDialog({ open, title, message, onCancel, onConfirm }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader><CardTitle>{title}</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">{message}</p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onCancel}>Cancel</Button>
+            <Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>Delete</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function Transactions() {
   const getTransactionReference = (tx: Transaction) => tx.type === 'sale'
     ? (tx.invoiceNo || tx.id.slice(-6))
@@ -61,6 +79,7 @@ export default function Transactions() {
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
   const [batchEditTransactionIds, setBatchEditTransactionIds] = useState<string[]>([]);
+  const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
   const [batchEditTransactionIndex, setBatchEditTransactionIndex] = useState(0);
   const [editingAmount, setEditingAmount] = useState('');
   const [editingTxDate, setEditingTxDate] = useState('');
@@ -1035,14 +1054,16 @@ export default function Transactions() {
 
   const handleBatchDeleteTransactions = () => {
     if (!selectedTransactions.length) return;
-    const confirmed = window.confirm(`Delete ${selectedTransactions.length} selected transaction${selectedTransactions.length > 1 ? 's' : ''}?`);
-    if (!confirmed) return;
+    setIsBatchDeleteConfirmOpen(true);
+  };
+  const confirmBatchDeleteTransactions = () => {
     let nextTransactions = transactions;
     selectedTransactionIds.forEach(transactionId => {
       nextTransactions = deleteTransaction(transactionId);
     });
     setTransactions(nextTransactions);
     setSelectedTransactionIds([]);
+    setIsBatchDeleteConfirmOpen(false);
   };
 
   const updateEditingItem = (index: number, patch: Partial<CartItem>) => {
@@ -2787,6 +2808,13 @@ export default function Transactions() {
         onClose={() => setIsExportModalOpen(false)} 
         onExport={handleExport}
         title={exportType === 'summary' ? "Export Transaction Report" : "Export Invoice"}
+      />
+      <ConfirmDialog
+        open={isBatchDeleteConfirmOpen}
+        title="Delete selected transactions?"
+        message={`Delete ${selectedTransactions.length} selected transaction${selectedTransactions.length > 1 ? 's' : ''}? This action will move selected transactions to the bin/history according to the existing delete flow.`}
+        onCancel={() => setIsBatchDeleteConfirmOpen(false)}
+        onConfirm={confirmBatchDeleteTransactions}
       />
     </div>
   );
