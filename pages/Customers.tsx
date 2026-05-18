@@ -1083,8 +1083,8 @@ export default function Customers() {
                                             <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-blue-700' : isSplitSale ? 'text-orange-700' : (tx.paymentMethod === 'Credit' ? 'text-orange-700' : 'text-green-700')}`}>
                                                 {tx.type === 'payment' ? '-' : ''}₹{formatMoneyPrecise(Math.abs(tx.total))}
                                             </div>
-                                            {tx.type === 'payment' && (
-                                                <div className="flex items-center gap-1">
+                                            <div className="flex items-center gap-1">
+                                                {tx.type === 'payment' ? (
                                                     <Button
                                                         variant="ghost"
                                                         size="icon"
@@ -1094,10 +1094,18 @@ export default function Customers() {
                                                     >
                                                         <Edit className="w-3.5 h-3.5" />
                                                     </Button>
-                                                </div>
-                                            )}
-                                            {tx.type !== 'payment' && (
-                                                <div className="flex items-center gap-1">
+                                                ) : (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        disabled
+                                                        className="h-7 w-7 text-slate-300"
+                                                        title="Sale/return edits are available from Transactions to keep stock and accounting safe."
+                                                    >
+                                                        <Edit className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                )}
+                                                {tx.type !== 'payment' && (
                                                     <Button 
                                                         variant="ghost" 
                                                         size="icon" 
@@ -1107,9 +1115,9 @@ export default function Customers() {
                                                     >
                                                         <FileText className="w-3.5 h-3.5" />
                                                     </Button>
-                                                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
-                                                </div>
-                                            )}
+                                                )}
+                                                <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
+                                            </div>
                                         </div>
                                     </div>
                                   );
