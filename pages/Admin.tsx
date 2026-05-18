@@ -13,6 +13,10 @@ import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
+function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
+  if (!open) return null;
+  return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4"><Card className="w-full max-w-md"><CardHeader><CardTitle>{title}</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">{message}</p><div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button></div></CardContent></Card></div>;
+}
 
 export default function Admin() {
   const INVENTORY_PAGE_SIZE = 25;
@@ -104,6 +108,11 @@ export default function Admin() {
   const [showAddCategoryInline, setShowAddCategoryInline] = useState(false);
   const [newInlineCategory, setNewInlineCategory] = useState('');
   const [isPurchasePartyInputFocused, setIsPurchasePartyInputFocused] = useState(false);
+  const [pendingPurchaseReverse, setPendingPurchaseReverse] = useState<{ productId: string; historyId: string } | null>(null);
+  const [pendingDeleteProductId, setPendingDeleteProductId] = useState<string | null>(null);
+  const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
+  const [notice, setNotice] = useState<{ type: 'error' | 'success' | 'info'; message: string } | null>(null);
+  const [purchaseError, setPurchaseError] = useState<string | null>(null);
 
   const refreshData = () => {
     const data = loadData();
@@ -163,7 +172,6 @@ export default function Admin() {
                 margin: 10
             });
         } catch (e) {
-            console.error("Barcode generation failed", e);
         }
     }
   }, [barcodePreview]);
@@ -198,18 +206,22 @@ export default function Admin() {
     const entry = (purchaseTarget.purchaseHistory || []).find((h) => h.id === historyId);
     if (!entry) return;
     if (!entry.purchaseOrderId) {
-      alert('Cannot delete legacy purchase entry without linked order metadata.');
+      setNotice({ type: 'error', message: 'Cannot delete legacy purchase entry without linked order metadata.' });
       return;
     }
-    if (!window.confirm('Reverse this purchase entry? This will reduce stock and cancel linked payable order only when safe.')) return;
+    setPendingPurchaseReverse({ productId: purchaseTarget.id, historyId });
+  };
+  const confirmDeletePurchaseHistoryEntry = async () => {
+    if (!pendingPurchaseReverse) return;
     try {
-      await reverseInventoryPurchaseHistoryEntry(purchaseTarget.id, historyId);
+      await reverseInventoryPurchaseHistoryEntry(pendingPurchaseReverse.productId, pendingPurchaseReverse.historyId);
       const latest = loadData().products;
       setProducts(latest);
-      const nextTarget = latest.find((p) => p.id === purchaseTarget.id) || null;
+      const nextTarget = latest.find((p) => p.id === pendingPurchaseReverse.productId) || null;
       setPurchaseTarget(nextTarget);
+      setPendingPurchaseReverse(null);
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.');
+      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.' });
     }
   };
 
@@ -549,13 +561,12 @@ export default function Admin() {
         closeModal();
       }
     } catch (saveError) {
-      console.error('Product save error:', saveError);
       const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
       setError(message);
       const userMessage = message.toLowerCase().includes('image upload failed')
         ? 'Image upload failed. Please try again.'
         : message;
-      alert(userMessage);
+      setNotice({ type: 'error', message: userMessage });
     } finally {
       setIsSaving(false);
     }
@@ -648,10 +659,11 @@ export default function Admin() {
 
   const handleAddPurchase = async () => {
     if (!purchaseTarget) return;
+    setPurchaseError(null);
     const qty = toNonNegativeNumber(purchaseQty);
     const unitPrice = toNonNegativeNumber(purchasePrice);
     if (qty <= 0 || unitPrice <= 0) {
-      alert('Enter valid purchase quantity and unit price.');
+      setPurchaseError('Enter valid purchase quantity and unit price.');
       return;
     }
 
@@ -669,19 +681,19 @@ export default function Admin() {
     const bankPaid = Math.max(0, Number(purchaseBankPaid) || 0);
     const paidAmount = Number((cashPaid + bankPaid).toFixed(2));
     if (!partyName) {
-      alert('Supplier/party name is required.');
+      setPurchaseError('Supplier/party name is required.');
       return;
     }
     if (!Number.isFinite(totalAmount)) {
-      alert('Total cost is invalid.');
+      setPurchaseError('Total cost is invalid.');
       return;
     }
     if (paidAmount > totalAmount + 0.0001) {
-      alert('Payment split exceeds total purchase amount. Please reduce Cash or Bank.');
+      setPurchaseError('Payment split exceeds total purchase amount. Please reduce Cash or Bank.');
       return;
     }
     if (paidAmount < 0 || !Number.isFinite(paidAmount)) {
-      alert('Paid amount must be a valid non-negative number.');
+      setPurchaseError('Paid amount must be a valid non-negative number.');
       return;
     }
 
@@ -785,6 +797,7 @@ export default function Admin() {
 
     const updated = await updateProduct(updatedProduct);
     setProducts(updated);
+    setPurchaseError(null);
     setPurchaseTarget(null);
     setPurchaseQty('');
     setPurchasePrice('');
@@ -810,15 +823,17 @@ export default function Admin() {
   }, [purchaseTarget, purchaseQty, purchasePrice, selectedPurchaseVariantRow]);
 
   const handleDelete = async (id: string) => {
-    if (window.confirm('Are you sure you want to permanently delete this product?')) {
-      try {
-        const updated = await deleteProduct(id);
-        setProducts(updated);
-        setSelectedProductIds(prev => prev.filter(productId => productId !== id));
-      } catch (deleteError) {
-        console.error('Product delete error:', deleteError);
-        alert('Product deletion failed. Please try again.');
-      }
+    setPendingDeleteProductId(id);
+  };
+  const confirmDeleteProduct = async () => {
+    if (!pendingDeleteProductId) return;
+    try {
+      const updated = await deleteProduct(pendingDeleteProductId);
+      setProducts(updated);
+      setSelectedProductIds(prev => prev.filter(productId => productId !== pendingDeleteProductId));
+      setPendingDeleteProductId(null);
+    } catch (deleteError) {
+      setNotice({ type: 'error', message: 'Product deletion failed. Please try again.' });
     }
   };
 
@@ -871,7 +886,7 @@ export default function Admin() {
   const confirmDeleteCategory = () => {
       if (!deletingCategory) return;
       if (deleteConfirmName !== deletingCategory) {
-          alert("Category name mismatch. Please enter the exact category name to confirm.");
+          setError("Category name mismatch. Please enter the exact category name to confirm.");
           return;
       }
       const newState = deleteCategory(deletingCategory);
@@ -1028,8 +1043,9 @@ export default function Admin() {
 
   const handleBatchDeleteProducts = async () => {
     if (!selectedProducts.length) return;
-    const confirmed = window.confirm(`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}?`);
-    if (!confirmed) return;
+    setIsBatchDeleteConfirmOpen(true);
+  };
+  const confirmBatchDeleteProducts = async () => {
 
     try {
       let nextProducts = products;
@@ -1038,9 +1054,9 @@ export default function Admin() {
       }
       setProducts(nextProducts);
       setSelectedProductIds([]);
+      setIsBatchDeleteConfirmOpen(false);
     } catch (deleteError) {
-      console.error('Batch product delete error:', deleteError);
-      alert('Batch product deletion failed. Please try again.');
+      setNotice({ type: 'error', message: 'Batch product deletion failed. Please try again.' });
     }
   };
 
@@ -1152,7 +1168,7 @@ export default function Admin() {
           } catch (e) {
           }
       } else {
-          alert("Sharing not supported on this device/browser.");
+          setNotice({ type: 'info', message: 'Sharing not supported on this device/browser.' });
       }
   };
 
@@ -1487,6 +1503,7 @@ export default function Admin() {
           </div>
       </div>
 
+      {notice && <div className={`rounded-lg border px-3 py-2 text-sm ${notice.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : notice.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>{notice.message}</div>}
       <div className="border rounded-xl bg-card overflow-visible">
         <div className="overflow-x-auto overflow-y-visible">
           <table className="w-full text-sm">
@@ -1557,7 +1574,7 @@ export default function Admin() {
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchaseCashPaid(''); setPurchaseBankPaid(''); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchaseCashPaid(''); setPurchaseBankPaid(''); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); setPurchaseError(null); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
@@ -1980,6 +1997,7 @@ export default function Admin() {
                 <Input type="number" placeholder="New buy price (you can edit)" value={purchaseNextBuyPrice} onChange={(e) => setPurchaseNextBuyPrice(e.target.value)} />
               </div>
               <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
+              {purchaseError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{purchaseError}</div>}
               <div className="sticky bottom-0 mt-2 flex flex-col gap-2 rounded-lg border bg-background/95 p-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-sm">
                   <span className="font-semibold">Total:</span> ₹{purchaseTotalCost.toFixed(2)} · <span className="font-semibold">Paid:</span> ₹{purchaseEffectivePaidAmount.toFixed(2)} · <span className="font-semibold">Due:</span> ₹{purchaseRemainingDue.toFixed(2)}
@@ -2332,6 +2350,9 @@ export default function Admin() {
             onExport={handleExport}
             title={exportType === 'inventory' ? "Export Inventory" : "Export Low Stock Report"}
         />
+      <ConfirmDialog open={!!pendingPurchaseReverse} title="Reverse this purchase?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingPurchaseReverse(null)} onConfirm={() => void confirmDeletePurchaseHistoryEntry()} confirmLabel="Reverse" />
+      <ConfirmDialog open={!!pendingDeleteProductId} title="Delete this product?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingDeleteProductId(null)} onConfirm={() => void confirmDeleteProduct()} confirmLabel="Delete" />
+      <ConfirmDialog open={isBatchDeleteConfirmOpen} title="Delete selected products?" message={`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}? This action may affect stock/history. Continue?`} onCancel={() => setIsBatchDeleteConfirmOpen(false)} onConfirm={() => void confirmBatchDeleteProducts()} confirmLabel="Delete" />
 
       {/* Image Preview Modal */}
       {previewImage && (
