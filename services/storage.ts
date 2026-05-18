@@ -4301,7 +4301,14 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
   const data = loadData();
   const order = (data.purchaseOrders || []).find((o) => o.id === orderId);
   if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
-  const availableEntries = (data.partyCreditLedger || []).filter((entry) => entry.partyId === order.partyId && Math.max(0, Number(entry.remainingAmount || 0)) > 0);
+  const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const availableEntries = (data.partyCreditLedger || []).filter((entry) => {
+    const hasRemaining = Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+    if (!hasRemaining) return false;
+    const byId = entry.partyId && order.partyId && String(entry.partyId).trim() === String(order.partyId).trim();
+    if (byId) return true;
+    return normalizePartyName(entry.partyName) === normalizePartyName(order.partyName);
+  });
   let remaining = Math.max(0, Number(creditAmount) || 0);
   if (remaining <= 0) return order;
   let nextOrder = order;

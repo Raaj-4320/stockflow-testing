@@ -63,6 +63,25 @@ function ActionModal({ open, title, onClose, children, zIndexClass = 'z-[90]' }:
     </div>
   );
 }
+function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm', zIndexClass = 'z-[120]' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string; zIndexClass?: string }) {
+  if (!open) return null;
+  return (
+    <div className={`fixed inset-0 ${zIndexClass} bg-black/40 flex items-center justify-center p-4`}>
+      <div className="w-full max-w-md rounded-xl border bg-white shadow-xl">
+        <div className="border-b px-4 py-3">
+          <h3 className="font-semibold">{title}</h3>
+        </div>
+        <div className="space-y-4 p-4">
+          <p className="text-sm text-muted-foreground">{message}</p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onCancel}>Cancel</Button>
+            <Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatementModal({ open, title, subtitle, onClose, children }: { open: boolean; title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }) {
   if (!open) return null;
@@ -116,6 +135,14 @@ export default function Dashboard() {
   const [editSupplierNote, setEditSupplierNote] = useState('');
   const [editSupplierDateTime, setEditSupplierDateTime] = useState(() => toDateTimeLocalValue(new Date()));
   const [editSupplierError, setEditSupplierError] = useState<string | null>(null);
+  const [editingLegacySupplierRow, setEditingLegacySupplierRow] = useState<LedgerRow | null>(null);
+  const [editingCustomerPayment, setEditingCustomerPayment] = useState<Transaction | null>(null);
+  const [editCustomerAmount, setEditCustomerAmount] = useState('');
+  const [editCustomerMethod, setEditCustomerMethod] = useState<'Cash' | 'Online'>('Cash');
+  const [editCustomerNote, setEditCustomerNote] = useState('');
+  const [editCustomerError, setEditCustomerError] = useState<string | null>(null);
+  const [pendingSupplierDeleteRow, setPendingSupplierDeleteRow] = useState<LedgerRow | null>(null);
+  const [pendingCustomerDeleteRowId, setPendingCustomerDeleteRowId] = useState<string | null>(null);
   const [isGeneratingCustomerPdf, setIsGeneratingCustomerPdf] = useState(false);
   const [isGeneratingPartyPdf, setIsGeneratingPartyPdf] = useState(false);
   const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
@@ -470,6 +497,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
 
     });
     const paymentEvents: Array<{ id: string; date: string; type: 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone']; source: 'direct' | 'legacyGroup'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }> }> = [];
+    const partyCreditUsageEvents: Array<{ id: string; date: string; type: 'party_credit_used'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [];
+    let totalPartyCreditUsed = 0;
     const directPayments = supplierPayments.filter(payment => payment.partyId === selectedParty.id && !payment.deletedAt);
     directPayments.forEach(payment => {
       if (!lastPaymentAt || new Date(payment.paidAt).getTime() > new Date(lastPaymentAt).getTime()) lastPaymentAt = payment.paidAt;
@@ -519,8 +548,29 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       });
     });
 
+    partyOrders.forEach((order) => {
+      (order.paymentHistory || []).forEach((payment) => {
+        const method = String(payment.method || '').toLowerCase();
+        if (method !== 'party_credit') return;
+        const amount = Math.max(0, Number(payment.amount || 0));
+        if (amount <= 0) return;
+        const usageDate = payment.paidAt || (payment as any).date || (payment as any).createdAt || order.orderDate || order.createdAt;
+        totalPartyCreditUsed = Number((totalPartyCreditUsed + amount).toFixed(2));
+        partyCreditUsageEvents.push({
+          id: `party-credit-${order.id}-${payment.id}`,
+          date: usageDate,
+          type: 'party_credit_used',
+          ref: order.billNumber || order.id.slice(-6),
+          description: `Party Credit Used — PO ${order.billNumber || order.id.slice(-6)}`,
+          debit: 0,
+          credit: amount,
+          tone: 'payment',
+        });
+      });
+    });
+
     const totalPaid = Number(paymentEvents.reduce((sum, event) => sum + event.credit, 0).toFixed(2));
-    const events: Array<{ id: string; date: string; type: 'purchase' | 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [...purchaseEvents, ...paymentEvents];
+    const events: Array<{ id: string; date: string; type: 'purchase' | 'payment' | 'party_credit_used'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [...purchaseEvents, ...paymentEvents, ...partyCreditUsageEvents];
     const sortedEvents = events.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     let runningBalance = 0;
     const rows: LedgerRow[] = sortedEvents.map((event) => {
@@ -528,7 +578,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       return {
         id: event.id,
         date: event.date,
-        type: event.type === 'purchase' ? 'Purchase' : 'Payment',
+        type: event.type === 'purchase' ? 'Purchase' : event.type === 'party_credit_used' ? 'Party Credit Used' : 'Payment',
         ref: event.ref,
         description: event.description,
         debit: event.debit,
@@ -540,9 +590,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       };
     });
 
-    const remaining = Math.max(0, Number((totalPurchase - totalPaid).toFixed(2)));
+    const remaining = Math.max(0, Number((totalPurchase - totalPaid - totalPartyCreditUsed).toFixed(2)));
     const displayRows = [...rows].reverse();
-    return { rows, displayRows, totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
+    return { rows, displayRows, totalPurchase, totalPaid, totalPartyCreditUsed, remaining, lastPaymentAt, lastPurchaseAt };
   }, [selectedParty, orders, supplierPayments]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
@@ -716,16 +766,12 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const handleEditSupplierPayment = async (row: LedgerRow) => {
     if (row.source === 'legacyGroup') {
       if (!row.allocations?.length) return;
-      const amountInput = window.prompt('Edit payment amount', String(row.credit));
-      if (amountInput == null) return;
-      const amount = Number(amountInput);
-      if (!Number.isFinite(amount) || amount <= 0) return;
-      const methodInput = window.prompt('Method (cash/online)', row.tone === 'cash' ? 'cash' : 'online') || 'cash';
-      const method = methodInput.toLowerCase() === 'online' ? 'online' : 'cash';
-      const note = window.prompt('Note', row.description) || 'Supplier payment';
-      await deleteLegacySupplierPaymentGroup(row.allocations.map((a) => ({ orderId: a.orderId, paymentId: a.paymentId })));
-      await createSupplierPayment({ partyId: selectedParty?.id || '', partyName: selectedParty?.name || '', amount, method, paidAt: row.date, note });
-      refresh();
+      setEditSupplierError(null);
+      setEditingLegacySupplierRow(row);
+      setEditSupplierAmount(String(row.credit || 0));
+      setEditSupplierMethod(row.tone === 'cash' ? 'cash' : 'online');
+      setEditSupplierNote(row.description || 'Supplier payment');
+      setEditSupplierDateTime(toDateTimeLocalValue(new Date(row.date)));
       return;
     }
     const supplierPaymentId = row.id.replace('sp-', '');
@@ -739,14 +785,20 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     setEditSupplierDateTime(toDateTimeLocalValue(new Date(payment.paidAt || payment.createdAt || new Date().toISOString())));
   };
   const handleSaveEditedSupplierPayment = async () => {
-    if (!editingSupplierPayment) return;
+    if (!editingSupplierPayment && !editingLegacySupplierRow) return;
     setEditSupplierError(null);
     const amount = Number(editSupplierAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setEditSupplierError('Enter valid amount greater than zero.');
     const paymentDate = editSupplierDateTime ? new Date(editSupplierDateTime) : new Date();
     if (Number.isNaN(paymentDate.getTime())) return setEditSupplierError('Please select a valid payment date.');
     try {
-      await updateSupplierPayment(editingSupplierPayment.id, { amount, method: editSupplierMethod === 'bank' ? 'online' : editSupplierMethod, note: editSupplierNote.trim(), paidAt: paymentDate.toISOString() });
+      if (editingLegacySupplierRow) {
+        await deleteLegacySupplierPaymentGroup(editingLegacySupplierRow.allocations?.map((a) => ({ orderId: a.orderId, paymentId: a.paymentId })) || []);
+        await createSupplierPayment({ partyId: selectedParty?.id || '', partyName: selectedParty?.name || '', amount, method: editSupplierMethod === 'online' ? 'online' : 'cash', paidAt: paymentDate.toISOString(), note: editSupplierNote.trim() || 'Supplier payment' });
+        setEditingLegacySupplierRow(null);
+      } else if (editingSupplierPayment) {
+        await updateSupplierPayment(editingSupplierPayment.id, { amount, method: editSupplierMethod === 'bank' ? 'online' : editSupplierMethod, note: editSupplierNote.trim(), paidAt: paymentDate.toISOString() });
+      }
       setEditingSupplierPayment(null);
       refresh();
     } catch (error) {
@@ -755,15 +807,22 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   };
 
   const handleDeleteSupplierPayment = async (row: LedgerRow) => {
-    if (!window.confirm('Delete this supplier payment entry?')) return;
+    setPendingSupplierDeleteRow(row);
+  };
+
+  const confirmDeleteSupplierPayment = async () => {
+    const row = pendingSupplierDeleteRow;
+    if (!row) return;
     if (row.source === 'legacyGroup') {
       if (!row.allocations?.length) return;
       await deleteLegacySupplierPaymentGroup(row.allocations.map((a) => ({ orderId: a.orderId, paymentId: a.paymentId })));
+      setPendingSupplierDeleteRow(null);
       refresh();
       return;
     }
     const supplierPaymentId = row.id.replace('sp-', '');
     await deleteSupplierPayment(supplierPaymentId);
+    setPendingSupplierDeleteRow(null);
     refresh();
   };
 
@@ -771,21 +830,32 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const paymentId = rowId.replace('payment-', '');
     const tx = transactions.find(item => item.id === paymentId && item.type === 'payment');
     if (!tx) return;
-    const amountInput = window.prompt('Edit received amount', String(tx.total));
-    if (amountInput == null) return;
-    const total = Number(amountInput);
-    if (!Number.isFinite(total) || total <= 0) return;
-    const methodInput = window.prompt('Method (Cash/Online)', tx.paymentMethod || 'Cash') || tx.paymentMethod || 'Cash';
-    const paymentMethod = methodInput.toLowerCase() === 'online' ? 'Online' : 'Cash';
-    const notes = window.prompt('Note', tx.notes || '') ?? tx.notes;
-    await updateTransaction({ ...tx, total, paymentMethod: paymentMethod as 'Cash' | 'Online', notes });
-    refresh();
+    setEditCustomerError(null);
+    setEditingCustomerPayment(tx);
+    setEditCustomerAmount(String(tx.total || 0));
+    setEditCustomerMethod((String(tx.paymentMethod || 'Cash').toLowerCase() === 'online' ? 'Online' : 'Cash') as 'Cash' | 'Online');
+    setEditCustomerNote(tx.notes || '');
   };
 
   const handleDeleteCustomerPayment = (rowId: string) => {
-    const paymentId = rowId.replace('payment-', '');
-    if (!window.confirm('Delete this customer payment entry?')) return;
+    setPendingCustomerDeleteRowId(rowId);
+  };
+
+  const handleSaveEditedCustomerPayment = async () => {
+    if (!editingCustomerPayment) return;
+    setEditCustomerError(null);
+    const total = Number(editCustomerAmount);
+    if (!Number.isFinite(total) || total <= 0) return setEditCustomerError('Enter valid amount greater than zero.');
+    await updateTransaction({ ...editingCustomerPayment, total, paymentMethod: editCustomerMethod, notes: editCustomerNote });
+    setEditingCustomerPayment(null);
+    refresh();
+  };
+
+  const confirmDeleteCustomerPayment = () => {
+    if (!pendingCustomerDeleteRowId) return;
+    const paymentId = pendingCustomerDeleteRowId.replace('payment-', '');
     deleteTransaction(paymentId);
+    setPendingCustomerDeleteRowId(null);
     refresh();
   };
 
@@ -996,13 +1066,13 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </div>
         )}
       </StatementModal>
-      <ActionModal open={!!editingSupplierPayment} title="Edit Supplier Payment" onClose={() => setEditingSupplierPayment(null)} zIndexClass="z-[120]">
-        {editingSupplierPayment && (
+      <ActionModal open={!!editingSupplierPayment || !!editingLegacySupplierRow} title="Edit Supplier Payment" onClose={() => { setEditingSupplierPayment(null); setEditingLegacySupplierRow(null); }} zIndexClass="z-[120]">
+        {(editingSupplierPayment || editingLegacySupplierRow) && (
           <div className="space-y-3">
-            <div className="text-sm"><span className="font-medium">Party:</span> {editingSupplierPayment.partyName}</div>
-            <div className="text-sm"><span className="font-medium">Existing Amount:</span> {formatINRPrecise(editingSupplierPayment.amount || 0)}</div>
-            <div className="text-sm"><span className="font-medium">Existing Payable Applied:</span> {formatINRPrecise(editingSupplierPayment.paymentAppliedToPayable || 0)}</div>
-            <div className="text-sm"><span className="font-medium">Existing Party Credit:</span> {formatINRPrecise(editingSupplierPayment.partyCreditCreated || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Party:</span> {editingSupplierPayment?.partyName || selectedParty?.name || 'Supplier'}</div>
+            <div className="text-sm"><span className="font-medium">Existing Amount:</span> {formatINRPrecise(editingSupplierPayment?.amount || editingLegacySupplierRow?.credit || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Payable Applied:</span> {formatINRPrecise(editingSupplierPayment?.paymentAppliedToPayable || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Party Credit:</span> {formatINRPrecise(editingSupplierPayment?.partyCreditCreated || 0)}</div>
             <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editSupplierAmount} onChange={(e) => setEditSupplierAmount(e.target.value)} /></div>
             <div><Label>Payment Date</Label><Input type="datetime-local" value={editSupplierDateTime} onChange={(e) => setEditSupplierDateTime(e.target.value)} /></div>
             <div><Label>Method</Label><Select value={editSupplierMethod} onChange={(e) => setEditSupplierMethod(e.target.value as 'cash' | 'online' | 'bank')}><option value="cash">Cash</option><option value="online">Online</option><option value="bank">Bank</option></Select></div>
@@ -1012,6 +1082,33 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </div>
         )}
       </ActionModal>
+      <ActionModal open={!!editingCustomerPayment} title="Edit Customer Payment" onClose={() => setEditingCustomerPayment(null)} zIndexClass="z-[120]">
+        {editingCustomerPayment && (
+          <div className="space-y-3">
+            <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editCustomerAmount} onChange={(e) => setEditCustomerAmount(e.target.value)} /></div>
+            <div><Label>Method</Label><Select value={editCustomerMethod} onChange={(e) => setEditCustomerMethod(e.target.value as 'Cash' | 'Online')}><option value="Cash">Cash</option><option value="Online">Online</option></Select></div>
+            <div><Label>Note</Label><Input value={editCustomerNote} onChange={(e) => setEditCustomerNote(e.target.value)} /></div>
+            {editCustomerError && <p className="text-xs text-red-600">{editCustomerError}</p>}
+            <Button className="w-full" disabled={!Number.isFinite(Number(editCustomerAmount)) || Number(editCustomerAmount) <= 0} onClick={() => void handleSaveEditedCustomerPayment()}>Save Changes</Button>
+          </div>
+        )}
+      </ActionModal>
+      <ConfirmDialog
+        open={!!pendingSupplierDeleteRow}
+        title="Delete supplier payment?"
+        message="This will reverse supplier payment effects according to existing system rules."
+        onCancel={() => setPendingSupplierDeleteRow(null)}
+        onConfirm={() => void confirmDeleteSupplierPayment()}
+        confirmLabel="Delete"
+      />
+      <ConfirmDialog
+        open={!!pendingCustomerDeleteRowId}
+        title="Delete payment?"
+        message="This will reverse customer payment effects according to existing system rules."
+        onCancel={() => setPendingCustomerDeleteRowId(null)}
+        onConfirm={confirmDeleteCustomerPayment}
+        confirmLabel="Delete"
+      />
 
       <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? `${selectedParty.name} • ${selectedParty.phone || '-'}` : undefined} onClose={() => setStatementPartyId(null)}>
         {selectedParty && partyStatement && (
@@ -1026,8 +1123,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Purchase</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.totalPurchase)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Paid</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalPaid)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Party Credit Used</div><div className="mt-1 text-lg font-semibold text-violet-700">{formatINRPrecise(partyStatement.totalPartyCreditUsed)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Remaining Payable</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.remaining)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Last Payment / Purchase</div><div className="mt-1 text-lg font-semibold">{partyStatement.lastPaymentAt ? new Date(partyStatement.lastPaymentAt).toLocaleDateString() : '—'} / {partyStatement.lastPurchaseAt ? new Date(partyStatement.lastPurchaseAt).toLocaleDateString() : '—'}</div></div>
             </div>
             <div className="max-h-[52vh] overflow-auto rounded-xl border">
               <table className="w-full min-w-[920px] text-sm">
