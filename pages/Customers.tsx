@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -119,6 +119,12 @@ export default function Customers() {
   const [customerPage, setCustomerPage] = useState(1);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [editingCustomerTx, setEditingCustomerTx] = useState<Transaction | null>(null);
+  const [editTxAmount, setEditTxAmount] = useState('');
+  const [editTxDate, setEditTxDate] = useState('');
+  const [editTxMethod, setEditTxMethod] = useState<'Cash' | 'Online'>('Cash');
+  const [editTxNotes, setEditTxNotes] = useState('');
+  const [editTxError, setEditTxError] = useState<string | null>(null);
 
   const refreshData = () => {
     try {
@@ -431,6 +437,40 @@ export default function Customers() {
       setPaymentAmount('');
       setPaymentNote('');
       setPaymentError(null);
+  };
+  const toDateTimeLocalValue = (iso: string) => {
+    const date = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+  const openCustomerTransactionEditor = (tx: Transaction) => {
+    setEditingCustomerTx(tx);
+    setEditTxAmount(String(Math.abs(Number(tx.total || 0))));
+    setEditTxDate(toDateTimeLocalValue(tx.date || new Date().toISOString()));
+    setEditTxMethod(String(tx.paymentMethod || 'Cash').toLowerCase() === 'online' ? 'Online' : 'Cash');
+    setEditTxNotes(tx.notes || '');
+    setEditTxError(null);
+  };
+  const handleSaveEditedCustomerTransaction = async () => {
+    if (!editingCustomerTx) return;
+    const amount = Number(editTxAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return setEditTxError('Amount must be greater than zero.');
+    const nextDate = editTxDate ? new Date(editTxDate) : new Date(editingCustomerTx.date);
+    if (Number.isNaN(nextDate.getTime())) return setEditTxError('Please enter a valid date and time.');
+    try {
+      const updatedRows = await updateTransaction({
+        ...editingCustomerTx,
+        total: Math.abs(amount),
+        date: nextDate.toISOString(),
+        paymentMethod: editTxMethod,
+        notes: editTxNotes.trim(),
+      });
+      setTransactions(updatedRows);
+      setEditingCustomerTx(null);
+      refreshData();
+    } catch (error) {
+      setEditTxError(error instanceof Error ? error.message : 'Unable to update transaction.');
+    }
   };
 
   const parsedPaymentAmount = Number(paymentAmount);
@@ -1043,6 +1083,19 @@ export default function Customers() {
                                             <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-blue-700' : isSplitSale ? 'text-orange-700' : (tx.paymentMethod === 'Credit' ? 'text-orange-700' : 'text-green-700')}`}>
                                                 {tx.type === 'payment' ? '-' : ''}₹{formatMoneyPrecise(Math.abs(tx.total))}
                                             </div>
+                                            {tx.type === 'payment' && (
+                                                <div className="flex items-center gap-1">
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-7 w-7 text-muted-foreground hover:text-primary"
+                                                        onClick={(e) => { e.stopPropagation(); openCustomerTransactionEditor(tx); }}
+                                                        title="Edit payment transaction"
+                                                    >
+                                                        <Edit className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                </div>
+                                            )}
                                             {tx.type !== 'payment' && (
                                                 <div className="flex items-center gap-1">
                                                     <Button 
@@ -1114,6 +1167,26 @@ export default function Customers() {
                   </CardContent>
               </Card>
           </div>
+      )}
+      {editingCustomerTx && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle>Edit Customer Payment</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editTxAmount} onChange={(e) => setEditTxAmount(e.target.value)} /></div>
+              <div><Label>Date & Time</Label><Input type="datetime-local" value={editTxDate} onChange={(e) => setEditTxDate(e.target.value)} /></div>
+              <div><Label>Method</Label><Select value={editTxMethod} onChange={(e) => setEditTxMethod(e.target.value as 'Cash' | 'Online')}><option value="Cash">Cash</option><option value="Online">Online</option></Select></div>
+              <div><Label>Notes</Label><Input value={editTxNotes} onChange={(e) => setEditTxNotes(e.target.value)} placeholder="Optional note" /></div>
+              {editTxError && <p className="text-xs text-red-600">{editTxError}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setEditingCustomerTx(null)}>Cancel</Button>
+                <Button onClick={() => void handleSaveEditedCustomerTransaction()}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {isPaymentModalOpen && viewingCustomer && (
