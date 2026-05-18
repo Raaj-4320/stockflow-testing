@@ -42,6 +42,15 @@ const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const toNum = (v: number | '') => (v === '' ? 0 : Number(v));
 const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
+const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const partyMatchesCredit = (party: { id?: string; name?: string }, creditEntry: { partyId?: string; partyName?: string }) => {
+  const partyId = String(party.id || '').trim();
+  const creditPartyId = String(creditEntry.partyId || '').trim();
+  if (partyId && creditPartyId) return partyId === creditPartyId;
+  const partyName = normalizePartyName(party.name);
+  const creditPartyName = normalizePartyName(creditEntry.partyName);
+  return !!partyName && !!creditPartyName && partyName === creditPartyName;
+};
 const makePendingBarcode = () => `PENDING-${Math.floor(100000 + Math.random() * 900000)}`;
 const normalizeText = (v?: string) => (v || '').trim();
 const comboKey = (variant?: string, color?: string) => `${normalizeText(variant)}::${normalizeText(color)}`;
@@ -190,6 +199,7 @@ export default function PurchasePanel() {
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
   const [partyCreditToApply, setPartyCreditToApply] = useState<number | ''>('');
+  const [partyCreditTouched, setPartyCreditTouched] = useState(false);
 
   const refresh = () => {
     const data = loadData();
@@ -307,8 +317,35 @@ export default function PurchasePanel() {
   const canGoReviewNext = !!partyId && activeLines.length > 0 && activeLines.every(l => toNum(l.quantity) > 0 && toNum(l.unitCost) > 0);
   const selectedPartyCreditAvailable = useMemo(() => {
     if (!partyId) return 0;
-    return (loadData().partyCreditLedger || []).filter((entry) => entry.partyId === partyId).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
-  }, [partyId, orders.length]);
+    const selectedParty = parties.find((p) => p.id === partyId);
+    if (!selectedParty) return 0;
+    return (loadData().partyCreditLedger || [])
+      .filter((entry) => partyMatchesCredit({ id: selectedParty.id, name: selectedParty.name }, { partyId: entry.partyId, partyName: entry.partyName }))
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+  }, [partyId, parties, orders.length]);
+  const gstRateForPreview = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
+  const grossTotalPreview = useMemo(() => draftTotals.totalAmount + ((draftTotals.totalAmount * gstRateForPreview) / 100), [draftTotals.totalAmount, gstRateForPreview]);
+  const initialPaidPreview = Math.max(0, Number(initialPaidAmount) || 0);
+  const maxCreditUsablePreview = Math.max(0, Number((grossTotalPreview - initialPaidPreview).toFixed(2)));
+  const partyCreditAppliedPreview = Math.min(Math.max(0, Number(partyCreditToApply) || 0), selectedPartyCreditAvailable, maxCreditUsablePreview);
+  const remainingCreditAfterPurchasePreview = Math.max(0, Number((selectedPartyCreditAvailable - partyCreditAppliedPreview).toFixed(2)));
+  const payableAfterCreditPreview = Math.max(0, Number((grossTotalPreview - initialPaidPreview - partyCreditAppliedPreview).toFixed(2)));
+
+  useEffect(() => {
+    if (!partyId) {
+      setPartyCreditToApply('');
+      setPartyCreditTouched(false);
+      return;
+    }
+    if (!partyCreditTouched) {
+      setPartyCreditToApply(Number(Math.min(selectedPartyCreditAvailable, maxCreditUsablePreview).toFixed(2)));
+      return;
+    }
+    const capped = Math.min(Math.max(0, Number(partyCreditToApply) || 0), selectedPartyCreditAvailable, maxCreditUsablePreview);
+    if (Number((Number(partyCreditToApply) || 0).toFixed(2)) !== Number(capped.toFixed(2))) {
+      setPartyCreditToApply(Number(capped.toFixed(2)));
+    }
+  }, [partyId, partyCreditTouched, selectedPartyCreditAvailable, maxCreditUsablePreview, partyCreditToApply]);
 
   const stepMeta = [
     { id: 'product', label: 'Product' },
@@ -515,7 +552,9 @@ export default function PurchasePanel() {
     const gstRate = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
     const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
     const initialPaid = Math.max(0, Number(initialPaidAmount) || 0);
-    const availablePartyCredit = (loadData().partyCreditLedger || []).filter((entry) => entry.partyId === party.id).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+    const availablePartyCredit = (loadData().partyCreditLedger || [])
+      .filter((entry) => partyMatchesCredit({ id: party.id, name: party.name }, { partyId: entry.partyId, partyName: entry.partyName }))
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
     const requestedPartyCredit = Math.max(0, Number(partyCreditToApply) || 0);
     if (initialPaid > taxableAmount + gstAmount) return;
     const maxCreditUsable = Math.max(0, Number((taxableAmount + gstAmount - initialPaid).toFixed(2)));
@@ -558,6 +597,7 @@ export default function PurchasePanel() {
     setIsModalOpen(false);
     resetWizard();
     setPartyCreditToApply('');
+    setPartyCreditTouched(false);
     refresh();
   };
 
@@ -1068,7 +1108,24 @@ export default function PurchasePanel() {
                   <div><Label>Bill Date</Label><Input type="date" value={billDate} onChange={e => setBillDate(e.target.value)} /></div>
                   <div><Label>GST %</Label><Input type="number" value={gstPercent} onChange={e => setGstPercent(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 18" /></div>
                   <div><Label>Initial Paid Amount</Label><Input type="number" value={initialPaidAmount} onChange={e => setInitialPaidAmount(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 1000" /></div>
-                  <div><Label>Apply Party Credit</Label><Input type="number" min="0" value={partyCreditToApply} onChange={e => setPartyCreditToApply(e.target.value === '' ? '' : Number(e.target.value))} placeholder="0" /><p className="text-[11px] text-emerald-700 mt-1">Party Credit Available ₹{formatNumber(selectedPartyCreditAvailable)}</p></div>
+                  <div>
+                    <Label>Apply Party Credit</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      value={partyCreditToApply}
+                      onChange={e => {
+                        setPartyCreditTouched(true);
+                        const nextRaw = e.target.value;
+                        if (nextRaw === '') return setPartyCreditToApply('');
+                        const next = Math.max(0, Number(nextRaw) || 0);
+                        const capped = Math.min(next, selectedPartyCreditAvailable, maxCreditUsablePreview);
+                        setPartyCreditToApply(Number(capped.toFixed(2)));
+                      }}
+                      placeholder="0"
+                    />
+                    <p className="text-[11px] text-emerald-700 mt-1">Party Credit Available ₹{formatNumber(selectedPartyCreditAvailable)}</p>
+                  </div>
                   <div className="md:col-span-2"><Label>Notes</Label><Input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes" /></div>
                 </div>
               </div>
@@ -1082,6 +1139,15 @@ export default function PurchasePanel() {
                   <SummaryCard label="GST Amount" value={`₹${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
                   <SummaryCard label="Grand Total" value={`₹${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
                   <SummaryCard label="Initial Due" value={`₹${formatNumber(Math.max(0, (draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)) - (initialPaidAmount === '' ? 0 : Number(initialPaidAmount) || 0)))}`} />
+                </div>
+                <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
+                  <div className="text-xs font-semibold text-emerald-800">Supplier Party Credit Summary</div>
+                  <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-emerald-900">
+                    <div>Party Credit Available: ₹{formatNumber(selectedPartyCreditAvailable)}</div>
+                    <div>Credit Applied to This Purchase: ₹{formatNumber(partyCreditAppliedPreview)}</div>
+                    <div>Remaining Credit After Purchase: ₹{formatNumber(remainingCreditAfterPurchasePreview)}</div>
+                    <div>Payable After Credit: ₹{formatNumber(payableAfterCreditPreview)}</div>
+                  </div>
                 </div>
               </div>
             </div>
