@@ -4301,10 +4301,27 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
   const data = loadData();
   const order = (data.purchaseOrders || []).find((o) => o.id === orderId);
   if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
-  const availableEntries = (data.partyCreditLedger || []).filter((entry) => entry.partyId === order.partyId && Math.max(0, Number(entry.remainingAmount || 0)) > 0);
+  const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const availableEntries = (data.partyCreditLedger || []).filter((entry) => {
+    const hasRemaining = Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+    if (!hasRemaining) return false;
+    const byId = entry.partyId && order.partyId && String(entry.partyId).trim() === String(order.partyId).trim();
+    if (byId) return true;
+    return normalizePartyName(entry.partyName) === normalizePartyName(order.partyName);
+  });
   let remaining = Math.max(0, Number(creditAmount) || 0);
-  if (remaining <= 0) return order;
+  if (remaining <= 0) {
+    return {
+      order,
+      appliedAmount: 0,
+      updatedOrderId: order.id,
+      remainingOrderAmount: Math.max(0, Number(order.remainingAmount || 0)),
+      updatedCreditEntries: [],
+    };
+  }
   let nextOrder = order;
+  let appliedAmount = 0;
+  const updatedCreditEntryIds = new Set<string>();
   const nextCredits = (data.partyCreditLedger || []).map((entry) => ({ ...entry, usageHistory: [...(entry.usageHistory || [])] }));
   for (const entry of availableEntries) {
     if (remaining <= 0) break;
@@ -4312,6 +4329,8 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
     if (!nextEntry) continue;
     const usable = Math.min(remaining, Math.max(0, Number(nextEntry.remainingAmount || 0)));
     if (usable <= 0) continue;
+    appliedAmount = Number((appliedAmount + usable).toFixed(2));
+    updatedCreditEntryIds.add(nextEntry.id);
     nextEntry.remainingAmount = Number((Math.max(0, Number(nextEntry.remainingAmount || 0)) - usable).toFixed(2));
     nextEntry.updatedAt = new Date().toISOString();
     nextEntry.usageHistory = [...(nextEntry.usageHistory || []), { id: `pcu-${Date.now()}-${Math.floor(Math.random() * 100000)}`, amount: Number(usable.toFixed(2)), usedAt: new Date().toISOString(), sourceRef: sourceRef || order.billNumber || order.id.slice(-6), sourceType: 'purchase' }];
@@ -4320,7 +4339,13 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
   }
   const nextOrders = (data.purchaseOrders || []).map((o) => (o.id === orderId ? nextOrder : o));
   await saveData({ ...data, purchaseOrders: nextOrders, partyCreditLedger: nextCredits }, { throwOnError: true, reason: 'applyPartyCreditToPurchaseOrder', auditOperation: 'UPDATE' });
-  return nextOrder;
+  return {
+    order: nextOrder,
+    appliedAmount: Number(appliedAmount.toFixed(2)),
+    updatedOrderId: nextOrder.id,
+    remainingOrderAmount: Math.max(0, Number(nextOrder.remainingAmount || 0)),
+    updatedCreditEntries: nextCredits.filter((entry) => updatedCreditEntryIds.has(entry.id)),
+  };
 };
 
 export const updateSupplierPayment = async (paymentId: string, updates: Partial<Pick<SupplierPaymentLedgerEntry, 'amount' | 'method' | 'note' | 'paidAt'>>) => {

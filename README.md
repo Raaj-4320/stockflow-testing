@@ -96,3 +96,7 @@ git diff --name-only
 ```
 
 Confirm the diff includes only documentation files, then mention "docs-only" in your PR summary.
+
+## Note
+
+This README quick guide was last reviewed on 2026-05-18.
