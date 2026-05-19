@@ -23,10 +23,15 @@ export const handler = async (event: { httpMethod?: string }) => {
   }
 
   const timestamp = Math.floor(Date.now() / 1000);
+  const shouldDebug = ((event as any)?.queryStringParameters?.invoiceSendDebug === '1') || (((event as any)?.headers || {})['x-invoice-send-debug'] === '1');
+  const stringToSign = `folder=${uploadFolder}&timestamp=${timestamp}`;
   const signature = crypto
     .createHash('sha1')
-    .update(`folder=${uploadFolder}&timestamp=${timestamp}${apiSecret}`)
+    .update(`${stringToSign}${apiSecret}`)
     .digest('hex');
+  if (shouldDebug) {
+    console.log('[INVOICE_SEND_DEBUG]', JSON.stringify({ step: 'signature_signing_string', stringToSign }, null, 2));
+  }
 
   return json(200, {
     timestamp,
