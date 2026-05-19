@@ -6,12 +6,12 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
-import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft } from '../services/storage';
-import { generateReceiptPDF } from '../services/pdf';
+import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft, uploadDataUrlFileToCloudinary } from '../services/storage';
+import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
-import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
+import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus, MessageCircle } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
@@ -221,6 +221,9 @@ export default function Sales() {
   const [mixedReturnChoice, setMixedReturnChoice] = useState<'refund_paid_method' | 'store_credit'>('refund_paid_method');
   const [productPage, setProductPage] = useState(1);
   const [returnPage, setReturnPage] = useState(1);
+  const settlementPanelRef = useRef<HTMLDivElement | null>(null);
+  const [settlementHint, setSettlementHint] = useState<string | null>(null);
+  const [sendInvoiceMessage, setSendInvoiceMessage] = useState<string | null>(null);
 
   const buildCheckoutMoney = ({
     cartItems,
@@ -337,7 +340,11 @@ export default function Sales() {
       if (detail.phase === 'success') {
         if (pendingCheckoutRef.current?.transactionId === detail.transactionId) {
           setTransactionComplete(pendingCheckoutRef.current.transaction);
+          setSendInvoiceMessage(null);
           setTransactionCashDetails(pendingCheckoutRef.current.cashDetails);
+          if (pendingCheckoutRef.current.transaction.type === 'sale' && loadData().profile?.autoSendInvoiceAfterCreation) {
+            void sendInvoicePreview(pendingCheckoutRef.current.transaction, 'auto');
+          }
           pendingCheckoutRef.current = null;
         }
         setTransactionSyncStatus({ phase: 'success', message: detail.message || 'Transaction synced.' });
@@ -649,8 +656,14 @@ export default function Sales() {
       setCashReceivedInput(defaultCashToCollect.toString());
       setCashReceivedDirty(false);
       setCashManuallyEdited(false);
-      setIsCustomerModalOpen(true);
+      setSettlementHint('Complete payment in the Settlement panel.');
+      settlementPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
+  useEffect(() => {
+    if (!settlementHint) return;
+    const t = setTimeout(() => setSettlementHint(null), 2200);
+    return () => clearTimeout(t);
+  }, [settlementHint]);
 
   const buildEffectiveTransactionDate = () => {
       if (!selectedTransactionDate) return new Date().toISOString();
@@ -903,6 +916,57 @@ export default function Sales() {
     if (!transactionComplete) return;
     generateReceiptPDF(transactionComplete, customers, transactionCashDetails || undefined);
   };
+  const sendInvoicePreview = async (tx: Transaction, mode: 'manual' | 'auto' = 'manual') => {
+    const sendInvoiceToWhatsApp = async (payload: {
+      customerPhone: string;
+      customerName: string;
+      invoiceNo: string;
+      pdfUrl: string;
+    }): Promise<void> => {
+      const endpoint = (import.meta as any)?.env?.VITE_WHATSAPP_INVOICE_API_URL || 'http://localhost:3000/send-invoice';
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        let data: any = null;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+        if (!response.ok || data?.success !== true) {
+          throw new Error('Failed to send WhatsApp invoice');
+        }
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    };
+    const customerPhone = (tx.customerPhone || customers.find(c => c.id === tx.customerId)?.phone || '').trim();
+    if (!customerPhone) {
+      const msg = 'Customer WhatsApp number is missing, so invoice cannot be sent.';
+      setSendInvoiceMessage(msg);
+      setCheckoutError(msg);
+      return;
+    }
+    try {
+      const canonicalPdfDataUrl = generateReceiptPDFDataUrl(tx, customers, transactionCashDetails || undefined);
+      const cloudinaryUrl = await uploadDataUrlFileToCloudinary(canonicalPdfDataUrl, { resourceType: 'auto' });
+      await sendInvoiceToWhatsApp({
+        customerPhone,
+        customerName: (tx.customerName || customers.find(c => c.id === tx.customerId)?.name || 'Walk-in customer').trim(),
+        invoiceNo: ((tx as any).invoiceNumber || tx.invoiceNo || tx.id).toString(),
+        pdfUrl: typeof cloudinaryUrl === 'string' ? cloudinaryUrl : String((cloudinaryUrl as any)?.secure_url || ''),
+      });
+      setSendInvoiceMessage('Invoice sent to WhatsApp');
+    } catch (error) {
+      setSendInvoiceMessage('Failed to send WhatsApp invoice');
+    }
+  };
 
   const handleExport = (format: 'pdf' | 'excel') => {
     if (!transactionComplete) return;
@@ -948,6 +1012,7 @@ export default function Sales() {
   const onlinePaidValue = checkoutPreview.onlinePaid;
   const cashReceivedValue = Math.max(0, Number(cashReceivedInput || 0));
   const cashToCollectValue = Math.max(0, Number(cashPaidValue || 0));
+  const displayedCashTenderedValue = (cart.length === 0 || cashToCollectValue <= 0) ? 0 : cashReceivedValue;
   const rawOverpaymentValue = Math.max(0, cashReceivedValue - cashToCollectValue);
   const storeCreditToCreate = storeOverpaymentAsCredit ? rawOverpaymentValue : 0;
   const cashChangeValue = storeOverpaymentAsCredit ? 0 : rawOverpaymentValue;
@@ -987,6 +1052,18 @@ export default function Sales() {
   useEffect(() => {
     if (rawOverpaymentValue <= 0 && storeOverpaymentAsCredit) setStoreOverpaymentAsCredit(false);
   }, [rawOverpaymentValue, storeOverpaymentAsCredit]);
+  useEffect(() => {
+    if (cart.length === 0 && cashReceivedInput !== '') {
+      setCashReceivedInput('');
+      setCashReceivedDirty(false);
+    }
+  }, [cart.length, cashReceivedInput]);
+  useEffect(() => {
+    if ((cart.length === 0 || cashToCollectValue <= 0) && cashReceivedInput !== '') {
+      setCashReceivedInput('');
+      setCashReceivedDirty(false);
+    }
+  }, [cart.length, cashToCollectValue, cashReceivedInput]);
 
   const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
   const filteredProducts = products.filter(p => {
@@ -1266,42 +1343,42 @@ export default function Sales() {
   };
 
   return (
-    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 ${isReturnMode ? 'lg:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_390px] lg:items-start'} gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
-      <div className="min-w-0 flex flex-col gap-3">
-        <div className="bg-card border rounded-xl p-3 space-y-3">
-          <div className={`grid gap-3 items-center ${isReturnMode ? 'md:grid-cols-[minmax(0,1fr)_420px]' : 'md:grid-cols-[minmax(0,1fr)_220px]'}`}>
-            <div className="relative">
+    <div className={`h-[calc(100vh-120px)] min-h-0 rounded-xl border p-2 md:p-3 grid grid-cols-1 ${isReturnMode ? 'xl:grid-cols-[minmax(0,1fr)_340px]' : 'xl:grid-cols-3'} gap-2 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
+      <div className="min-w-0 min-h-0 flex flex-col gap-2 xl:col-span-1">
+        <div className="bg-card border rounded-xl p-2 space-y-2">
+          <div className={`flex flex-wrap items-center gap-2`}>
+            <div className={`relative ${isReturnMode ? 'min-w-[280px] flex-1' : 'min-w-[240px] flex-1'}`}>
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
                 value={isReturnMode ? returnSearch : productSearch}
                 onChange={e => isReturnMode ? setReturnSearch(e.target.value) : setProductSearch(e.target.value)}
-                className={`pl-9 h-9 ${isReturnMode ? 'md:max-w-[80%]' : ''}`}
+                className={`pl-9 h-8`}
                 placeholder={isReturnMode ? 'Search customer, phone, bill no, product, code' : 'Search product, barcode, variant'}
               />
             </div>
-            <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-5' : 'grid-cols-2'}`}>
-              <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setActiveCartItems(() => []); }}>Sales</Button>
-              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setActiveCartItems(() => []); }}>Return</Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setActiveCartItems(() => []); }}>Sales</Button>
+              <Button size="sm" variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setActiveCartItems(() => []); }}>Return</Button>
               {isReturnMode && (
                 <>
-                  <select className="h-9 rounded-md border border-input bg-background pl-3 pr-9 text-sm" value={returnDateFilter} onChange={e => setReturnDateFilter(e.target.value as 'all' | '30d' | '90d')}>
+                  <select className="h-8 rounded-md border border-input bg-background pl-2 pr-7 text-xs" value={returnDateFilter} onChange={e => setReturnDateFilter(e.target.value as 'all' | '30d' | '90d')}>
                     <option value="90d">Last 90 days</option>
                     <option value="30d">Last 30 days</option>
                     <option value="all">All dates</option>
                   </select>
-                  <select className="h-9 rounded-md border border-input bg-background pl-3 pr-9 text-sm" value={returnSort} onChange={e => setReturnSort(e.target.value as 'newest' | 'oldest' | 'amount_high' | 'amount_low')}>
+                  <select className="h-8 rounded-md border border-input bg-background pl-2 pr-7 text-xs" value={returnSort} onChange={e => setReturnSort(e.target.value as 'newest' | 'oldest' | 'amount_high' | 'amount_low')}>
                     <option value="newest">Newest</option>
                     <option value="oldest">Oldest</option>
                     <option value="amount_high">Amount High</option>
                     <option value="amount_low">Amount Low</option>
                   </select>
-                  <div className="h-9 rounded-md border border-dashed px-3 text-sm flex items-center text-muted-foreground">Sales: {returnTransactions.length}</div>
+                  <div className="h-8 rounded-md border border-dashed px-2 text-xs flex items-center text-muted-foreground">Sales: {returnTransactions.length}</div>
                 </>
               )}
             </div>
           </div>
           {!isReturnMode && (
-          <div className="flex gap-2 overflow-x-auto pb-1">
+          <div className="flex gap-1.5 overflow-x-auto pb-0.5">
             {categories.map((category) => (
               <Button key={category} variant={selectedCategory === category ? 'default' : 'outline'} size="sm" className={`h-8 shrink-0 ${selectedCategory === category && isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} onClick={() => setSelectedCategory(category)}>
                 {category}
@@ -1314,8 +1391,8 @@ export default function Sales() {
         <div className="flex-1 min-h-0 overflow-y-auto">
           {isReturnMode ? (
             <div className="space-y-3">
-              <div className="space-y-2">
-                <div className="hidden md:grid md:grid-cols-[130px_180px_minmax(0,1fr)_92px_120px_132px] px-3 text-xs font-semibold text-muted-foreground">
+              <div className="space-y-1.5">
+                <div className="hidden md:grid md:grid-cols-[110px_160px_minmax(0,1fr)_90px_110px_110px] px-2 text-[11px] font-semibold text-muted-foreground">
                   <div>Date</div>
                   <div>Invoice Number</div>
                   <div>Customer Name</div>
@@ -1326,13 +1403,13 @@ export default function Sales() {
                 {paginatedReturnTransactions.map((tx) => {
                   const totalQty = (tx.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
                   return (
-                    <div key={tx.id} className="w-full rounded-xl border bg-card p-3 grid gap-2 md:grid-cols-[130px_180px_minmax(0,1fr)_92px_120px_132px] items-center box-border">
+                    <div key={tx.id} className="w-full rounded-lg border bg-card px-2.5 py-2 grid gap-2 md:grid-cols-[110px_160px_minmax(0,1fr)_90px_110px_110px] items-center box-border">
                       <div className="text-xs text-muted-foreground">{new Date(tx.date).toLocaleDateString()}</div>
                       <div className="text-xs font-semibold truncate">#{tx.id}</div>
-                      <div className="font-semibold text-sm truncate">{tx.customerName || 'Walk-in customer'}</div>
-                      <div className="text-sm font-semibold">Qty {totalQty}</div>
-                      <div className="text-sm font-semibold">₹{formatMoneyWhole(Math.abs(tx.total))}</div>
-                      <Button size="sm" className="bg-orange-600 hover:bg-orange-700" onClick={() => openReturnPopup(tx.id)}>Make Return</Button>
+                      <div className="font-semibold text-xs truncate">{tx.customerName || 'Walk-in customer'}</div>
+                      <div className="text-xs font-semibold">Qty {totalQty}</div>
+                      <div className="text-xs font-semibold">₹{formatMoneyWhole(Math.abs(tx.total))}</div>
+                      <Button size="sm" className="h-8 bg-orange-600 hover:bg-orange-700" onClick={() => openReturnPopup(tx.id)}>Make Return</Button>
                     </div>
                   );
                 })}
@@ -1348,21 +1425,42 @@ export default function Sales() {
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+	              <div className="rounded-xl border bg-card overflow-hidden">
+                <div className="grid grid-cols-[44px_minmax(0,1.4fr)_minmax(0,1fr)_84px_108px] gap-2 px-3 py-2 text-[11px] font-semibold text-muted-foreground border-b bg-muted/20">
+                  <span>Image</span>
+                  <span>Name</span>
+                  <span>SKU/Code</span>
+                  <span className="text-center">Stock</span>
+                  <span className="text-center">Qty</span>
+                </div>
               {paginatedProducts.map(p => {
                 const cartQty = cart
                   .filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(p.id, NO_VARIANT, NO_COLOR))
                   .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+                const matchingCartLines = cart.filter(item => String(item.id) === String(p.id));
+                const singleLine = matchingCartLines.length === 1 ? matchingCartLines[0] : null;
+                const stock = getAvailableQtyForActiveCart(p, NO_VARIANT, NO_COLOR);
                 const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
+                const stockLabel = isReturnMode ? returnableQty : stock;
+                const disableMinus = cartQty <= 0 || (!singleLine && matchingCartLines.length > 1);
+                const disablePlus = isReturnMode ? returnableQty <= cartQty : stock <= cartQty;
                 return (
-                  <ProductGridItem
-                    key={p.id}
-                    product={p}
-                    isReturnMode={isReturnMode}
-                    cartQty={cartQty}
-                    returnableQty={returnableQty}
-                    onAdd={(qty) => handleProductSelect(`${p.id}`, qty)}
-                  />
+	                  <div key={p.id} className="grid grid-cols-[36px_minmax(0,1.4fr)_minmax(0,1fr)_76px_96px] gap-2 px-2.5 py-2 border-b last:border-b-0 items-center hover:bg-muted/20">
+	                    <div className="h-8 w-8 rounded border overflow-hidden bg-muted">
+                      {p.image ? <img src={p.image} alt={p.name} className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-25" />}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold truncate">{p.name}</p>
+                      <p className="text-[11px] text-muted-foreground">₹{formatMoneyPrecise(p.sellPrice)}</p>
+                    </div>
+                    <p className="text-xs text-muted-foreground truncate">{p.barcode || p.id}</p>
+                    <p className={`text-xs text-center font-semibold ${isReturnMode ? 'text-orange-600' : ''}`}>{stockLabel}</p>
+                    <div className="flex items-center justify-center border rounded-md h-7 overflow-hidden">
+                      <button className="px-2 h-full border-r" disabled={disableMinus} title={!singleLine && matchingCartLines.length > 1 ? 'Adjust variants in cart' : ''} onClick={() => singleLine ? updateQuantity(String(singleLine.id), -1, singleLine.selectedVariant, singleLine.selectedColor) : undefined}><Minus className="w-3 h-3" /></button>
+                      <span className="w-8 text-center text-xs font-bold">{cartQty}</span>
+                      <button className="px-2 h-full border-l" disabled={disablePlus} onClick={() => handleProductSelect(`${p.id}`, 1)}><Plus className="w-3 h-3" /></button>
+                    </div>
+                  </div>
                 );
               })}
               </div>
@@ -1416,12 +1514,11 @@ export default function Sales() {
         </div>
       )}
 
-      {!isReturnMode && (
-      <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden self-start lg:sticky lg:top-3">
-        <div className="px-4 py-3 border-b flex items-center justify-between">
+      <div className={`min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden ${isReturnMode ? '' : 'xl:col-span-1'}`}>
+        <div className="px-3 py-1.5 flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold">{isReturnMode ? 'Return Guidance' : 'Cart'}</h2>
-            <p className="text-xs text-muted-foreground">{isReturnMode ? 'Select bill → Make Return → review popup' : `${cart.length} items`}</p>
+            <h2 className="sr-only">{isReturnMode ? 'Return Guidance' : 'Cart'}</h2>
+            <p className="sr-only">{isReturnMode ? 'Select bill → Make Return → review popup' : `${cart.length} items`}</p>
             {!isReturnMode && (
               <div className="flex items-center gap-1 overflow-auto">
                 {invoiceCarts.map((c) => <Button key={c.id} size="sm" variant={c.id === activeCartId ? 'default' : 'outline'} onClick={() => setActiveCartId(c.id)}>{c.label} ({c.items.length})</Button>)}
@@ -1448,10 +1545,10 @@ export default function Sales() {
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+        <div className="flex-1 overflow-y-auto p-2.5 space-y-2">
           {isReturnMode ? (
             <div className="space-y-3">
-              <div className="rounded-lg border p-3 bg-orange-50/40 space-y-2 text-xs">
+              <div className="rounded-lg border p-2.5 bg-orange-50/40 space-y-1.5 text-xs">
                 <div className="font-semibold text-sm">Transaction-based Return Flow</div>
                 <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
                   <li>Search and filter sale bills from the left panel.</li>
@@ -1468,7 +1565,7 @@ export default function Sales() {
               )}
             </div>
           ) : cart.length === 0 ? (
-            <div className="border border-dashed rounded-xl p-6 text-center text-sm text-muted-foreground">Cart is empty</div>
+            <div className="border border-dashed rounded-xl p-4 text-center text-sm text-muted-foreground">Cart is empty</div>
           ) : cart.map(item => (
             <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="border rounded-lg p-2.5 grid grid-cols-[44px_minmax(0,1fr)_24px] gap-2 items-start">
               <div className="h-11 w-11 bg-muted rounded-md border overflow-hidden">
@@ -1521,6 +1618,119 @@ export default function Sales() {
           )}
         </div>
       </div>
+
+      {!isReturnMode && (
+        <div ref={settlementPanelRef} className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden xl:col-span-1">
+          <div className="sr-only">
+            <h2>Settlement</h2>
+            <p>Customer, split payment, and confirmation</p>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {settlementHint && <div className="text-xs rounded-md border border-blue-200 bg-blue-50 text-blue-700 px-2.5 py-2">{settlementHint}</div>}
+            <div className="space-y-2.5 rounded-lg border p-3 bg-muted/10">
+              <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Total Amount</Label>
+                <Input type="number" min="0" step="0.01" value={checkoutPreview.remainingPayableWhole} readOnly className="bg-muted/40 font-semibold cursor-not-allowed" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
+                <Input type="number" min="0" step="0.01" value={cashPaidInput} onChange={(e) => { setCashPaidInput(e.target.value); setCashManuallyEdited(true); setCheckoutError(null); }} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online/Bank Paid</Label>
+                <Input type="number" min="0" step="0.01" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Credit Due</Label>
+                <Input type="number" min="0" step="0.01" value={creditDueInput} onChange={(e) => { setCreditDueInput(e.target.value); setCheckoutError(null); }} />
+              </div>
+              <div className="rounded border bg-white p-2 text-xs space-y-1">
+                <div className="flex justify-between"><span>Cash Paid</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
+                <div className="flex justify-between"><span>Cash Received/Tendered</span><span className="font-semibold">₹{formatMoneyPrecise(displayedCashTenderedValue)}</span></div>
+                {cashToCollectValue === 0 ? (
+                  <div className="text-muted-foreground">No cash collection required.</div>
+                ) : rawOverpaymentValue > 0 ? (
+                  <div className="space-y-2">
+                    <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Change to return: ₹{formatMoneyPrecise(cashChangeValue || rawOverpaymentValue)}</div>
+                    <Button size="sm" variant={storeOverpaymentAsCredit ? 'default' : 'outline'} disabled={!selectedCustomer} onClick={() => setStoreOverpaymentAsCredit(v => !v)}>
+                      {storeOverpaymentAsCredit ? `₹${formatMoneyPrecise(storeCreditToCreate)} will be saved as store credit` : `Store Amount (₹${formatMoneyPrecise(rawOverpaymentValue)}) in Store Credit`}
+                    </Button>
+                    {!selectedCustomer && <div className="text-[11px] text-muted-foreground">Select or create a customer to save store credit.</div>}
+                  </div>
+                ) : cashShortfallValue > 0 ? (
+                  <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Cash short by ₹{formatMoneyPrecise(cashShortfallValue)}</div>
+                ) : null}
+              </div>
+              <div className="text-xs space-y-1 border-t pt-2">
+                <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyWhole(checkoutPreview.settlementPaidNowWhole)}</span></div>
+                <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
+                <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
+                <div className="flex justify-between font-semibold"><span>Split Total</span><span>₹{formatMoneyWhole(roundMoneyWhole(cashPaidValue + onlinePaidValue + checkoutPreview.creditDuePreviewWhole + storeCreditUsed))}</span></div>
+                {checkoutPreview.hasWholeOverpay && (
+                  <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyWhole(checkoutPreview.settlementOverpayWhole)}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex p-1 bg-muted rounded-lg w-full">
+              <button onClick={() => setCustomerTab('search')} className={`flex-1 py-1.5 text-xs font-semibold rounded-md ${customerTab === 'search' ? 'bg-background shadow text-primary' : 'text-muted-foreground'}`}>Search</button>
+              <button onClick={() => setCustomerTab('new')} className={`flex-1 py-1.5 text-xs font-semibold rounded-md ${customerTab === 'new' ? 'bg-background shadow text-primary' : 'text-muted-foreground'}`}>Create</button>
+            </div>
+
+            {checkoutError && <div className="text-destructive text-[11px] bg-destructive/10 p-2 rounded border border-destructive/20">{checkoutError}</div>}
+            {customerTab === 'search' ? (
+              <div className="space-y-2">
+                {!selectedCustomer ? (
+                  <Input placeholder="Search phone or name..." value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} />
+                ) : (
+                  <div className="flex justify-between items-center bg-muted p-2 rounded border">
+                    <div><p className="text-sm font-bold">{selectedCustomer.name}</p><p className="text-xs text-muted-foreground">{selectedCustomer.phone}</p></div>
+                    <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                  </div>
+                )}
+                {customerSearch && !selectedCustomer && filteredCustomers.length > 0 && (
+                  <div className="border rounded-lg max-h-40 overflow-auto divide-y">
+                    {filteredCustomers.map(c => (
+                      <div key={c.id} className="p-2 hover:bg-muted cursor-pointer" onClick={() => { setSelectedCustomer(c); setInvoiceGstName(c.gstName || ''); setInvoiceGstNumber(c.gstNumber || ''); setCustomerSearch(''); }}>
+                        <p className="text-sm font-bold">{c.name}</p><p className="text-xs text-muted-foreground">{c.phone}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Input placeholder="Full Name" value={newCustomerName} onChange={e => { setNewCustomerName(e.target.value); setCheckoutError(null); }} />
+                <Input placeholder="Exactly 10 digits" value={newCustomerPhone} onChange={e => { setNewCustomerPhone(e.target.value); setCheckoutError(null); }} />
+              </div>
+            )}
+
+            {!isReturnMode && selectedCustomer && (
+              <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-muted-foreground uppercase">Customer has ₹{formatMoneyPrecise(availableStoreCredit)} store credit.</span>
+                  <span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span>
+                </div>
+                <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={Math.min(availableStoreCredit, originalInvoiceTotal) <= 0} onClick={() => setUseStoreCreditApplied(v => !v)}>
+                  {useStoreCreditApplied ? 'Remove Store Credit' : `Use ₹${formatMoneyPrecise(Math.min(availableStoreCredit, originalInvoiceTotal))} Store Credit`}
+                </Button>
+                <div className="text-xs space-y-1 border-t pt-2">
+                  <div className="flex justify-between"><span>Original Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                  <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
+                  <div className="flex justify-between font-semibold"><span>Total Amount</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
+                  <div className="flex justify-between"><span>Total Amount Input</span><span>₹{formatMoneyWhole(cashPaidValue)}</span></div>
+                  <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
+                  <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
+                </div>
+              </div>
+            )}
+
+            <Button className="w-full h-11 text-base font-bold" onClick={completeCheckout} disabled={transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing'}>
+              {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processing…' : 'Confirm & Pay'}
+            </Button>
+          </div>
+        </div>
       )}
 
       {isReturnMode && isReturnPopupOpen && selectedReturnTx && (
@@ -1726,7 +1936,7 @@ export default function Sales() {
                     </div>
                     <div className="rounded border bg-white p-2 text-xs space-y-1">
                       <div className="flex justify-between"><span>Cash Paid</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
-                      <div className="flex justify-between"><span>Cash Received/Tendered</span><span className="font-semibold">₹{formatMoneyPrecise(cashReceivedValue)}</span></div>
+                      <div className="flex justify-between"><span>Cash Received/Tendered</span><span className="font-semibold">₹{formatMoneyPrecise(displayedCashTenderedValue)}</span></div>
                       {cashToCollectValue === 0 ? (
                         <div className="text-muted-foreground">No cash collection required.</div>
                       ) : rawOverpaymentValue > 0 ? (
@@ -1944,8 +2154,12 @@ export default function Sales() {
                           <p>Credit Due: {formatINRPrecise(Number(transactionComplete.saleSettlement?.creditDue || 0))}</p>
                         </div>
                       )}
+                      {sendInvoiceMessage && (
+                        <div className="text-xs rounded border border-blue-200 bg-blue-50 text-blue-700 px-3 py-2">{sendInvoiceMessage}</div>
+                      )}
                       <div className="flex gap-3 pt-4">
-                          <Button variant="outline" className="flex-1" onClick={() => { setTransactionComplete(null); setTransactionCashDetails(null); }}>Close</Button>
+                          <Button variant="outline" className="flex-1" onClick={() => { setTransactionComplete(null); setTransactionCashDetails(null); setSendInvoiceMessage(null); }}>Close</Button>
+                          <Button variant="outline" className="flex-1" onClick={() => transactionComplete && sendInvoicePreview(transactionComplete, 'manual')}><MessageCircle className="w-4 h-4 mr-2" /> Send Invoice</Button>
                           <Button className="flex-1" onClick={handlePrintReceipt}><Printer className="w-4 h-4 mr-2" /> Download</Button>
                       </div>
                   </CardContent>
