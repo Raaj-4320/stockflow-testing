@@ -139,6 +139,7 @@ export interface StoreProfile {
   customerCatalogFirstPageName?: string;
   customerCatalogFirstPageMimeType?: string;
   invoiceFormat?: 'standard' | 'thermal';
+  autoSendInvoiceAfterCreation?: boolean;
   adminPin?: string;
 }
 

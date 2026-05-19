@@ -1635,7 +1635,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  autoSendInvoiceAfterCreation: false
 };
 
 const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
@@ -2480,9 +2481,10 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
   throw lastError instanceof Error ? lastError : new Error('Cloudinary signature request failed');
 };
 
-const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
+const uploadDataUrlToCloudinary = async (dataUrl: string, options?: { resourceType?: 'image' | 'raw' | 'auto' }): Promise<string> => {
   const signedParams = await getCloudinarySignature();
-  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
+  const resourceType = options?.resourceType || 'image';
+  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/${resourceType}/upload`;
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
@@ -2554,6 +2556,13 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
   }
 
   throw lastError instanceof Error ? lastError : new Error('Cloudinary upload failed');
+};
+
+export const uploadDataUrlImageToCloudinary = async (dataUrl: string): Promise<string> => {
+  return uploadDataUrlToCloudinary(dataUrl, { resourceType: 'image' });
+};
+export const uploadDataUrlFileToCloudinary = async (dataUrl: string, options?: { resourceType?: 'image' | 'raw' | 'auto' }): Promise<string> => {
+  return uploadDataUrlToCloudinary(dataUrl, { resourceType: options?.resourceType || 'auto' });
 };
 
 export const uploadImageFileToCloudinary = async (file: File): Promise<string> => {
