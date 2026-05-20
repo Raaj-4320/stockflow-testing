@@ -737,6 +737,8 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         const reconciliation = getReturnReconciliationAmounts(tx, priorTransactions, runningDue);
         runningDue = roundCurrency(Math.max(0, runningDue - reconciliation.dueReduction));
         runningStoreCredit = roundCurrency(runningStoreCredit + reconciliation.storeCreditIncrease);
+      } else if (tx.type === 'customer_credit' || tx.type === 'customer_cash_out') {
+        runningDue = roundCurrency(runningDue + amount);
       }
     });
 
@@ -826,6 +828,23 @@ const getTransactionAuditEffectSummary = (
       paymentMethod: transaction.paymentMethod || 'Cash',
       cashIn: transaction.paymentMethod === 'Online' ? 0 : amount,
       onlineIn: transaction.paymentMethod === 'Online' ? amount : 0,
+    };
+  }
+  if (transaction.type === 'customer_cash_out') {
+    const cashOut = transaction.paymentMethod === 'Online' ? 0 : amount;
+    const onlineOut = transaction.paymentMethod === 'Online' ? amount : 0;
+    return {
+      ...getZeroCashbookEffectDeltaSnapshot(),
+      currentDueEffect: roundCurrency(amount),
+      cashOut: roundCurrency(cashOut),
+      onlineOut: roundCurrency(onlineOut),
+      netCashEffect: roundCurrency(-cashOut),
+    };
+  }
+  if (transaction.type === 'customer_credit') {
+    return {
+      ...getZeroCashbookEffectDeltaSnapshot(),
+      currentDueEffect: roundCurrency(amount),
     };
   }
   const allocation = getCanonicalReturnAllocation(transaction, historicalTransactions, dueBeforeHint);
@@ -1635,7 +1654,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  autoSendInvoiceAfterCreation: false
 };
 
 const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
@@ -2317,6 +2337,18 @@ const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
 const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
 const CLOUDINARY_RETRY_DELAY_MS = 1200;
 const CLOUDINARY_MAX_ATTEMPTS = 2;
+const INVOICE_SEND_DEBUG_PREFIX = '[INVOICE_SEND_DEBUG]';
+const isInvoiceSendDebugEnabled = (): boolean => {
+  try {
+    return typeof window !== 'undefined' && (window.location.href.includes('invoiceSendDebug=1') || window.localStorage.getItem('INVOICE_SEND_DEBUG') === '1');
+  } catch {
+    return false;
+  }
+};
+const logInvoiceSendDebug = (payload: unknown) => {
+  if (!isInvoiceSendDebugEnabled()) return;
+  console.log(INVOICE_SEND_DEBUG_PREFIX, JSON.stringify(payload, null, 2));
+};
 
 type CloudinarySignResponse = {
   timestamp: number;
@@ -2324,6 +2356,7 @@ type CloudinarySignResponse = {
   apiKey: string;
   cloudName: string;
   uploadFolder: string;
+  uploadPreset?: string;
 };
 
 type CloudinaryStage = 'signature' | 'upload';
@@ -2432,6 +2465,8 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
           `Cloudinary signature request timed out (${endpoint})`
         );
 
+        logInvoiceSendDebug({ step: 'signature_response', status: response.status, endpoint });
+
         if (!response.ok) {
           const error = new CloudinaryUploadError({
             message: `Cloudinary signature endpoint failed with ${response.status}`,
@@ -2446,6 +2481,16 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
         }
 
         const body = await response.json() as CloudinarySignResponse;
+        logInvoiceSendDebug({
+          step: 'signature_response',
+          status: response.status,
+          hasCloudName: Boolean(body?.cloudName),
+          hasApiKey: Boolean(body?.apiKey),
+          hasSignature: Boolean(body?.signature),
+          hasTimestamp: Boolean(body?.timestamp),
+          uploadFolder: body?.uploadFolder || '',
+          hasUploadPreset: Boolean(body?.uploadPreset),
+        });
         if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp || !body?.uploadFolder) {
           const error = new CloudinaryUploadError({
             message: 'Cloudinary signature response missing required fields',
@@ -2482,8 +2527,26 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
 
 const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
   const signedParams = await getCloudinarySignature();
-  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
+  const resourceType = 'image';
+  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/${resourceType}/upload`;
   let lastError: unknown = null;
+  logInvoiceSendDebug({
+    step: 'cloudinary_signature_start',
+    resourceType,
+    dataUrlPrefix: dataUrl.slice(0, 80),
+    dataUrlLength: dataUrl.length,
+    isPdf: dataUrl.startsWith('data:application/pdf'),
+  });
+  logInvoiceSendDebug({
+    step: 'cloudinary_signature_received',
+    cloudName: signedParams.cloudName,
+    apiKeyPresent: Boolean(signedParams.apiKey),
+    signaturePresent: Boolean(signedParams.signature),
+    timestamp: signedParams.timestamp,
+    uploadFolder: signedParams.uploadFolder,
+    uploadPresetPresent: Boolean(signedParams.uploadPreset),
+    resourceType,
+  });
 
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
     try {
@@ -2493,6 +2556,15 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
       formData.append('signature', signedParams.signature);
       formData.append('api_key', signedParams.apiKey);
       formData.append('folder', signedParams.uploadFolder);
+      if (signedParams.uploadPreset) {
+        formData.append('upload_preset', signedParams.uploadPreset);
+      }
+      logInvoiceSendDebug({
+        step: 'cloudinary_fetch_start',
+        uploadEndpoint,
+        formDataKeys: ['file', 'timestamp', 'signature', 'api_key', 'folder', ...(signedParams.uploadPreset ? ['upload_preset'] : [])],
+        resourceType,
+      });
 
       const uploadResponse = await withTimeout(
         fetch(uploadEndpoint, {
@@ -2510,9 +2582,19 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
         } catch {
           providerError = null;
         }
+        logInvoiceSendDebug({
+          step: 'cloudinary_fetch_failed',
+          status: uploadResponse.status,
+          statusText: uploadResponse.statusText,
+          cloudinaryError: (providerError as any)?.error?.message || providerError,
+          uploadEndpoint,
+          resourceType,
+          dataUrlPrefix: dataUrl.slice(0, 80),
+          dataUrlLength: dataUrl.length,
+        });
 
         const error = new CloudinaryUploadError({
-          message: `Cloudinary upload failed with ${uploadResponse.status}`,
+          message: `Cloudinary upload failed: ${String((providerError as any)?.error?.message || uploadResponse.statusText || uploadResponse.status)}`,
           stage: 'upload',
           reason: uploadResponse.status === 404 ? 'bad-endpoint' : 'http-failure',
           attempt,
@@ -2533,6 +2615,15 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
           });
           lastError = error;
         } else {
+          logInvoiceSendDebug({
+            step: 'cloudinary_fetch_success',
+            status: uploadResponse.status,
+            secureUrl: uploadBody.secure_url,
+            publicId: uploadBody.public_id,
+            resourceType: uploadBody.resource_type,
+            format: uploadBody.format,
+            bytes: uploadBody.bytes,
+          });
           return uploadBody.secure_url as string;
         }
       }
@@ -2556,6 +2647,10 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
   throw lastError instanceof Error ? lastError : new Error('Cloudinary upload failed');
 };
 
+export const uploadDataUrlImageToCloudinary = async (dataUrl: string): Promise<string> => {
+  return uploadDataUrlToCloudinary(dataUrl);
+};
+
 export const uploadImageFileToCloudinary = async (file: File): Promise<string> => {
   const signedParams = await getCloudinarySignature();
   const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
@@ -2565,6 +2660,9 @@ export const uploadImageFileToCloudinary = async (file: File): Promise<string> =
   formData.append('signature', signedParams.signature);
   formData.append('api_key', signedParams.apiKey);
   formData.append('folder', signedParams.uploadFolder);
+  if (signedParams.uploadPreset) {
+    formData.append('upload_preset', signedParams.uploadPreset);
+  }
   const response = await withTimeout(
     fetch(uploadEndpoint, { method: 'POST', body: formData }),
     CLOUDINARY_UPLOAD_TIMEOUT_MS,
@@ -3134,9 +3232,15 @@ const assertPaymentMethodByType = (type: Transaction['type'], paymentMethod: Tra
 };
 
 const assertTransactionFinancials = (transaction: Transaction) => {
-  if (transaction.type === 'payment') {
+  if (transaction.type === 'payment' || transaction.type === 'customer_credit' || transaction.type === 'customer_cash_out') {
     if (!Number.isFinite(transaction.total) || transaction.total <= 0) {
       failValidation('INVALID_PAYMENT_TOTAL', 'Payment total must be greater than zero.', { total: transaction.total });
+    }
+    if (transaction.type === 'customer_credit' && transaction.paymentMethod) {
+      failValidation('INVALID_PAYMENT_METHOD_FOR_TYPE', 'Payment method is not valid for customer credit transaction.', { paymentMethod: transaction.paymentMethod, type: transaction.type });
+    }
+    if (transaction.type === 'customer_cash_out' && !transaction.paymentMethod) {
+      failValidation('PAYMENT_METHOD_REQUIRED', 'Payment method is required for customer cash out transaction.', { type: transaction.type });
     }
     return;
   }
@@ -3228,7 +3332,7 @@ const assertTransactionFinancials = (transaction: Transaction) => {
 };
 
 const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
-  if (transaction.type === 'payment') return;
+  if (transaction.type === 'payment' || transaction.type === 'customer_credit' || transaction.type === 'customer_cash_out') return;
   if (transaction.type === 'return') {
     const linkedSourceGroups = (transaction.items || []).reduce((acc, item) => {
       if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return acc;
@@ -4654,7 +4758,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
     const allocated = allocateSalesCreditNoteNumber(data);
     data = allocated.state;
     effectiveTransaction = { ...effectiveTransaction, creditNoteNo: allocated.creditNoteNo };
-  } else if (effectiveTransaction.type === 'payment' && !effectiveTransaction.receiptNo) {
+  } else if ((effectiveTransaction.type === 'payment' || effectiveTransaction.type === 'customer_cash_out' || effectiveTransaction.type === 'customer_credit') && !effectiveTransaction.receiptNo) {
     const allocated = allocateCustomerPaymentReceiptNumber(data);
     data = allocated.state;
     effectiveTransaction = { ...effectiveTransaction, receiptNo: allocated.receiptNo };
@@ -4662,7 +4766,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
 
   const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];
-  if (effectiveTransaction.type !== 'payment') {
+  if (effectiveTransaction.type === 'sale' || effectiveTransaction.type === 'return') {
       newProducts = data.products.map(p => applyTransactionItemsToProduct(p, effectiveTransaction.items, effectiveTransaction.type));
   }
   let newCustomers = [...data.customers];
@@ -4709,6 +4813,17 @@ export const processTransaction = (transaction: Transaction): AppState => {
           dueDelta -= amount;
           newLastVisit = new Date().toISOString();
           financeLog.cash('INFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer payment collected', paymentMode: effectiveTransaction.paymentMethod, source: 'payment' });
+      } else if (effectiveTransaction.type === 'customer_credit') {
+          dueDelta += amount;
+          newLastVisit = new Date().toISOString();
+      } else if (effectiveTransaction.type === 'customer_cash_out') {
+          dueDelta += amount;
+          newLastVisit = new Date().toISOString();
+          if (effectiveTransaction.paymentMethod === 'Online') {
+            financeLog.online('OUTFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer cash out (online)', paymentMode: 'Online', source: 'customer_cash_out' });
+          } else {
+            financeLog.cash('OUTFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer cash out', paymentMode: 'Cash', source: 'customer_cash_out' });
+          }
       }
       if (effectiveTransaction.type !== 'sale') {
         const updated = normalizeCustomerBalance(
