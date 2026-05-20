@@ -1627,9 +1627,26 @@ export default function Admin() {
                    <div className="absolute right-2 top-2 p-2 bg-amber-100 rounded-lg text-amber-600 opacity-50 group-hover:opacity-100 transition-opacity">
                        <AlertTriangle className="w-5 h-5" />
                    </div>
-               </CardContent>
-          </Card>
-      </div>
+	               </CardContent>
+	          </Card>
+	          <Card className="bg-rose-50/50 border-rose-100 shadow-sm relative overflow-hidden group">
+	               <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
+	                   <div>
+	                       <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">Lost & Damage Products</p>
+	                       <p className="text-2xl font-bold text-rose-900 mt-1">{lostDamageStats.totalProducts}</p>
+	                   </div>
+	                   <div className="text-xs text-rose-700 mt-1">Qty: {lostDamageStats.totalQty}</div>
+	               </CardContent>
+	          </Card>
+	          <Card className="bg-red-50/50 border-red-100 shadow-sm relative overflow-hidden group">
+	               <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
+	                   <div>
+	                       <p className="text-xs font-bold text-red-600 uppercase tracking-widest">Total Loss Amount</p>
+	                       <p className="text-2xl font-bold text-red-900 mt-1">₹{lostDamageStats.totalAmount.toFixed(2)}</p>
+	                   </div>
+	               </CardContent>
+	          </Card>
+	      </div>
 
       {/* 2. Control Tower Toolbar (Responsive Refactor) */}
       <div className="bg-card border rounded-xl p-3 shadow-sm sticky top-0 z-20 bg-opacity-95 backdrop-blur-md">
@@ -1812,15 +1829,10 @@ export default function Admin() {
         </div>
       )}
       </>
-      ) : (
-        <div className="space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <Card><CardContent className="p-3"><div className="text-xs text-muted-foreground">Total Lost & Damage Products</div><div className="text-xl font-semibold">{lostDamageStats.totalProducts}</div></CardContent></Card>
-            <Card><CardContent className="p-3"><div className="text-xs text-muted-foreground">Total Lost & Damage Qty</div><div className="text-xl font-semibold">{lostDamageStats.totalQty}</div></CardContent></Card>
-            <Card><CardContent className="p-3"><div className="text-xs text-muted-foreground">Total Loss Amount</div><div className="text-xl font-semibold">₹{lostDamageStats.totalAmount.toFixed(2)}</div></CardContent></Card>
-          </div>
-          <div className="border rounded-xl bg-card overflow-hidden">
-            <table className="w-full text-sm">
+	      ) : (
+	        <div className="space-y-3">
+	          <div className="border rounded-xl bg-card overflow-hidden">
+	            <table className="w-full text-sm">
               <thead className="bg-muted/40">
                 <tr><th className="text-left p-3">Product</th><th className="text-left p-3">SKU</th><th className="text-left p-3">Current Stock</th><th className="text-left p-3">Lost & Damage Qty</th><th className="text-left p-3">Purchase Price</th><th className="text-left p-3">Total Loss Amount</th><th className="text-left p-3">Last Updated</th><th className="text-left p-3">Action</th></tr>
               </thead>
@@ -1830,7 +1842,7 @@ export default function Admin() {
                   const unit = Math.max(0, Number(p.lostDamageUnitCost || p.buyPrice || 0));
                   return (
                     <tr key={p.id} className="border-t">
-                      <td className="p-3">{p.name}</td><td className="p-3">{p.barcode}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
+                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{p.name}</div><div className="text-xs text-muted-foreground">{p.barcode}</div></div></div></td><td className="p-3">{p.barcode}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
                       <td className="p-3"><Button size="sm" variant="outline" onClick={() => openLostDamageModal(p)}>Edit</Button></td>
                     </tr>
                   );
@@ -2312,6 +2324,7 @@ export default function Admin() {
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total purchase (variants)</div><div className="font-semibold">{viewingVariantDetails.totalPurchase}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total sold (variants)</div><div className="font-semibold">{viewingVariantDetails.totalSold}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Avg Buy / Sell</div><div className="font-semibold">₹{viewingVariantDetails.avgBuyPrice.toFixed(2)} / ₹{viewingVariantDetails.avgSellPrice.toFixed(2)}</div></div>
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Lost & Damage</div><div className="font-semibold">{Math.max(0, Number(viewingProduct.lostDamageQty || 0))} pcs</div></div>
                   </div>
                   <div>
                     <h4 className="font-semibold mb-1.5">Variant Details</h4>
@@ -2342,7 +2355,7 @@ export default function Admin() {
                   </div>
                 </>
               ) : (
-                <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}</div>
+                <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}, Lost & Damage: {Math.max(0, Number(viewingProduct.lostDamageQty || 0))} pcs</div>
               )}
               <h4 className="font-semibold">Purchase History</h4>
               {!viewingPurchaseHistoryRows.length ? (
