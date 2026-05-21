@@ -10,6 +10,7 @@ type WizardStep = 'source' | 'product' | 'variants' | 'pricing' | 'cartons' | 'r
 type SourceMode = 'inventory' | 'new';
 type CbmMode = 'perCarton' | 'wholeOrder' | 'undecided';
 type NewInquiryTab = 'classic' | 'costing';
+type FreightReceivePriceMethod = 'no_change' | 'latest_purchase' | 'avg_method_1' | 'avg_method_2';
 
 type DraftLine = {
   key: string;
@@ -161,6 +162,13 @@ export default function FreightBooking() {
   const [visibleInquiryCount, setVisibleInquiryCount] = useState(25);
   const [visibleConfirmedCount, setVisibleConfirmedCount] = useState(25);
   const [notice, setNotice] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
+  const [showReceiveModal, setShowReceiveModal] = useState(false);
+  const [receiveTargetOrder, setReceiveTargetOrder] = useState<FreightConfirmedOrder | null>(null);
+  const [receiveQuantity, setReceiveQuantity] = useState<string>('');
+  const [receiveUnitCost, setReceiveUnitCost] = useState<string>('');
+  const [receivePriceMethod, setReceivePriceMethod] = useState<FreightReceivePriceMethod>('no_change');
+  const [receiveNotes, setReceiveNotes] = useState('');
+  const [receiveError, setReceiveError] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
@@ -194,6 +202,61 @@ export default function FreightBooking() {
       refresh();
     } catch (error: any) {
       setNotice({ type: 'error', message: error?.message || 'Unable to receive into inventory.' });
+    } finally {
+      setMaterializingOrderId(null);
+    }
+  };
+  const openReceiveModal = async (order: FreightConfirmedOrder) => {
+    try {
+      let purchase = getFreightPurchases().find((p) => p.sourceConfirmedOrderId === order.id && !p.isDeleted);
+      if (!purchase) purchase = await convertConfirmedOrderToPurchase(order.id);
+      const ordered = Math.max(0, Number(purchase.totalPieces || order.totalPieces || 0));
+      const received = Math.max(0, Number(purchase.receivedQuantity || 0));
+      const remaining = Math.max(0, ordered - received);
+      if (remaining <= 0 || purchase.status === 'received') {
+        setNotice({ type: 'error', message: 'This freight order is already fully received.' });
+        return;
+      }
+      setReceiveTargetOrder(order);
+      setReceiveQuantity(String(remaining));
+      setReceiveUnitCost(String(Math.max(0, Number(purchase.productCostPerPiece || purchase.inrPricePerPiece || 0))));
+      setReceivePriceMethod('no_change');
+      setReceiveNotes('');
+      setReceiveError(null);
+      setShowReceiveModal(true);
+    } catch (error: any) {
+      setNotice({ type: 'error', message: error?.message || 'Unable to open receive modal.' });
+    }
+  };
+  const submitReceive = async () => {
+    if (!receiveTargetOrder) return;
+    let purchase = getFreightPurchases().find((p) => p.sourceConfirmedOrderId === receiveTargetOrder.id && !p.isDeleted);
+    if (!purchase) {
+      setReceiveError('Freight purchase not found.');
+      return;
+    }
+    const ordered = Math.max(0, Number(purchase.totalPieces || 0));
+    const received = Math.max(0, Number(purchase.receivedQuantity || 0));
+    const remaining = Math.max(0, ordered - received);
+    const qty = Math.max(0, Number(receiveQuantity || 0));
+    if (remaining <= 0 || purchase.status === 'received') return setReceiveError('This freight order is already fully received.');
+    if (!Number.isFinite(qty) || qty <= 0) return setReceiveError('Receive quantity must be greater than zero.');
+    if (qty > remaining) return setReceiveError(`Receive quantity cannot exceed remaining quantity (${remaining}).`);
+    const unitCost = Math.max(0, Number(receiveUnitCost || 0));
+    setMaterializingOrderId(receiveTargetOrder.id);
+    setReceiveError(null);
+    try {
+      await receiveFreightPurchaseIntoInventory(purchase.id, {
+        quantity: qty,
+        unitCost: unitCost > 0 ? unitCost : undefined,
+        priceMethod: receivePriceMethod,
+        notes: receiveNotes.trim() || undefined,
+      });
+      setShowReceiveModal(false);
+      setReceiveTargetOrder(null);
+      refresh();
+    } catch (error: any) {
+      setReceiveError(error?.message || 'Unable to receive inventory.');
     } finally {
       setMaterializingOrderId(null);
     }
@@ -837,25 +900,30 @@ export default function FreightBooking() {
 
             <div className="space-y-2">
               <div className="text-sm font-medium text-slate-700">Existing confirmed orders</div>
-              {visibleConfirmedOrders.map(order => (
-                <div key={order.id} className="rounded-xl border p-3">
+              {visibleConfirmedOrders.map(order => {
+                const purchase = getFreightPurchases().find((p) => p.sourceConfirmedOrderId === order.id && !p.isDeleted);
+                const orderedQty = Math.max(0, Number(purchase?.totalPieces || order.totalPieces || 0));
+                const receivedQty = Math.max(0, Number(purchase?.receivedQuantity || 0));
+                const remainingQty = Math.max(0, orderedQty - receivedQty);
+                const statusLabel = purchase?.status || order.status;
+                return <div key={order.id} className="rounded-xl border p-3">
                   <div className="font-medium text-slate-900">{order.productName}</div>
                   <div className="text-xs text-muted-foreground">
-                    Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
+                    Status: {statusLabel} · Ordered {formatNumber(orderedQty, 0)} pcs · Received {formatNumber(receivedQty, 0)} · Remaining {formatNumber(remainingQty, 0)} · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
                   </div>
                   {order.source === 'new' && (
                     <div className="mt-2">
                       {order.inventoryProductId ? (
                         <div className="text-xs text-emerald-700">Added to Inventory · Product ID: {order.inventoryProductId}</div>
                       ) : (
-                        <Button size="sm" variant="outline" onClick={() => receiveIntoInventory(order)} disabled={materializingOrderId === order.id}>
-                          {materializingOrderId === order.id ? 'Receiving...' : 'Receive into Inventory'}
+                        <Button size="sm" variant="outline" onClick={() => openReceiveModal(order)} disabled={materializingOrderId === order.id || remainingQty <= 0 || statusLabel === 'cancelled'}>
+                          {materializingOrderId === order.id ? 'Receiving...' : remainingQty > 0 && receivedQty > 0 ? 'Receive More' : 'Receive into Inventory'}
                         </Button>
                       )}
                     </div>
                   )}
-                </div>
-              ))}
+                </div>;
+              })}
               {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}
               {confirmedOrders.length > visibleConfirmedCount && (
                 <Button size="sm" variant="outline" onClick={() => setVisibleConfirmedCount((prev) => prev + 25)}>Load More Confirmed Orders</Button>
@@ -864,6 +932,44 @@ export default function FreightBooking() {
           </CardContent>
         </Card>
       )}
+      <Modal open={showReceiveModal} title="Receive Freight into Inventory" onClose={() => { if (!materializingOrderId) setShowReceiveModal(false); }}>
+        {(() => {
+          if (!receiveTargetOrder) return <div className="text-sm text-muted-foreground">No order selected.</div>;
+          const purchase = getFreightPurchases().find((p) => p.sourceConfirmedOrderId === receiveTargetOrder.id && !p.isDeleted);
+          if (!purchase) return <div className="text-sm text-rose-600">Freight purchase not found.</div>;
+          const ordered = Math.max(0, Number(purchase.totalPieces || 0));
+          const received = Math.max(0, Number(purchase.receivedQuantity || 0));
+          const remaining = Math.max(0, ordered - received);
+          return <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div><span className="text-slate-500">Reference:</span> <span className="font-medium">FP-{purchase.id.slice(-6)}</span></div>
+              <div><span className="text-slate-500">Product:</span> <span className="font-medium">{purchase.productName}</span></div>
+              <div><span className="text-slate-500">Ordered:</span> {formatNumber(ordered, 0)}</div>
+              <div><span className="text-slate-500">Received:</span> {formatNumber(received, 0)}</div>
+              <div><span className="text-slate-500">Remaining:</span> {formatNumber(remaining, 0)}</div>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div><Label>Receive Quantity</Label><Input type="number" min="0" value={receiveQuantity} onChange={(e) => setReceiveQuantity(e.target.value)} /></div>
+              <div><Label>Unit Purchase Cost</Label><Input type="number" min="0" value={receiveUnitCost} onChange={(e) => setReceiveUnitCost(e.target.value)} /></div>
+            </div>
+            <div>
+              <Label>Price Update Method</Label>
+              <select className="mt-1 h-10 w-full rounded-md border px-3 text-sm" value={receivePriceMethod} onChange={(e) => setReceivePriceMethod(e.target.value as FreightReceivePriceMethod)}>
+                <option value="no_change">No change</option>
+                <option value="latest_purchase">Set latest buy price</option>
+                <option value="avg_method_1">Weighted average (method 1)</option>
+                <option value="avg_method_2">Weighted average (method 2)</option>
+              </select>
+            </div>
+            <div><Label>Notes (optional)</Label><Input value={receiveNotes} onChange={(e) => setReceiveNotes(e.target.value)} placeholder="Receive notes" /></div>
+            {receiveError && <div className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-sm text-rose-700">{receiveError}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowReceiveModal(false)} disabled={!!materializingOrderId}>Cancel</Button>
+              <Button onClick={submitReceive} disabled={!!materializingOrderId}>{materializingOrderId ? 'Receiving...' : 'Confirm Receive'}</Button>
+            </div>
+          </div>;
+        })()}
+      </Modal>
 
       {activeTab === 'brokers' && (
         <Card>
@@ -904,7 +1010,11 @@ export default function FreightBooking() {
                   <div key={inquiry.id} className="rounded-2xl border border-slate-200 p-4 hover:bg-slate-50">
                     <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                       <div className="flex items-center gap-4">
-                        <img src={inquiry.productPhoto || ''} alt={inquiry.productName} className="h-14 w-14 rounded-2xl object-cover border" />
+                        {inquiry.productPhoto ? (
+                          <img src={inquiry.productPhoto} alt={inquiry.productName} className="h-14 w-14 rounded-2xl object-cover border" />
+                        ) : (
+                          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border bg-slate-100 text-[10px] text-slate-500">No image</div>
+                        )}
                         <div>
                           <div className="text-base font-semibold text-slate-900">{inquiry.productName}</div>
                           <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
@@ -1011,7 +1121,7 @@ export default function FreightBooking() {
                 </div>
               </div>
             </div>
-            <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={resetWizard}>Reset</Button><button onClick={() => { const errs:string[]=[]; if (!costingDate) errs.push('Date is required.'); if (!newProductName.trim()) errs.push('Item is required.'); if (!brokerId) errs.push('Party is required.'); if (costingMetrics.pcsPerCtn <= 0) errs.push('Pcs/CTN must be greater than 0.'); if (costingMetrics.cartons <= 0) errs.push('Carton must be greater than 0.'); if (costingMetrics.totalPcs <= 0) errs.push('Total Pcs must be greater than 0.'); if (costingMetrics.rmbPerPcs < 0) errs.push('RMB/Pcs must be >= 0.'); if (costingMetrics.inrRate < 0) errs.push('INR Rate must be >= 0.'); if (costingMetrics.cbmPerCtn < 0) errs.push('CBM/CTN must be >= 0.'); if (costingMetrics.cbmRate < 0) errs.push('CBM Rate must be >= 0.'); if (costingMetrics.sellingPrice < 0) errs.push('Selling Price must be >= 0.'); setCostingErrors(errs); if (errs.length) return; setWizardStep('review'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Continue to Review <ArrowRight className="h-4 w-4" /></button></div>{costingErrors.length>0 && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{costingErrors.map(err => <div key={err}>• {err}</div>)}</div>}
+            <div className="mt-5 flex justify-end gap-2"><Button variant="outline" onClick={resetWizard}>Reset</Button><button onClick={() => { const errs:string[]=[]; if (!costingDate) errs.push('Date is required.'); if (sourceMode === 'inventory') { if (!selectedProduct?.id) errs.push('Please select an existing product.'); } else if (!newProductName.trim()) errs.push('Item is required.'); if (!brokerId) errs.push('Party is required.'); if (costingMetrics.pcsPerCtn <= 0) errs.push('Pcs/CTN must be greater than 0.'); if (costingMetrics.cartons <= 0) errs.push('Carton must be greater than 0.'); if (costingMetrics.totalPcs <= 0) errs.push('Total Pcs must be greater than 0.'); if (costingMetrics.rmbPerPcs < 0) errs.push('RMB/Pcs must be >= 0.'); if (costingMetrics.inrRate < 0) errs.push('INR Rate must be >= 0.'); if (costingMetrics.cbmPerCtn < 0) errs.push('CBM/CTN must be >= 0.'); if (costingMetrics.cbmRate < 0) errs.push('CBM Rate must be >= 0.'); if (costingMetrics.sellingPrice < 0) errs.push('Selling Price must be >= 0.'); setCostingErrors(errs); if (errs.length) return; setWizardStep('review'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Continue to Review <ArrowRight className="h-4 w-4" /></button></div>{costingErrors.length>0 && <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{costingErrors.map(err => <div key={err}>• {err}</div>)}</div>}
           </div>
         )}
 
