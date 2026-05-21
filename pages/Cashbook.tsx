@@ -249,7 +249,7 @@ export default function Cashbook() {
         const amount = Math.max(0, Number(sp.amount || 0));
         const paymentMethod = getSupplierPaymentMethod(sp.method);
         const isOnline = paymentMethod === 'online';
-        const payableApplied = Math.max(0, Number(sp.payableApplied || 0));
+        const payableApplied = Math.max(0, Number((sp.paymentAppliedToPayable ?? sp.payableApplied ?? 0) || 0));
         const partyCreditCreated = Math.max(0, Number(sp.partyCreditCreated || 0));
         const overpaymentText = partyCreditCreated > 0
           ? ` • Payable reduced ${fmt(payableApplied)} • Party credit added ${fmt(partyCreditCreated)}`
@@ -263,7 +263,7 @@ export default function Cashbook() {
           party: sp.partyName || 'Supplier',
           payment: paymentMethod,
           cashIn: 0, cashOut: isOnline ? 0 : amount, bankIn: 0, bankOut: isOnline ? amount : 0,
-          receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: amount, storeCreditIncrease: 0, storeCreditDecrease: 0,
+          receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: payableApplied, storeCreditIncrease: partyCreditCreated, storeCreditDecrease: 0,
         };
       });
     const legacyMap = new Map<string, { date: string; party: string; method: 'cash' | 'online'; note: string; amount: number; allocations: number }>();
