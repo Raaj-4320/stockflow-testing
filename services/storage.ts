@@ -4240,6 +4240,12 @@ export const updatePurchaseParty = async (party: PurchaseParty): Promise<Purchas
   return party;
 };
 
+export const deletePurchaseParty = async (partyId: string): Promise<void> => {
+  const data = loadData();
+  const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty', auditOperation: 'DELETE' });
+};
+
 export const getPurchaseOrders = (): PurchaseOrder[] => {
   const data = loadData();
   return data.purchaseOrders || [];
