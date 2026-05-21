@@ -4,6 +4,7 @@ import { CashAdjustment, Customer, DeleteCompensationRecord, Expense, PartyCredi
 import { allocateCustomerPaymentAgainstCompositeReceivable, applyPartyCreditToPurchaseOrder, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { buildPurchasePartyLedger } from '../services/purchaseLedger';
 import { generateAccountStatementPDF } from '../services/pdf';
 import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
 
@@ -624,116 +625,36 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
 
   const partyStatement = useMemo(() => {
     if (!selectedParty) return null;
-    const partyOrders = orders
-      .filter(order => order.partyId === selectedParty.id && order.status !== 'cancelled')
-      .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
-
-    const purchaseEvents: Array<{ id: string; date: string; type: 'purchase'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [];
-    let totalPurchase = 0;
-    let lastPaymentAt = '';
-    let lastPurchaseAt = '';
-    let totalPartyCreditUsed = 0;
-
-    partyOrders.forEach(order => {
-      const orderTotal = Math.max(0, Number(order.totalAmount || 0));
-      const sameOrderPartyCreditUsed = Number((order.paymentHistory || []).reduce((sum, payment) => {
-        const method = String(payment.method || '').toLowerCase();
-        if (method !== 'party_credit') return sum;
-        return sum + Math.max(0, Number(payment.amount || 0));
-      }, 0).toFixed(2));
-      if (sameOrderPartyCreditUsed > 0) {
-        totalPartyCreditUsed = Number((totalPartyCreditUsed + sameOrderPartyCreditUsed).toFixed(2));
-      }
-      totalPurchase += orderTotal;
-      lastPurchaseAt = order.orderDate || lastPurchaseAt;
-      purchaseEvents.push({
-        id: `order-${order.id}`,
-        date: order.orderDate || order.createdAt,
-        type: 'purchase',
-        ref: order.billNumber || order.id.slice(-6),
-        description: `PO ${order.billNumber || order.id.slice(-6)} • ${getPurchaseOrderProductSummary(order)}${order.status ? ` • ${order.status}` : ''}${sameOrderPartyCreditUsed > 0 ? ` • Party Credit Applied ${formatINRPrecise(sameOrderPartyCreditUsed)}` : ''}`,
-        debit: orderTotal,
-        credit: sameOrderPartyCreditUsed,
-        tone: 'due',
-      });
-
+    const result = buildPurchasePartyLedger({
+      partyId: selectedParty.id,
+      purchaseOrders: orders,
+      supplierPayments,
+      partyCreditLedger,
     });
-    const paymentEvents: Array<{ id: string; date: string; type: 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone']; source: 'direct' | 'legacyGroup'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }> }> = [];
-    const directPayments = supplierPayments.filter(payment => payment.partyId === selectedParty.id && !payment.deletedAt);
-    directPayments.forEach(payment => {
-      if (!lastPaymentAt || new Date(payment.paidAt).getTime() > new Date(lastPaymentAt).getTime()) lastPaymentAt = payment.paidAt;
-      paymentEvents.push({
-        id: `sp-${payment.id}`,
-        date: payment.paidAt,
-        type: 'payment',
-        ref: payment.voucherNo || payment.id.slice(-6),
-        description: `${formatGroupedSupplierPaymentDescription(payment.method, Math.max(1, payment.allocations?.length || 1))}${Math.max(0, Number(payment.partyCreditCreated || 0)) > 0 ? ` • Payable Applied ${formatINRPrecise(payment.paymentAppliedToPayable || 0)} • Party Credit Created ${formatINRPrecise(payment.partyCreditCreated || 0)}` : ''}`,
-        debit: 0,
-        credit: Math.max(0, Number(payment.amount || 0)),
-        tone: payment.method === 'cash' ? 'cash' : 'payment',
-        source: 'direct',
-      });
-    });
-
-    const legacyMap = new Map<string, { date: string; method: string; note: string; credit: number; allocations: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }> }>();
-    partyOrders.forEach((order) => {
-      (order.paymentHistory || []).forEach((payment) => {
-        if ((payment as any).supplierPaymentId) return;
-        const amount = Math.max(0, Number(payment.amount || 0));
-        if (amount <= 0) return;
-        const method = (payment.method || 'cash').toLowerCase();
-        if (method === 'party_credit') return;
-        const note = (payment.note || '').trim().toLowerCase().replace(/\s+/g, ' ');
-        const minuteBucket = new Date(Math.floor(new Date(payment.paidAt).getTime() / 60000) * 60000).toISOString().slice(0, 16);
-        const key = `${selectedParty.id}|${method}|${note}|${minuteBucket}`;
-        const existing = legacyMap.get(key) || { date: payment.paidAt, method, note, credit: 0, allocations: [] };
-        existing.credit = Number((existing.credit + amount).toFixed(2));
-        existing.allocations.push({ orderId: order.id, orderRef: order.billNumber || order.id.slice(-6), paymentId: payment.id, amount });
-        if (new Date(payment.paidAt).getTime() > new Date(existing.date).getTime()) existing.date = payment.paidAt;
-        legacyMap.set(key, existing);
-      });
-    });
-    legacyMap.forEach((group, key) => {
-      if (!lastPaymentAt || new Date(group.date).getTime() > new Date(lastPaymentAt).getTime()) lastPaymentAt = group.date;
-      paymentEvents.push({
-        id: `legacy-${key}`,
-        date: group.date,
-        type: 'payment',
-        ref: group.allocations[0]?.orderRef || 'legacy',
-        description: formatGroupedSupplierPaymentDescription(group.method, group.allocations.length),
-        debit: 0,
-        credit: group.credit,
-        tone: group.method === 'cash' ? 'cash' : 'payment',
-        source: 'legacyGroup',
-        allocations: group.allocations,
-      });
-    });
-
-    const totalActualPayments = Number(paymentEvents.reduce((sum, event) => sum + event.credit, 0).toFixed(2));
-    const events: Array<{ id: string; date: string; type: 'purchase' | 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [...purchaseEvents, ...paymentEvents];
-    const sortedEvents = events.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    let runningBalance = 0;
-    const rows: LedgerRow[] = sortedEvents.map((event) => {
-      runningBalance = Math.max(0, Number((runningBalance + event.debit - event.credit).toFixed(2)));
-      return {
-        id: event.id,
-        date: event.date,
-        type: event.type === 'purchase' ? 'Purchase' : 'Payment',
-        ref: event.ref,
-        description: event.description,
-        debit: event.debit,
-        credit: event.credit,
-        balance: runningBalance,
-        tone: event.tone,
-        source: (event as any).source || (event.type === 'purchase' ? 'purchase' : undefined),
-        allocations: (event as any).allocations,
-      };
-    });
-
-    const remaining = Math.max(0, Number((totalPurchase - totalActualPayments - totalPartyCreditUsed).toFixed(2)));
+    const rows: LedgerRow[] = result.rows.map((row) => ({
+      id: row.id,
+      date: row.date,
+      type: row.type === 'purchase' ? 'Purchase' : row.type === 'credit_used' ? 'Credit Used' : 'Payment',
+      ref: row.reference,
+      description: row.description,
+      debit: row.payableIncrease,
+      credit: row.actualPayment || row.creditUsed,
+      balance: row.netPayable,
+      tone: row.type === 'purchase' ? 'due' : (row.type === 'supplier_payment' ? 'payment' : 'cash'),
+      source: row.sourceType,
+    }));
     const displayRows = [...rows].reverse();
-    return { rows, displayRows, totalPurchase, totalActualPayments, totalPartyCreditUsed, remaining, lastPaymentAt, lastPurchaseAt };
-  }, [selectedParty, orders, supplierPayments]);
+    return {
+      rows,
+      displayRows,
+      totalPurchase: result.summary.totalPurchase,
+      totalActualPayments: result.summary.actualPayments,
+      totalPartyCreditUsed: result.summary.partyCreditUsed,
+      remaining: result.summary.remainingPayable,
+      lastPaymentAt: result.rows.filter((r) => r.type === 'supplier_payment').slice(-1)[0]?.date || '',
+      lastPurchaseAt: result.rows.filter((r) => r.type === 'purchase').slice(-1)[0]?.date || '',
+    };
+  }, [selectedParty, orders, supplierPayments, partyCreditLedger]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
     setReceivingCustomer(customer);
