@@ -316,7 +316,7 @@ export const clampCreditDueAmount = (value: number) => {
 export const getCustomerCustomOrderPaymentApplications = (customerId: string, transactions: Transaction[]) => (
   transactions
     .filter((tx) => tx.type === 'payment' && tx.customerId === customerId)
-    .reduce((sum, tx) => sum + Math.max(0, toFiniteNumber((tx as any).paymentAppliedToCustomOrderReceivable, 0)), 0)
+    .reduce((sum, tx) => sum + Math.max(0, toFiniteNumber((tx as any).appliedToCustomOrderReceivable, toFiniteNumber((tx as any).paymentAppliedToCustomOrderReceivable, 0))), 0)
 );
 
 export const getCustomerCompositeReceivableBreakdown = (
@@ -737,6 +737,15 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         const reconciliation = getReturnReconciliationAmounts(tx, priorTransactions, runningDue);
         runningDue = roundCurrency(Math.max(0, runningDue - reconciliation.dueReduction));
         runningStoreCredit = roundCurrency(runningStoreCredit + reconciliation.storeCreditIncrease);
+      } else if (tx.type === 'customer_credit') {
+        runningDue = roundCurrency(runningDue + amount);
+      } else if (tx.type === 'customer_cash_out') {
+        const explicitStoreCreditUsed = Math.max(0, toFiniteNumber((tx as any).storeCreditUsed, Number.NaN));
+        const inferredStoreCreditUsed = Math.min(runningStoreCredit, amount);
+        const storeCreditUsed = Number.isFinite(explicitStoreCreditUsed) ? Math.min(explicitStoreCreditUsed, amount, runningStoreCredit) : inferredStoreCreditUsed;
+        const receivableIncrease = roundCurrency(Math.max(0, amount - storeCreditUsed));
+        runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - storeCreditUsed));
+        runningDue = roundCurrency(runningDue + receivableIncrease);
       }
     });
 
@@ -826,6 +835,23 @@ const getTransactionAuditEffectSummary = (
       paymentMethod: transaction.paymentMethod || 'Cash',
       cashIn: transaction.paymentMethod === 'Online' ? 0 : amount,
       onlineIn: transaction.paymentMethod === 'Online' ? amount : 0,
+    };
+  }
+  if (transaction.type === 'customer_cash_out') {
+    const cashOut = transaction.paymentMethod === 'Online' ? 0 : amount;
+    const onlineOut = transaction.paymentMethod === 'Online' ? amount : 0;
+    return {
+      ...getZeroCashbookEffectDeltaSnapshot(),
+      currentDueEffect: roundCurrency(amount),
+      cashOut: roundCurrency(cashOut),
+      onlineOut: roundCurrency(onlineOut),
+      netCashEffect: roundCurrency(-cashOut),
+    };
+  }
+  if (transaction.type === 'customer_credit') {
+    return {
+      ...getZeroCashbookEffectDeltaSnapshot(),
+      currentDueEffect: roundCurrency(amount),
     };
   }
   const allocation = getCanonicalReturnAllocation(transaction, historicalTransactions, dueBeforeHint);
@@ -1635,7 +1661,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  autoSendInvoiceAfterCreation: false
 };
 
 const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
@@ -2317,6 +2344,18 @@ const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
 const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
 const CLOUDINARY_RETRY_DELAY_MS = 1200;
 const CLOUDINARY_MAX_ATTEMPTS = 2;
+const INVOICE_SEND_DEBUG_PREFIX = '[INVOICE_SEND_DEBUG]';
+const isInvoiceSendDebugEnabled = (): boolean => {
+  try {
+    return typeof window !== 'undefined' && (window.location.href.includes('invoiceSendDebug=1') || window.localStorage.getItem('INVOICE_SEND_DEBUG') === '1');
+  } catch {
+    return false;
+  }
+};
+const logInvoiceSendDebug = (payload: unknown) => {
+  if (!isInvoiceSendDebugEnabled()) return;
+  console.log(INVOICE_SEND_DEBUG_PREFIX, JSON.stringify(payload, null, 2));
+};
 
 type CloudinarySignResponse = {
   timestamp: number;
@@ -2324,6 +2363,7 @@ type CloudinarySignResponse = {
   apiKey: string;
   cloudName: string;
   uploadFolder: string;
+  uploadPreset?: string;
 };
 
 type CloudinaryStage = 'signature' | 'upload';
@@ -2432,6 +2472,8 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
           `Cloudinary signature request timed out (${endpoint})`
         );
 
+        logInvoiceSendDebug({ step: 'signature_response', status: response.status, endpoint });
+
         if (!response.ok) {
           const error = new CloudinaryUploadError({
             message: `Cloudinary signature endpoint failed with ${response.status}`,
@@ -2446,6 +2488,16 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
         }
 
         const body = await response.json() as CloudinarySignResponse;
+        logInvoiceSendDebug({
+          step: 'signature_response',
+          status: response.status,
+          hasCloudName: Boolean(body?.cloudName),
+          hasApiKey: Boolean(body?.apiKey),
+          hasSignature: Boolean(body?.signature),
+          hasTimestamp: Boolean(body?.timestamp),
+          uploadFolder: body?.uploadFolder || '',
+          hasUploadPreset: Boolean(body?.uploadPreset),
+        });
         if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp || !body?.uploadFolder) {
           const error = new CloudinaryUploadError({
             message: 'Cloudinary signature response missing required fields',
@@ -2482,8 +2534,26 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
 
 const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
   const signedParams = await getCloudinarySignature();
-  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
+  const resourceType = 'image';
+  const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/${resourceType}/upload`;
   let lastError: unknown = null;
+  logInvoiceSendDebug({
+    step: 'cloudinary_signature_start',
+    resourceType,
+    dataUrlPrefix: dataUrl.slice(0, 80),
+    dataUrlLength: dataUrl.length,
+    isPdf: dataUrl.startsWith('data:application/pdf'),
+  });
+  logInvoiceSendDebug({
+    step: 'cloudinary_signature_received',
+    cloudName: signedParams.cloudName,
+    apiKeyPresent: Boolean(signedParams.apiKey),
+    signaturePresent: Boolean(signedParams.signature),
+    timestamp: signedParams.timestamp,
+    uploadFolder: signedParams.uploadFolder,
+    uploadPresetPresent: Boolean(signedParams.uploadPreset),
+    resourceType,
+  });
 
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
     try {
@@ -2493,6 +2563,15 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
       formData.append('signature', signedParams.signature);
       formData.append('api_key', signedParams.apiKey);
       formData.append('folder', signedParams.uploadFolder);
+      if (signedParams.uploadPreset) {
+        formData.append('upload_preset', signedParams.uploadPreset);
+      }
+      logInvoiceSendDebug({
+        step: 'cloudinary_fetch_start',
+        uploadEndpoint,
+        formDataKeys: ['file', 'timestamp', 'signature', 'api_key', 'folder', ...(signedParams.uploadPreset ? ['upload_preset'] : [])],
+        resourceType,
+      });
 
       const uploadResponse = await withTimeout(
         fetch(uploadEndpoint, {
@@ -2510,9 +2589,19 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
         } catch {
           providerError = null;
         }
+        logInvoiceSendDebug({
+          step: 'cloudinary_fetch_failed',
+          status: uploadResponse.status,
+          statusText: uploadResponse.statusText,
+          cloudinaryError: (providerError as any)?.error?.message || providerError,
+          uploadEndpoint,
+          resourceType,
+          dataUrlPrefix: dataUrl.slice(0, 80),
+          dataUrlLength: dataUrl.length,
+        });
 
         const error = new CloudinaryUploadError({
-          message: `Cloudinary upload failed with ${uploadResponse.status}`,
+          message: `Cloudinary upload failed: ${String((providerError as any)?.error?.message || uploadResponse.statusText || uploadResponse.status)}`,
           stage: 'upload',
           reason: uploadResponse.status === 404 ? 'bad-endpoint' : 'http-failure',
           attempt,
@@ -2533,6 +2622,15 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
           });
           lastError = error;
         } else {
+          logInvoiceSendDebug({
+            step: 'cloudinary_fetch_success',
+            status: uploadResponse.status,
+            secureUrl: uploadBody.secure_url,
+            publicId: uploadBody.public_id,
+            resourceType: uploadBody.resource_type,
+            format: uploadBody.format,
+            bytes: uploadBody.bytes,
+          });
           return uploadBody.secure_url as string;
         }
       }
@@ -2556,6 +2654,10 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
   throw lastError instanceof Error ? lastError : new Error('Cloudinary upload failed');
 };
 
+export const uploadDataUrlImageToCloudinary = async (dataUrl: string): Promise<string> => {
+  return uploadDataUrlToCloudinary(dataUrl);
+};
+
 export const uploadImageFileToCloudinary = async (file: File): Promise<string> => {
   const signedParams = await getCloudinarySignature();
   const uploadEndpoint = `https://api.cloudinary.com/v1_1/${signedParams.cloudName}/image/upload`;
@@ -2565,6 +2667,9 @@ export const uploadImageFileToCloudinary = async (file: File): Promise<string> =
   formData.append('signature', signedParams.signature);
   formData.append('api_key', signedParams.apiKey);
   formData.append('folder', signedParams.uploadFolder);
+  if (signedParams.uploadPreset) {
+    formData.append('upload_preset', signedParams.uploadPreset);
+  }
   const response = await withTimeout(
     fetch(uploadEndpoint, { method: 'POST', body: formData }),
     CLOUDINARY_UPLOAD_TIMEOUT_MS,
@@ -3134,9 +3239,15 @@ const assertPaymentMethodByType = (type: Transaction['type'], paymentMethod: Tra
 };
 
 const assertTransactionFinancials = (transaction: Transaction) => {
-  if (transaction.type === 'payment') {
+  if (transaction.type === 'payment' || transaction.type === 'customer_credit' || transaction.type === 'customer_cash_out') {
     if (!Number.isFinite(transaction.total) || transaction.total <= 0) {
       failValidation('INVALID_PAYMENT_TOTAL', 'Payment total must be greater than zero.', { total: transaction.total });
+    }
+    if (transaction.type === 'customer_credit' && transaction.paymentMethod) {
+      failValidation('INVALID_PAYMENT_METHOD_FOR_TYPE', 'Payment method is not valid for customer credit transaction.', { paymentMethod: transaction.paymentMethod, type: transaction.type });
+    }
+    if (transaction.type === 'customer_cash_out' && !transaction.paymentMethod) {
+      failValidation('PAYMENT_METHOD_REQUIRED', 'Payment method is required for customer cash out transaction.', { type: transaction.type });
     }
     return;
   }
@@ -3228,7 +3339,7 @@ const assertTransactionFinancials = (transaction: Transaction) => {
 };
 
 const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
-  if (transaction.type === 'payment') return;
+  if (transaction.type === 'payment' || transaction.type === 'customer_credit' || transaction.type === 'customer_cash_out') return;
   if (transaction.type === 'return') {
     const linkedSourceGroups = (transaction.items || []).reduce((acc, item) => {
       if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return acc;
@@ -3918,24 +4029,42 @@ export const convertConfirmedOrderToPurchase = async (
   return purchase;
 };
 
-export const receiveFreightPurchaseIntoInventory = async (purchaseId: string): Promise<{ purchase: FreightPurchase; product: Product }> => {
+export const receiveFreightPurchaseIntoInventory = async (
+  purchaseId: string,
+  options?: {
+    quantity?: number;
+    unitCost?: number;
+    priceMethod?: PurchasePriceUpdateMethod | 'no_change';
+    notes?: string;
+    receiveEventId?: string;
+  }
+): Promise<{ purchase: FreightPurchase; product: Product }> => {
   const data = loadData();
   const purchase = (data.freightPurchases || []).find(item => item.id === purchaseId && !item.isDeleted);
   if (!purchase) failValidation('FREIGHT_PURCHASE_NOT_FOUND', 'Freight purchase not found.', { purchaseId });
-  if (purchase.source !== 'new') failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Only new-source freight purchases can be materialized.', { purchaseId, source: purchase.source });
-  if (purchase.materializedProductId) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Freight purchase already materialized to inventory.', { purchaseId, materializedProductId: purchase.materializedProductId });
-
   const name = (purchase.productName || '').trim();
-  const qty = Math.max(0, Number(purchase.totalPieces) || 0);
+  const totalPieces = Math.max(0, Number(purchase.totalPieces) || 0);
+  const alreadyReceived = Math.max(0, Number(purchase.receivedQuantity || 0));
+  const remaining = Math.max(0, totalPieces - alreadyReceived);
   if (!name) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Product name is required for inventory materialization.', { purchaseId });
-  if (qty <= 0) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Received quantity must be greater than zero.', { purchaseId, totalPieces: purchase.totalPieces });
+  if (remaining <= 0 || purchase.status === 'received') failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Freight purchase already fully received.', { purchaseId, totalPieces, alreadyReceived, remaining });
+  const requestedQty = options?.quantity === undefined ? remaining : Math.max(0, Number(options.quantity || 0));
+  if (requestedQty <= 0) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Receive quantity must be greater than zero.', { purchaseId, requestedQty });
+  if (requestedQty > remaining) failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Receive quantity cannot exceed remaining quantity.', { purchaseId, requestedQty, remaining });
+  const qty = Math.min(requestedQty, remaining);
 
   const existingProducts = data.products || [];
   const now = new Date().toISOString();
   const variant = (purchase.variant || '').trim();
   const color = (purchase.color || '').trim();
-  const unitCost = Math.max(0, Number(purchase.productCostPerPiece || purchase.inrPricePerPiece || 0));
-  const buyPrice = unitCost;
+  const unitCost = Math.max(0, Number(options?.unitCost ?? purchase.productCostPerPiece ?? purchase.inrPricePerPiece ?? 0));
+  const priceMethod = options?.priceMethod || 'no_change';
+  const receiveEventId = options?.receiveEventId || `freight-recv-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const receiveHistory = Array.isArray(purchase.receiveHistory) ? [...purchase.receiveHistory] : [];
+  if (receiveHistory.some((event) => event.id === receiveEventId)) {
+    failValidation('FREIGHT_PURCHASE_INVALID_STATE', 'Duplicate receive event detected.', { purchaseId, receiveEventId });
+  }
+  const buyPrice = unitCost > 0 ? unitCost : Math.max(0, Number(purchase.productCostPerPiece || purchase.inrPricePerPiece || 0));
   const sellPrice = Math.max(0, Number(purchase.sellingPrice || 0), buyPrice, buyPrice * 1.2);
   const generatedBarcode = `FRG-${Math.floor(100000 + Math.random() * 900000)}`;
   const barcode = generatedBarcode;
@@ -3943,44 +4072,87 @@ export const receiveFreightPurchaseIntoInventory = async (purchaseId: string): P
     failValidation('DUPLICATE_BARCODE', 'Generated freight barcode already exists. Retry materialization.', { purchaseId, barcode });
   }
 
-  const product: Product = {
-    id: `freight-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-    barcode,
-    name,
-    description: purchase.lines?.[0]?.baseProductDetails || '',
-    buyPrice,
-    sellPrice,
-    stock: qty,
-    image: resolveFreightProductImageUrl((purchase as any).productPhoto, (purchase as any).imageUrl, (purchase as any).image),
-    category: purchase.category || 'Uncategorized',
-    variants: variant ? [variant] : [],
-    colors: color ? [color] : [],
-    stockByVariantColor: variant || color ? [{ variant: variant || 'No Variant', color: color || 'No Color', stock: qty, totalPurchase: qty, totalSold: 0 }] : [],
-    totalPurchase: qty,
-    totalSold: 0,
+  let product = purchase.materializedProductId
+    ? existingProducts.find((item) => item.id === purchase.materializedProductId)
+    : undefined;
+  if (!product && purchase.inventoryProductId) {
+    product = existingProducts.find((item) => item.id === purchase.inventoryProductId);
+  }
+  if (!product) {
+    const created: Product = {
+      id: `freight-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      barcode,
+      name,
+      description: purchase.lines?.[0]?.baseProductDetails || '',
+      buyPrice,
+      sellPrice,
+      stock: 0,
+      image: resolveFreightProductImageUrl((purchase as any).productPhoto, (purchase as any).imageUrl, (purchase as any).image),
+      category: purchase.category || 'Uncategorized',
+      variants: variant ? [variant] : [],
+      colors: color ? [color] : [],
+      stockByVariantColor: variant || color ? [{ variant: variant || 'No Variant', color: color || 'No Color', stock: 0, totalPurchase: 0, totalSold: 0 }] : [],
+      totalPurchase: 0,
+      totalSold: 0,
+      purchaseHistory: [],
+    };
+    await addProduct(created);
+    product = created;
+  }
+  const previousStock = Math.max(0, Number(product.stock || 0));
+  const existingVariantQty = getVariantExistingStock(product, variant, color);
+  const nextBuyPrice = resolveNextBuyPrice({
+    currentBuyPrice: product.buyPrice,
+    lineUnitCost: unitCost > 0 ? unitCost : Math.max(0, Number(product.buyPrice || 0)),
+    lineQuantity: qty,
+    existingQtyForMethod1: existingVariantQty,
+    existingQtyForMethod2: previousStock,
+    method: priceMethod,
+  });
+  const normalizedVariant = variant || 'No Variant';
+  const normalizedColor = color || 'No Color';
+  let stockRows = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
+  if (variant || color) {
+    const idx = stockRows.findIndex((row) => (row.variant || 'No Variant') === normalizedVariant && (row.color || 'No Color') === normalizedColor);
+    if (idx >= 0) stockRows[idx] = { ...stockRows[idx], stock: Math.max(0, Number(stockRows[idx].stock || 0) + qty), totalPurchase: Math.max(0, Number(stockRows[idx].totalPurchase || 0) + qty) };
+    else stockRows.push({ variant: normalizedVariant, color: normalizedColor, stock: qty, totalPurchase: qty, totalSold: 0 });
+  }
+  const inferredNotes = `${remaining - qty > 0 ? 'Partial' : 'Full'} freight receive from ${purchase.brokerName || 'broker'} (${purchase.orderType.replace('_', ' ')})`;
+  const updatedProduct: Product = {
+    ...product,
+    buyPrice: nextBuyPrice,
+    stock: Math.max(0, previousStock + qty),
+    totalPurchase: Math.max(0, Number(product.totalPurchase || 0) + qty),
+    stockByVariantColor: stockRows,
     purchaseHistory: [{
       id: `ph-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
       date: now,
-      variant: variant || 'No Variant',
-      color: color || 'No Color',
+      variant: normalizedVariant,
+      color: normalizedColor,
       quantity: qty,
-      unitPrice: buyPrice,
-      previousStock: 0,
-      previousBuyPrice: 0,
-      nextBuyPrice: buyPrice,
+      unitPrice: unitCost > 0 ? unitCost : Math.max(0, Number(product.buyPrice || 0)),
+      previousStock,
+      previousBuyPrice: Math.max(0, Number(product.buyPrice || 0)),
+      nextBuyPrice,
+      purchaseOrderId: purchase.id,
       reference: `FREIGHT:${purchase.id}`,
-      notes: 'Materialized from freight receive',
-    }],
+      notes: [options?.notes?.trim() || '', inferredNotes].filter(Boolean).join(' • '),
+    }, ...(product.purchaseHistory || [])],
   };
-  await addProduct(product);
+  await updateProduct(updatedProduct);
 
+  const nextReceived = alreadyReceived + qty;
+  const nextRemaining = Math.max(0, totalPieces - nextReceived);
   const updatedPurchase: FreightPurchase = {
     ...purchase,
-    status: 'received',
-    materializedProductId: product.id,
-    materializedAt: now,
-    receivedAt: now,
-    inventoryProductId: product.id,
+    status: nextRemaining <= 0 ? 'received' : 'partially_received',
+    materializedProductId: updatedProduct.id,
+    materializedAt: purchase.materializedAt || now,
+    receivedAt: nextRemaining <= 0 ? now : purchase.receivedAt,
+    inventoryProductId: updatedProduct.id,
+    receivedQuantity: nextReceived,
+    remainingQuantity: nextRemaining,
+    receiveHistory: [...receiveHistory, { id: receiveEventId, date: now, quantity: qty, unitCost: unitCost || undefined, notes: options?.notes?.trim() || undefined, productId: updatedProduct.id }],
     updatedAt: now,
   };
   await updateFreightPurchase(updatedPurchase);
@@ -3988,11 +4160,12 @@ export const receiveFreightPurchaseIntoInventory = async (purchaseId: string): P
   if (confirmedOrder) {
     await updateFreightConfirmedOrder({
       ...confirmedOrder,
-      inventoryProductId: product.id,
+      inventoryProductId: updatedProduct.id,
       updatedAt: now,
     });
   }
-  return { purchase: updatedPurchase, product };
+  // TODO: Freight receiving is intentionally stock-only for now. Payable/finance integration should be added in a separate phase.
+  return { purchase: updatedPurchase, product: updatedProduct };
 };
 
 export const getPurchaseReceiptPostings = (): PurchaseReceiptPosting[] => {
@@ -4654,7 +4827,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
     const allocated = allocateSalesCreditNoteNumber(data);
     data = allocated.state;
     effectiveTransaction = { ...effectiveTransaction, creditNoteNo: allocated.creditNoteNo };
-  } else if (effectiveTransaction.type === 'payment' && !effectiveTransaction.receiptNo) {
+  } else if ((effectiveTransaction.type === 'payment' || effectiveTransaction.type === 'customer_cash_out' || effectiveTransaction.type === 'customer_credit') && !effectiveTransaction.receiptNo) {
     const allocated = allocateCustomerPaymentReceiptNumber(data);
     data = allocated.state;
     effectiveTransaction = { ...effectiveTransaction, receiptNo: allocated.receiptNo };
@@ -4662,7 +4835,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
 
   const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];
-  if (effectiveTransaction.type !== 'payment') {
+  if (effectiveTransaction.type === 'sale' || effectiveTransaction.type === 'return') {
       newProducts = data.products.map(p => applyTransactionItemsToProduct(p, effectiveTransaction.items, effectiveTransaction.type));
   }
   let newCustomers = [...data.customers];
@@ -4706,9 +4879,46 @@ export const processTransaction = (transaction: Transaction): AppState => {
             financeLog.cash('OUTFLOW', { txId: effectiveTransaction.id, amount: cashRefundAmount, reason: 'cash return refunded', paymentMode: 'Cash', source: 'return_refund' });
           }
       } else if (effectiveTransaction.type === 'payment') {
-          dueDelta -= amount;
+          const compositeBeforePayment = getCustomerCompositeReceivableBreakdown(c.id, newCustomers, data.transactions, data.upfrontOrders);
+          const allocation = allocateCustomerPaymentAgainstCompositeReceivable({
+            paymentAmount: amount,
+            canonicalDue: compositeBeforePayment.canonicalDue,
+            customOrderDue: compositeBeforePayment.customOrderDue,
+          });
+          effectiveTransaction = {
+            ...effectiveTransaction,
+            paymentAppliedToReceivable: allocation.paymentAppliedToReceivable,
+            appliedToCanonicalReceivable: allocation.appliedToCanonicalReceivable,
+            appliedToCustomOrderReceivable: allocation.appliedToCustomOrderReceivable,
+            paymentAppliedToCustomOrderReceivable: allocation.appliedToCustomOrderReceivable,
+            storeCreditCreated: allocation.storeCreditCreated,
+          };
+          newTransactions[0] = effectiveTransaction;
+          dueDelta -= allocation.paymentAppliedToReceivable;
+          storeCreditDelta += allocation.storeCreditCreated;
           newLastVisit = new Date().toISOString();
           financeLog.cash('INFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer payment collected', paymentMode: effectiveTransaction.paymentMethod, source: 'payment' });
+      } else if (effectiveTransaction.type === 'customer_credit') {
+          dueDelta += amount;
+          newLastVisit = new Date().toISOString();
+      } else if (effectiveTransaction.type === 'customer_cash_out') {
+          const availableStoreCredit = toFiniteNonNegative(c.storeCredit);
+          const storeCreditUsedForCashOut = roundCurrency(Math.min(availableStoreCredit, amount));
+          const receivableIncrease = roundCurrency(Math.max(0, amount - storeCreditUsedForCashOut));
+          effectiveTransaction = {
+            ...effectiveTransaction,
+            storeCreditUsed: storeCreditUsedForCashOut,
+            receivableIncrease,
+          };
+          newTransactions[0] = effectiveTransaction;
+          dueDelta += receivableIncrease;
+          storeCreditDelta -= storeCreditUsedForCashOut;
+          newLastVisit = new Date().toISOString();
+          if (effectiveTransaction.paymentMethod === 'Online') {
+            financeLog.online('OUTFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer cash out (online)', paymentMode: 'Online', source: 'customer_cash_out' });
+          } else {
+            financeLog.cash('OUTFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer cash out', paymentMode: 'Cash', source: 'customer_cash_out' });
+          }
       }
       if (effectiveTransaction.type !== 'sale') {
         const updated = normalizeCustomerBalance(
