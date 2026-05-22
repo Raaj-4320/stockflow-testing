@@ -4,7 +4,7 @@ import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
 import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight, MoreVertical } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -113,6 +113,12 @@ export default function Admin() {
   const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'error' | 'success' | 'info'; message: string } | null>(null);
   const [purchaseError, setPurchaseError] = useState<string | null>(null);
+
+  const [purchaseEditTarget, setPurchaseEditTarget] = useState<{ productId: string; historyId: string } | null>(null);
+  const [purchaseEditQuantity, setPurchaseEditQuantity] = useState('');
+  const [purchaseEditUnitPrice, setPurchaseEditUnitPrice] = useState('');
+  const [purchaseEditError, setPurchaseEditError] = useState<string | null>(null);
+
   const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage'>('inventory');
   const [openActionMenuProductId, setOpenActionMenuProductId] = useState<string | null>(null);
   const [lostDamageTarget, setLostDamageTarget] = useState<Product | null>(null);
@@ -230,6 +236,36 @@ export default function Admin() {
     }
   };
 
+
+  const openEditPurchaseHistoryEntry = (historyId: string) => {
+    if (!purchaseTarget) return;
+    const entry = (purchaseTarget.purchaseHistory || []).find((h) => h.id === historyId);
+    if (!entry) return;
+    setPurchaseEditTarget({ productId: purchaseTarget.id, historyId });
+    setPurchaseEditQuantity(String(toNonNegativeNumber(entry.quantity)));
+    setPurchaseEditUnitPrice(String(toNonNegativeNumber(entry.unitPrice)));
+    setPurchaseEditError(null);
+  };
+
+  const confirmEditPurchaseHistoryEntry = async () => {
+    if (!purchaseEditTarget) return;
+    try {
+      const quantity = Number(purchaseEditQuantity);
+      const unitPrice = Number(purchaseEditUnitPrice);
+      const updatedProducts = await editInventoryPurchaseHistoryEntry(purchaseEditTarget.productId, purchaseEditTarget.historyId, { quantity, unitPrice });
+      setProducts(updatedProducts);
+      const nextTarget = updatedProducts.find((item) => item.id === purchaseEditTarget.productId) || null;
+      setPurchaseTarget(nextTarget);
+      setPurchaseEditTarget(null);
+      setPurchaseEditQuantity('');
+      setPurchaseEditUnitPrice('');
+      setPurchaseEditError(null);
+      setNotice({ type: 'success', message: 'Purchase entry updated.' });
+    } catch (error) {
+      setPurchaseEditError(error instanceof Error ? error.message : 'Unable to edit purchase entry.');
+    }
+  };
+
   const renderPurchaseHistoryCards = (
     productName: string,
     rows: NonNullable<Product['purchaseHistory']>
@@ -312,15 +348,18 @@ export default function Admin() {
             )}
           </div>
           <div className="pt-1">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!h.purchaseOrderId}
-              onClick={() => void handleDeletePurchaseHistoryEntry(h.id)}
-              title={!h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
-            >
-              Delete Purchase Entry
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => openEditPurchaseHistoryEntry(h.id)}>Edit Purchase</Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!h.purchaseOrderId}
+                onClick={() => void handleDeletePurchaseHistoryEntry(h.id)}
+                title={!h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
+              >
+                Delete Purchase Entry
+              </Button>
+            </div>
           </div>
         </div>
           );
@@ -2606,6 +2645,56 @@ export default function Admin() {
             onExport={handleExport}
             title={exportType === 'inventory' ? "Export Inventory" : "Export Low Stock Report"}
         />
+      {purchaseEditTarget && (() => {
+        const targetProduct = products.find((p) => p.id === purchaseEditTarget.productId) || purchaseTarget;
+        const targetHistory = (targetProduct?.purchaseHistory || []).find((h) => h.id === purchaseEditTarget.historyId);
+        const linkedOrder = (loadData().purchaseOrders || []).find((o) => o.id === targetHistory?.purchaseOrderId);
+        const oldQty = toNonNegativeNumber(targetHistory?.quantity);
+        const oldUnitPrice = toNonNegativeNumber(targetHistory?.unitPrice);
+        const oldTotal = oldQty * oldUnitPrice;
+        const newQty = toNonNegativeNumber(purchaseEditQuantity);
+        const newUnit = toNonNegativeNumber(purchaseEditUnitPrice);
+        const newTotal = Number((newQty * newUnit).toFixed(2));
+        const stockDelta = Number((newQty - oldQty).toFixed(2));
+        const coveredPaid = toNonNegativeNumber((linkedOrder?.paymentHistory || []).reduce((sum: number, payment: any) => sum + Math.max(0, Number(payment.amount || 0)), 0));
+        const estimatedRemaining = Math.max(0, Number((newTotal - coveredPaid).toFixed(2)));
+        const estimatedOverpaymentCredit = Math.max(0, Number((coveredPaid - newTotal).toFixed(2)));
+        return (
+          <div className="fixed inset-0 z-[130] bg-black/50 flex items-center justify-center p-4">
+            <Card className="w-full max-w-lg">
+              <CardHeader><CardTitle>Edit Purchase Entry</CardTitle></CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div>Product: <span className="font-medium">{targetProduct?.name || '—'}</span></div>
+                <div>Party: <span className="font-medium">{linkedOrder?.partyName || targetHistory?.partyName || '—'}</span></div>
+                <div>Purchase order: <span className="font-medium">{linkedOrder?.billNumber || linkedOrder?.id || targetHistory?.purchaseOrderId || '—'}</span></div>
+                <div className="grid grid-cols-2 gap-2 text-xs rounded border p-2">
+                  <div>Old quantity: {oldQty}</div>
+                  <div>Old unit price: ₹{oldUnitPrice.toFixed(2)}</div>
+                  <div>Old total: ₹{oldTotal.toFixed(2)}</div>
+                  <div>Covered amount: ₹{coveredPaid.toFixed(2)}</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><Label>Quantity</Label><Input type="number" min="0" value={purchaseEditQuantity} onChange={(e) => setPurchaseEditQuantity(e.target.value)} /></div>
+                  <div><Label>Unit Price</Label><Input type="number" min="0" value={purchaseEditUnitPrice} onChange={(e) => setPurchaseEditUnitPrice(e.target.value)} /></div>
+                </div>
+                <div className="rounded border p-2 text-xs">
+                  <div className="font-medium">payable impact</div>
+                  <div>New total: ₹{newTotal.toFixed(2)}</div>
+                  <div>Difference: ₹{(newTotal - oldTotal).toFixed(2)}</div>
+                  <div>stock delta: {stockDelta >= 0 ? '+' : ''}{stockDelta}</div>
+                  <div>Estimated remaining payable after edit: ₹{estimatedRemaining.toFixed(2)}</div>
+                  {estimatedOverpaymentCredit > 0 && <div>Overpayment will become Our Credit: ₹{estimatedOverpaymentCredit.toFixed(2)}</div>}
+                </div>
+                {purchaseEditError && <div className="text-xs text-red-600">{purchaseEditError}</div>}
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => { setPurchaseEditTarget(null); setPurchaseEditError(null); }}>Cancel</Button>
+                  <Button onClick={() => void confirmEditPurchaseHistoryEntry()}>Save</Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        );
+      })()}
       <ConfirmDialog open={!!pendingPurchaseReverse} title="Reverse this purchase?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingPurchaseReverse(null)} onConfirm={() => void confirmDeletePurchaseHistoryEntry()} confirmLabel="Reverse" />
       <ConfirmDialog open={!!pendingDeleteProductId} title="Delete this product?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingDeleteProductId(null)} onConfirm={() => void confirmDeleteProduct()} confirmLabel="Delete" />
       <ConfirmDialog open={isBatchDeleteConfirmOpen} title="Delete selected products?" message={`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}? This action may affect stock/history. Continue?`} onCancel={() => setIsBatchDeleteConfirmOpen(false)} onConfirm={() => void confirmBatchDeleteProducts()} confirmLabel="Delete" />
