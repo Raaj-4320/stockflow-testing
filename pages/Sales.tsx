@@ -8,12 +8,14 @@ import { formatItemNameWithVariant, getAvailableStockForCombination, getProductS
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft, uploadDataUrlImageToCloudinary } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
+import { getWhatsAppServerUrl, sendInvoiceToWhatsApp } from '../services/whatsapp';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
 import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus, MessageCircle } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { auth } from '../services/firebase';
 
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
@@ -982,45 +984,6 @@ export default function Sales() {
     generateReceiptPDF(transactionComplete, customers, transactionCashDetails || undefined);
   };
   const sendInvoicePreview = async (tx: Transaction, mode: 'manual' | 'auto' = 'manual') => {
-    const sendInvoiceToWhatsApp = async (payload: {
-      customerPhone: string;
-      customerName: string;
-      invoiceNo: string;
-      pdfUrl: string;
-    }): Promise<void> => {
-      // TEMP: hardcoded Cloudflare tunnel endpoint for WhatsApp invoice sending.
-      // Later replace with VITE_WHATSAPP_INVOICE_API_URL when deployment env resolution is confirmed.
-      const endpoint = 'https://voted-variety-gamma-tired.trycloudflare.com/send-invoice';
-      logInvoiceSendDebug({
-        step: 'whatsapp_endpoint_resolved',
-        endpoint,
-        hasEnvEndpoint: Boolean((import.meta as any)?.env?.VITE_WHATSAPP_INVOICE_API_URL),
-        envEndpointPreview: ((import.meta as any)?.env?.VITE_WHATSAPP_INVOICE_API_URL || '').slice(0, 120),
-      });
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 10000);
-      logInvoiceSendDebug({ step: 'whatsapp_post_start', endpoint, payload });
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        let data: any = null;
-        try {
-          data = await response.json();
-        } catch {
-          data = null;
-        }
-        if (!response.ok || data?.success !== true) {
-          throw new Error('Failed to send WhatsApp invoice');
-        }
-        logInvoiceSendDebug({ step: 'whatsapp_post_success' });
-      } finally {
-        window.clearTimeout(timeout);
-      }
-    };
     const customerPhone = (tx.customerPhone || customers.find(c => c.id === tx.customerId)?.phone || '').trim();
     const invoiceNo = ((tx as any).invoiceNumber || tx.invoiceNo || tx.id).toString();
     const customerName = (tx.customerName || customers.find(c => c.id === tx.customerId)?.name || 'Walk-in customer').trim();
@@ -1039,6 +1002,18 @@ export default function Sales() {
       logInvoiceSendDebug({ step: 'missing_phone_stop', message: msg });
       setSendInvoiceMessage(msg);
       setCheckoutError(msg);
+      return;
+    }
+    const currentUser = auth.currentUser;
+    logInvoiceSendDebug({
+      step: 'whatsapp_server_url_resolved',
+      serverUrl: getWhatsAppServerUrl(),
+      userIdPresent: Boolean(currentUser?.uid),
+    });
+    if (!currentUser?.uid) {
+      const signInMsg = 'Please sign in again to send WhatsApp invoice';
+      setSendInvoiceMessage(signInMsg);
+      setCheckoutError(signInMsg);
       return;
     }
     try {
@@ -1060,13 +1035,24 @@ export default function Sales() {
       logInvoiceSendDebug({ step: 'cloudinary_image_upload_start' });
       const cloudinaryUrl = await uploadDataUrlImageToCloudinary(invoiceImageDataUrl);
       logInvoiceSendDebug({ step: 'cloudinary_image_upload_success', cloudinaryUrl, urlType: typeof cloudinaryUrl });
-      await sendInvoiceToWhatsApp({
+      const maskedPhone = customerPhone.length > 4 ? `${'*'.repeat(Math.max(0, customerPhone.length - 4))}${customerPhone.slice(-4)}` : '****';
+      const payload = {
+        userId: currentUser.uid,
         customerPhone,
         customerName,
         invoiceNo,
         // pdfUrl field kept for API compatibility; value is now invoice image URL.
         pdfUrl: typeof cloudinaryUrl === 'string' ? cloudinaryUrl : String((cloudinaryUrl as any)?.secure_url || ''),
+      };
+      logInvoiceSendDebug({
+        step: 'whatsapp_send_invoice_payload_shape',
+        userIdPresent: Boolean(payload.userId),
+        customerPhoneMasked: maskedPhone,
+        hasCustomerName: Boolean(payload.customerName),
+        hasInvoiceNo: Boolean(payload.invoiceNo),
+        hasPdfUrl: Boolean(payload.pdfUrl),
       });
+      await sendInvoiceToWhatsApp(payload);
       setSendInvoiceMessage('Invoice sent to WhatsApp');
     } catch (error) {
       logInvoiceSendDebug({
