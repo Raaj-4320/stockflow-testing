@@ -4240,6 +4240,12 @@ export const updatePurchaseParty = async (party: PurchaseParty): Promise<Purchas
   return party;
 };
 
+export const deletePurchaseParty = async (partyId: string): Promise<void> => {
+  const data = loadData();
+  const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty', auditOperation: 'DELETE' });
+};
+
 export const getPurchaseOrders = (): PurchaseOrder[] => {
   const data = loadData();
   return data.purchaseOrders || [];
@@ -4568,6 +4574,140 @@ export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orde
     };
   });
   await saveData({ ...data, purchaseOrders: nextOrders }, { throwOnError: true, reason: 'deleteLegacySupplierPaymentGroup', auditOperation: 'DELETE' });
+};
+
+
+export const editInventoryPurchaseHistoryEntry = async (
+  productId: string,
+  purchaseHistoryId: string,
+  patch: { quantity: number; unitPrice: number }
+): Promise<Product[]> => {
+  const data = loadData();
+  const products = [...(data.products || [])];
+  const productIndex = products.findIndex((p) => p.id === productId);
+  if (productIndex < 0) failValidation('PRODUCT_NOT_FOUND', 'Product not found.', { productId });
+
+  const product = products[productIndex];
+  const historyIndex = (product.purchaseHistory || []).findIndex((h) => h.id === purchaseHistoryId);
+  if (historyIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase history entry not found.', { productId, purchaseHistoryId });
+  const history = (product.purchaseHistory || [])[historyIndex];
+  if (!history.purchaseOrderId) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Legacy purchase entry cannot be safely edited without linked purchase order.', { productId, purchaseHistoryId });
+
+  const orders = [...(data.purchaseOrders || [])];
+  const orderIndex = orders.findIndex((o) => o.id === history.purchaseOrderId);
+  if (orderIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Linked purchase order not found.', { purchaseOrderId: history.purchaseOrderId });
+  const order = orders[orderIndex];
+
+  const newQty = Math.max(0, Number(patch.quantity || 0));
+  const newUnitPrice = Math.max(0, Number(patch.unitPrice || 0));
+  if (newQty <= 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Purchase quantity must be greater than zero.', { quantity: patch.quantity });
+  if (!Number.isFinite(newUnitPrice) || newUnitPrice < 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Purchase unit price must be zero or greater.', { unitPrice: patch.unitPrice });
+
+  const oldQty = Math.max(0, Number(history.quantity || 0));
+  const qtyDelta = newQty - oldQty;
+  if (qtyDelta < 0 && Math.max(0, Number(product.stock || 0)) < Math.abs(qtyDelta)) {
+    failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot reduce purchase quantity because current stock is lower than the reduction.', { stock: product.stock, reduction: Math.abs(qtyDelta) });
+  }
+
+  const lines = Array.isArray(order.lines) ? [...order.lines] : [];
+  let targetLineIndex = -1;
+  if (lines.length === 1) {
+    targetLineIndex = 0;
+  } else {
+    const variant = String(history.variant || '').trim().toLowerCase();
+    const color = String(history.color || '').trim().toLowerCase();
+    const candidates = lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => String(line.productId || '').trim() === productId)
+      .filter(({ line }) => String(line.variant || '').trim().toLowerCase() === variant && String(line.color || '').trim().toLowerCase() === color)
+      .filter(({ line }) => Math.abs(Math.max(0, Number(line.quantity || 0)) - oldQty) < 0.0001);
+    if (candidates.length === 1) targetLineIndex = candidates[0].idx;
+  }
+  if (targetLineIndex < 0) {
+    failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot edit this purchase because the linked purchase order line could not be identified.', { purchaseOrderId: order.id, purchaseHistoryId });
+  }
+
+  const line = lines[targetLineIndex];
+  lines[targetLineIndex] = { ...line, quantity: newQty, unitCost: newUnitPrice, totalCost: Number((newQty * newUnitPrice).toFixed(2)) };
+
+  const totalQuantity = lines.reduce((sum, l) => sum + Math.max(0, Number(l.quantity || 0)), 0);
+  const totalAmount = Number(lines.reduce((sum, l) => sum + Math.max(0, Number(l.totalCost || 0)), 0).toFixed(2));
+  const paymentHistory = Array.isArray(order.paymentHistory) ? [...order.paymentHistory] : [];
+  const coveredAmount = Number(paymentHistory.reduce((sum, payment: any) => sum + Math.max(0, Number(payment.amount || 0)), 0).toFixed(2));
+  const remainingAmount = Math.max(0, Number((totalAmount - coveredAmount).toFixed(2)));
+  const overpaidAmount = Math.max(0, Number((coveredAmount - totalAmount).toFixed(2)));
+
+  const now = new Date().toISOString();
+  const nextBuyPrice = Number(newUnitPrice.toFixed(2));
+  const nextHistory = [...(product.purchaseHistory || [])];
+  nextHistory[historyIndex] = {
+    ...history,
+    quantity: newQty,
+    unitPrice: newUnitPrice,
+    nextBuyPrice,
+    date: history.date || now,
+    notes: `${history.notes || ''}${history.notes ? ' | ' : ''}Edited purchase entry`,
+  } as any;
+
+  let nextStockRows = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
+  const hasVariant = Boolean(history.variant || history.color);
+  if (hasVariant) {
+    const normalizedVariant = (history.variant || 'No Variant').trim() || 'No Variant';
+    const normalizedColor = (history.color || 'No Color').trim() || 'No Color';
+    const idx = nextStockRows.findIndex((row) => (row.variant || 'No Variant') === normalizedVariant && (row.color || 'No Color') === normalizedColor);
+    if (idx >= 0) {
+      const row = nextStockRows[idx];
+      const nextRowStock = Math.max(0, Number(row.stock || 0) + qtyDelta);
+      const nextRowTotalPurchase = Math.max(0, Number(row.totalPurchase || 0) + qtyDelta);
+      nextStockRows[idx] = { ...row, stock: nextRowStock, totalPurchase: nextRowTotalPurchase, buyPrice: nextBuyPrice };
+    }
+  }
+
+  const nextProduct: Product = {
+    ...product,
+    stock: Math.max(0, Number(product.stock || 0) + qtyDelta),
+    totalPurchase: Math.max(0, Number(product.totalPurchase || 0) + qtyDelta),
+    buyPrice: nextBuyPrice,
+    stockByVariantColor: nextStockRows,
+    purchaseHistory: nextHistory,
+  };
+
+  const nextOrder: PurchaseOrder = {
+    ...order,
+    lines,
+    totalQuantity: Number(totalQuantity.toFixed(2)),
+    totalAmount,
+    totalPaid: coveredAmount,
+    remainingAmount,
+    paymentHistory,
+    updatedAt: now,
+    notes: `${order.notes || ''}${overpaidAmount > 0 ? `${order.notes ? ' | ' : ''}Overpayment after edit: ₹${overpaidAmount.toFixed(2)}` : ''}`.trim(),
+  };
+
+  const editCreditId = `pce-edit-${order.id}`;
+  const existingCredits = Array.isArray((data as any).partyCreditLedger) ? ([...(data as any).partyCreditLedger] as PartyCreditLedgerEntry[]) : [];
+  const nextPartyCreditLedger = existingCredits.filter((entry) => entry.id !== editCreditId);
+  if (overpaidAmount > 0) {
+    nextPartyCreditLedger.unshift({
+      id: editCreditId,
+      partyId: order.partyId,
+      partyName: order.partyName,
+      type: 'supplier_overpayment',
+      sourcePaymentId: editCreditId,
+      sourceVoucherNo: order.billNumber || order.id,
+      amountCreated: Number(overpaidAmount.toFixed(2)),
+      remainingAmount: Number(overpaidAmount.toFixed(2)),
+      usageHistory: [],
+      createdAt: now,
+      updatedAt: now,
+      note: `Overpayment after purchase edit for ${order.billNumber || order.id}`,
+    } as PartyCreditLedgerEntry);
+  }
+
+  products[productIndex] = nextProduct;
+  orders[orderIndex] = nextOrder;
+  await saveData({ ...data, products, purchaseOrders: orders, partyCreditLedger: nextPartyCreditLedger }, { throwOnError: true, reason: 'editInventoryPurchaseHistoryEntry', auditOperation: 'UPDATE' });
+  return products;
 };
 
 export const reverseInventoryPurchaseHistoryEntry = async (productId: string, purchaseHistoryId: string): Promise<Product> => {
