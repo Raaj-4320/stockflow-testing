@@ -8,12 +8,14 @@ import { formatItemNameWithVariant, getAvailableStockForCombination, getProductS
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft, uploadDataUrlImageToCloudinary } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
+import { getWhatsAppServerUrl, sendInvoiceToWhatsApp } from '../services/whatsapp';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
 import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus, MessageCircle } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { auth } from '../services/firebase';
 
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
@@ -56,9 +58,22 @@ const renderPdfFirstPageToImageDataUrl = async (pdfDataUrl: string): Promise<str
   return imageDataUrl;
 };
 
-const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => boolean }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
-    const [qty, setQty] = useState(1);
-    const [qtyInput, setQtyInput] = useState('1');
+const getProductCardImage = (product: Product): string | null => {
+  const anyProduct = product as any;
+  const gallery0 = Array.isArray(anyProduct.galleryImages) ? anyProduct.galleryImages[0] : null;
+  const images0 = Array.isArray(anyProduct.images) ? anyProduct.images[0] : null;
+  return anyProduct.thumbnailImage
+    || anyProduct.image
+    || anyProduct.imageSrc
+    || (typeof gallery0 === 'string' ? gallery0 : null)
+    || (gallery0?.url || gallery0?.src || null)
+    || (typeof images0 === 'string' ? images0 : null)
+    || (images0?.url || images0?.src || null)
+    || null;
+};
+
+const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => boolean, onSetQty: (qty: number) => boolean }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd, onSetQty }) => {
+    const [qtyInput, setQtyInput] = useState('0');
     const [flashMsg, setFlashMsg] = useState<string | null>(null);
 
     const isOutOfStock = !isReturnMode && product.stock <= 0;
@@ -66,10 +81,14 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
     const canReturn = isReturnMode && maxReturnable > 0;
     const isLowStock = !isReturnMode && product.stock > 0 && product.stock < 5;
 
+    useEffect(() => {
+      setQtyInput(String(Math.max(0, cartQty)));
+    }, [cartQty, product.id]);
+
     const handleAdd = () => {
         if (isOutOfStock && !isReturnMode) return;
 
-        const parsedQty = Math.floor(Number(qtyInput));
+        const parsedQty = Math.floor(Number(qtyInput || 1));
         if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
             setFlashMsg('Enter a valid quantity');
             setTimeout(() => setFlashMsg(null), 1500);
@@ -85,8 +104,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
         const added = onAdd(parsedQty);
         if (!added) return;
 
-        setQty(1);
-        setQtyInput('1');
+        setQtyInput(String(Math.max(0, cartQty + parsedQty)));
         if (navigator.vibrate) navigator.vibrate(50);
     };
 
@@ -94,8 +112,6 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
         e.stopPropagation();
         if (cartQty > 0) {
             onAdd(-1);
-        } else {
-            const next = Math.max(1, qty - 1); setQty(next); setQtyInput(String(next));
         }
     };
 
@@ -105,15 +121,21 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
     };
 
     const isDisabled = (isOutOfStock && !isReturnMode) || (isReturnMode && !canReturn);
+    const productImage = getProductCardImage(product);
 
     return (
-        <div 
+        <div
             className={`group relative flex flex-col rounded-xl border bg-card text-card-foreground shadow-sm transition-all duration-200 ${isDisabled ? 'opacity-60 grayscale' : 'hover:shadow-md hover:border-primary/50'} ${cartQty > 0 ? 'ring-1 ring-primary border-primary/40 shadow-sm' : ''}`}
-            onClick={() => !isDisabled && handleAdd()}
         >
-            <div className="relative aspect-square w-full overflow-hidden rounded-t-xl bg-muted">
-                {product.image ? (
-                    <img src={product.image} alt={product.name} className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-110" loading="lazy" />
+            <button
+                type="button"
+                aria-label={`Add ${product.name} to cart`}
+                className="relative aspect-square w-full overflow-hidden rounded-t-xl bg-muted"
+                onClick={() => !isDisabled && onAdd(1)}
+                disabled={isDisabled}
+            >
+                {productImage ? (
+                    <img src={productImage} alt={product.name} className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-110" loading="lazy" />
                 ) : (
                     <div className="flex h-full w-full items-center justify-center bg-secondary/50">
                         <Package className="h-8 w-8 text-muted-foreground/30" />
@@ -129,26 +151,26 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 <div className="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm text-white text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded-full shadow-sm">
                     ₹{formatMoneyPrecise(product.sellPrice)}
                 </div>
-                <div className="absolute top-2 right-2">
-                    {isReturnMode ? (
-                        <Badge variant={canReturn ? "secondary" : "outline"} className="text-[10px] h-5 bg-white/90 backdrop-blur-md shadow-sm border-0">
-                            Sold: {maxReturnable}
-                        </Badge>
-                    ) : (
-                        <div className={`h-2.5 w-2.5 rounded-full ring-2 ring-white shadow-sm ${isOutOfStock ? 'bg-red-500' : isLowStock ? 'bg-orange-500' : 'bg-green-500'}`} />
-                    )}
+                <div className="absolute bottom-2 right-2">
+                    <Badge variant={isOutOfStock && !isReturnMode ? "outline" : "secondary"} className="text-[10px] h-5 bg-white/90 backdrop-blur-md shadow-sm border-0">
+                      {isReturnMode ? `Ret: ${maxReturnable}` : isOutOfStock ? 'Out' : `Stock: ${product.stock}`}
+                    </Badge>
                 </div>
                 {flashMsg && <div className="absolute inset-0 bg-red-600/90 flex items-center justify-center text-white font-bold text-xs p-2 text-center animate-in fade-in z-20">{flashMsg}</div>}
-            </div>
+            </button>
 
             <div className="flex flex-1 flex-col p-3">
                 <div className="mb-2">
                     <h3 className="font-semibold text-xs sm:text-sm leading-tight line-clamp-2" title={product.name}>{product.name}</h3>
-                    <p className="text-[10px] text-muted-foreground font-mono mt-0.5">{product.barcode}</p>
                 </div>
                 <div className="mt-auto flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <Button variant="outline" size="icon" className="h-7 w-7 rounded-lg shrink-0" onClick={handleMinus} disabled={isDisabled}><Minus className="w-3 h-3" /></Button>
-                    <Input value={qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => { const v = e.target.value.replace(/[^\d]/g, ''); setQtyInput(v); setQty(Math.max(1, Number(v || 1))); }} />
+                    <Input value={qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => {
+                      const v = e.target.value.replace(/[^\d]/g, '');
+                      setQtyInput(v);
+                      if (v === '') return;
+                      onSetQty(Math.max(0, Number(v)));
+                    }} onBlur={() => { if (qtyInput === '') setQtyInput(String(Math.max(0, cartQty))); }} />
                     <Button variant="default" size="icon" className={`h-7 w-7 rounded-lg shrink-0 ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} ${cartQty > 0 ? 'bg-primary' : ''}`} onClick={handlePlus} disabled={isDisabled}><Plus className="w-3 h-3" /></Button>
                 </div>
             </div>
@@ -157,9 +179,21 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 };
 
 export default function Sales() {
-  type InvoiceCart = { id: string; label: string; items: CartItem[]; createdAt: string; updatedAt: string };
+  type InvoiceCart = {
+    id: string;
+    label: string;
+    items: CartItem[];
+    createdAt: string;
+    updatedAt: string;
+    cashPaidInput?: string;
+    onlinePaidInput?: string;
+    creditDueInput?: string;
+    cashReceivedInput?: string;
+    customerId?: string;
+    customerSearch?: string;
+  };
   const POS_CARTS_STORAGE_KEY = 'stockflow_pos_invoice_carts_v1';
-  const createEmptyInvoiceCart = (index = 1): InvoiceCart => ({ id: `invoice-${Date.now()}-${Math.floor(Math.random() * 100000)}`, label: `Invoice ${index}`, items: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  const createEmptyInvoiceCart = (index = 1): InvoiceCart => ({ id: `invoice-${Date.now()}-${Math.floor(Math.random() * 100000)}`, label: `Invoice ${index}`, items: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), cashPaidInput: '', onlinePaidInput: '', creditDueInput: '', cashReceivedInput: '', customerId: '', customerSearch: '' });
   const loadInvoiceCarts = (): { carts: InvoiceCart[]; activeCartId: string } => {
     try {
       const raw = localStorage.getItem(POS_CARTS_STORAGE_KEY);
@@ -179,7 +213,7 @@ export default function Sales() {
     }
   };
   type ReturnHandlingMode = 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
-  const POS_PRODUCTS_PER_PAGE = 10;
+  const POS_PRODUCTS_PER_PAGE = 6;
   const RETURN_TRANSACTIONS_PER_PAGE = 10;
   const [products, setProducts] = useState<Product[]>([]);
   const initialCarts = loadInvoiceCarts();
@@ -191,6 +225,9 @@ export default function Sales() {
   };
   const setActiveCartItems = (updater: (items: CartItem[]) => CartItem[]) => {
     setInvoiceCarts(prev => prev.map(c => c.id === activeCartId ? { ...c, items: updater(c.items), updatedAt: new Date().toISOString() } : c));
+  };
+  const updateActiveCartMeta = (patch: Partial<InvoiceCart>) => {
+    setInvoiceCarts(prev => prev.map(c => c.id === activeCartId ? { ...c, ...patch, updatedAt: new Date().toISOString() } : c));
   };
   const removeCompletedCartAfterSuccess = (completedCartId: string) => {
     setInvoiceCarts(prev => {
@@ -263,6 +300,18 @@ export default function Sales() {
   const settlementPanelRef = useRef<HTMLDivElement | null>(null);
   const [settlementHint, setSettlementHint] = useState<string | null>(null);
   const [sendInvoiceMessage, setSendInvoiceMessage] = useState<string | null>(null);
+  const activeCart = useMemo(() => invoiceCarts.find(c => c.id === activeCartId) || null, [invoiceCarts, activeCartId]);
+
+  useEffect(() => {
+    if (!activeCart) return;
+    setCashPaidInput(activeCart.cashPaidInput || '');
+    setOnlinePaidInput(activeCart.onlinePaidInput || '');
+    setCreditDueInput(activeCart.creditDueInput || '');
+    setCashReceivedInput(activeCart.cashReceivedInput || '');
+    setCustomerSearch(activeCart.customerSearch || '');
+    const nextCustomer = customers.find(c => c.id === activeCart.customerId) || null;
+    setSelectedCustomer(nextCustomer);
+  }, [activeCartId, activeCart?.id, customers]);
   useEffect(() => {
     try {
       const raw = sessionStorage.getItem('stockflow_customer_invoice_prefill');
@@ -392,6 +441,12 @@ export default function Sales() {
     return () => window.dispatchEvent(new CustomEvent('sales-cart-state', { detail: { count: 0 } }));
   }, [cart.length]);
   useEffect(() => { if (cartError) { const t = setTimeout(() => setCartError(null), 3000); return () => clearTimeout(t); } }, [cartError]);
+  useEffect(() => { updateActiveCartMeta({ cashPaidInput }); }, [cashPaidInput]);
+  useEffect(() => { updateActiveCartMeta({ onlinePaidInput }); }, [onlinePaidInput]);
+  useEffect(() => { updateActiveCartMeta({ creditDueInput }); }, [creditDueInput]);
+  useEffect(() => { updateActiveCartMeta({ cashReceivedInput }); }, [cashReceivedInput]);
+  useEffect(() => { updateActiveCartMeta({ customerSearch }); }, [customerSearch]);
+  useEffect(() => { updateActiveCartMeta({ customerId: selectedCustomer?.id || '' }); }, [selectedCustomer?.id]);
   useEffect(() => {
     const handleDataOpStatus = (event: Event) => {
       const detail = (event as CustomEvent<{ phase?: 'start' | 'success' | 'error'; op?: string; message?: string; error?: string; transactionId?: string }>).detail;
@@ -982,45 +1037,6 @@ export default function Sales() {
     generateReceiptPDF(transactionComplete, customers, transactionCashDetails || undefined);
   };
   const sendInvoicePreview = async (tx: Transaction, mode: 'manual' | 'auto' = 'manual') => {
-    const sendInvoiceToWhatsApp = async (payload: {
-      customerPhone: string;
-      customerName: string;
-      invoiceNo: string;
-      pdfUrl: string;
-    }): Promise<void> => {
-      // TEMP: hardcoded Cloudflare tunnel endpoint for WhatsApp invoice sending.
-      // Later replace with VITE_WHATSAPP_INVOICE_API_URL when deployment env resolution is confirmed.
-      const endpoint = 'https://voted-variety-gamma-tired.trycloudflare.com/send-invoice';
-      logInvoiceSendDebug({
-        step: 'whatsapp_endpoint_resolved',
-        endpoint,
-        hasEnvEndpoint: Boolean((import.meta as any)?.env?.VITE_WHATSAPP_INVOICE_API_URL),
-        envEndpointPreview: ((import.meta as any)?.env?.VITE_WHATSAPP_INVOICE_API_URL || '').slice(0, 120),
-      });
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 10000);
-      logInvoiceSendDebug({ step: 'whatsapp_post_start', endpoint, payload });
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        let data: any = null;
-        try {
-          data = await response.json();
-        } catch {
-          data = null;
-        }
-        if (!response.ok || data?.success !== true) {
-          throw new Error('Failed to send WhatsApp invoice');
-        }
-        logInvoiceSendDebug({ step: 'whatsapp_post_success' });
-      } finally {
-        window.clearTimeout(timeout);
-      }
-    };
     const customerPhone = (tx.customerPhone || customers.find(c => c.id === tx.customerId)?.phone || '').trim();
     const invoiceNo = ((tx as any).invoiceNumber || tx.invoiceNo || tx.id).toString();
     const customerName = (tx.customerName || customers.find(c => c.id === tx.customerId)?.name || 'Walk-in customer').trim();
@@ -1039,6 +1055,18 @@ export default function Sales() {
       logInvoiceSendDebug({ step: 'missing_phone_stop', message: msg });
       setSendInvoiceMessage(msg);
       setCheckoutError(msg);
+      return;
+    }
+    const currentUser = auth.currentUser;
+    logInvoiceSendDebug({
+      step: 'whatsapp_server_url_resolved',
+      serverUrl: getWhatsAppServerUrl(),
+      userIdPresent: Boolean(currentUser?.uid),
+    });
+    if (!currentUser?.uid) {
+      const signInMsg = 'Please sign in again to send WhatsApp invoice';
+      setSendInvoiceMessage(signInMsg);
+      setCheckoutError(signInMsg);
       return;
     }
     try {
@@ -1060,13 +1088,24 @@ export default function Sales() {
       logInvoiceSendDebug({ step: 'cloudinary_image_upload_start' });
       const cloudinaryUrl = await uploadDataUrlImageToCloudinary(invoiceImageDataUrl);
       logInvoiceSendDebug({ step: 'cloudinary_image_upload_success', cloudinaryUrl, urlType: typeof cloudinaryUrl });
-      await sendInvoiceToWhatsApp({
+      const maskedPhone = customerPhone.length > 4 ? `${'*'.repeat(Math.max(0, customerPhone.length - 4))}${customerPhone.slice(-4)}` : '****';
+      const payload = {
+        userId: currentUser.uid,
         customerPhone,
         customerName,
         invoiceNo,
         // pdfUrl field kept for API compatibility; value is now invoice image URL.
         pdfUrl: typeof cloudinaryUrl === 'string' ? cloudinaryUrl : String((cloudinaryUrl as any)?.secure_url || ''),
+      };
+      logInvoiceSendDebug({
+        step: 'whatsapp_send_invoice_payload_shape',
+        userIdPresent: Boolean(payload.userId),
+        customerPhoneMasked: maskedPhone,
+        hasCustomerName: Boolean(payload.customerName),
+        hasInvoiceNo: Boolean(payload.invoiceNo),
+        hasPdfUrl: Boolean(payload.pdfUrl),
       });
+      await sendInvoiceToWhatsApp(payload);
       setSendInvoiceMessage('Invoice sent to WhatsApp');
     } catch (error) {
       logInvoiceSendDebug({
@@ -1453,7 +1492,7 @@ export default function Sales() {
   };
 
   return (
-    <div className={`h-[calc(100vh-120px)] min-h-0 rounded-xl border p-2 md:p-3 grid grid-cols-1 ${isReturnMode ? 'xl:grid-cols-[minmax(0,1fr)_340px]' : 'xl:grid-cols-3'} gap-2 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
+    <div className={`min-h-[calc(100vh-120px)] rounded-xl border p-2 md:p-3 grid grid-cols-1 ${isReturnMode ? 'xl:grid-cols-[minmax(0,1fr)_340px]' : 'xl:grid-cols-3'} gap-2 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
       <div className="min-w-0 min-h-0 flex flex-col gap-2 xl:col-span-1">
         <div className="bg-card border rounded-xl p-2 space-y-2">
           <div className={`flex flex-wrap items-center gap-2`}>
@@ -1535,44 +1574,52 @@ export default function Sales() {
             </div>
           ) : (
             <div className="space-y-3">
-	              <div className="rounded-xl border bg-card overflow-hidden">
-                <div className="grid grid-cols-[44px_minmax(0,1.4fr)_minmax(0,1fr)_84px_108px] gap-2 px-3 py-2 text-[11px] font-semibold text-muted-foreground border-b bg-muted/20">
-                  <span>Image</span>
-                  <span>Name</span>
-                  <span>SKU/Code</span>
-                  <span className="text-center">Stock</span>
-                  <span className="text-center">Qty</span>
+              <div className="rounded-xl border bg-card p-2 md:p-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                  {paginatedProducts.map((p) => {
+                    const cartQty = cart
+                      .filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(p.id, NO_VARIANT, NO_COLOR))
+                      .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+                    const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
+                    return (
+                      <ProductGridItem
+                        key={p.id}
+                        product={p}
+                        isReturnMode={isReturnMode}
+                        cartQty={cartQty}
+                        returnableQty={returnableQty}
+                        onAdd={(qty) => {
+                          if (qty > 0) {
+                            handleProductSelect(`${p.id}`, qty);
+                            return true;
+                          }
+                          const matchingCartLines = cart.filter(item => String(item.id) === String(p.id));
+                          const singleLine = matchingCartLines.length === 1 ? matchingCartLines[0] : null;
+                          if (!singleLine) return false;
+                          updateQuantity(String(singleLine.id), qty, singleLine.selectedVariant, singleLine.selectedColor);
+                          return true;
+                        }}
+                        onSetQty={(qty) => {
+                          const matchingCartLines = cart.filter(item => String(item.id) === String(p.id));
+                          const singleLine = matchingCartLines.length === 1 ? matchingCartLines[0] : null;
+                          if (qty <= 0) {
+                            if (!singleLine) return true;
+                            updateQuantity(String(singleLine.id), -singleLine.quantity, singleLine.selectedVariant, singleLine.selectedColor);
+                            return true;
+                          }
+                          if (!singleLine) {
+                            handleProductSelect(`${p.id}`, qty);
+                            return true;
+                          }
+                          const delta = qty - (Number(singleLine.quantity) || 0);
+                          if (delta === 0) return true;
+                          updateQuantity(String(singleLine.id), delta, singleLine.selectedVariant, singleLine.selectedColor);
+                          return true;
+                        }}
+                      />
+                    );
+                  })}
                 </div>
-              {paginatedProducts.map(p => {
-                const cartQty = cart
-                  .filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(p.id, NO_VARIANT, NO_COLOR))
-                  .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
-                const matchingCartLines = cart.filter(item => String(item.id) === String(p.id));
-                const singleLine = matchingCartLines.length === 1 ? matchingCartLines[0] : null;
-                const stock = getAvailableQtyForActiveCart(p, NO_VARIANT, NO_COLOR);
-                const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
-                const stockLabel = isReturnMode ? returnableQty : stock;
-                const disableMinus = cartQty <= 0 || (!singleLine && matchingCartLines.length > 1);
-                const disablePlus = isReturnMode ? returnableQty <= cartQty : stock <= cartQty;
-                return (
-	                  <div key={p.id} className="grid grid-cols-[36px_minmax(0,1.4fr)_minmax(0,1fr)_76px_96px] gap-2 px-2.5 py-2 border-b last:border-b-0 items-center hover:bg-muted/20">
-	                    <div className="h-8 w-8 rounded border overflow-hidden bg-muted">
-                      {p.image ? <img src={p.image} alt={p.name} className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-25" />}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold truncate">{p.name}</p>
-                      <p className="text-[11px] text-muted-foreground">₹{formatMoneyPrecise(p.sellPrice)}</p>
-                    </div>
-                    <p className="text-xs text-muted-foreground truncate">{p.barcode || p.id}</p>
-                    <p className={`text-xs text-center font-semibold ${isReturnMode ? 'text-orange-600' : ''}`}>{stockLabel}</p>
-                    <div className="flex items-center justify-center border rounded-md h-7 overflow-hidden">
-                      <button className="px-2 h-full border-r" disabled={disableMinus} title={!singleLine && matchingCartLines.length > 1 ? 'Adjust variants in cart' : ''} onClick={() => singleLine ? updateQuantity(String(singleLine.id), -1, singleLine.selectedVariant, singleLine.selectedColor) : undefined}><Minus className="w-3 h-3" /></button>
-                      <span className="w-8 text-center text-xs font-bold">{cartQty}</span>
-                      <button className="px-2 h-full border-l" disabled={disablePlus} onClick={() => handleProductSelect(`${p.id}`, 1)}><Plus className="w-3 h-3" /></button>
-                    </div>
-                  </div>
-                );
-              })}
               </div>
               {filteredProducts.length > POS_PRODUCTS_PER_PAGE && (
                 <div className="flex items-center justify-between gap-2 rounded-lg border bg-card p-2">
@@ -1631,7 +1678,38 @@ export default function Sales() {
             <p className="sr-only">{isReturnMode ? 'Select bill → Make Return → review popup' : `${cart.length} items`}</p>
             {!isReturnMode && (
               <div className="flex items-center gap-1 overflow-auto">
-                {invoiceCarts.map((c) => <Button key={c.id} size="sm" variant={c.id === activeCartId ? 'default' : 'outline'} onClick={() => setActiveCartId(c.id)}>{c.label} ({c.items.length})</Button>)}
+                {invoiceCarts.map((c) => (
+                  <Button key={c.id} size="sm" variant={c.id === activeCartId ? 'default' : 'outline'} onClick={() => setActiveCartId(c.id)} className="gap-1">
+                    <span>{c.label} ({c.items.length})</span>
+                    <span
+                      role="button"
+                      aria-label={`Close invoice ${c.label}`}
+                      className="inline-flex h-4 w-4 items-center justify-center rounded hover:bg-black/10"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const hasUnfinished = (c.items || []).length > 0
+                          || !!(c.cashPaidInput || '').trim()
+                          || !!(c.onlinePaidInput || '').trim()
+                          || !!(c.creditDueInput || '').trim()
+                          || !!(c.cashReceivedInput || '').trim()
+                          || !!(c.customerSearch || '').trim()
+                          || !!(c.customerId || '').trim();
+                        if (hasUnfinished) {
+                          const proceed = window.confirm('This invoice has unfinished work. Closing it will lose the cart and settlement split. Continue?');
+                          if (!proceed) return;
+                        }
+                        setInvoiceCarts(prev => {
+                          let next = prev.filter(x => x.id !== c.id);
+                          if (!next.length) next = [createEmptyInvoiceCart(1)];
+                          if (c.id === activeCartId) setActiveCartId(next[0].id);
+                          return next;
+                        });
+                      }}
+                    >
+                      <X className="w-3 h-3" />
+                    </span>
+                  </Button>
+                ))}
                 <Button size="sm" variant="outline" disabled={invoiceCarts.length >= 5} onClick={() => {
                   if (invoiceCarts.length >= 5) return setCartError('Maximum 5 invoice carts allowed.');
                   const next = createEmptyInvoiceCart(invoiceCarts.length + 1);
@@ -1735,25 +1813,46 @@ export default function Sales() {
             <h2>Settlement</h2>
             <p>Customer, split payment, and confirmation</p>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="flex-1 overflow-y-auto p-3 space-y-3">
             {settlementHint && <div className="text-xs rounded-md border border-blue-200 bg-blue-50 text-blue-700 px-2.5 py-2">{settlementHint}</div>}
-            <div className="space-y-2.5 rounded-lg border p-3 bg-muted/10">
+            <div className="space-y-2 rounded-lg border p-2.5 bg-muted/10">
               <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Total Amount</Label>
-                <Input type="number" min="0" step="0.01" value={checkoutPreview.remainingPayableWhole} readOnly className="bg-muted/40 font-semibold cursor-not-allowed" />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
-                <Input type="number" min="0" step="0.01" value={cashPaidInput} onChange={(e) => { setCashPaidInput(e.target.value); setCashManuallyEdited(true); setCheckoutError(null); }} />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online/Bank Paid</Label>
-                <Input type="number" min="0" step="0.01" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-[11px] font-bold uppercase text-muted-foreground">Credit Due</Label>
-                <Input type="number" min="0" step="0.01" value={creditDueInput} onChange={(e) => { setCreditDueInput(e.target.value); setCheckoutError(null); }} />
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <Label className="text-[10px] font-bold uppercase text-muted-foreground">Total Amount</Label>
+                  <Input type="number" min="0" step="0.01" value={checkoutPreview.remainingPayableWhole} readOnly className="h-8 bg-muted/40 font-semibold cursor-not-allowed text-xs" />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
+                  <Input type="number" min="0" step="0.01" value={cashPaidInput} onChange={(e) => { setCashPaidInput(e.target.value); setCashManuallyEdited(true); setCheckoutError(null); }} className="h-8 text-xs" />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] font-bold uppercase text-muted-foreground">Online/Bank Paid</Label>
+                  <Input type="number" min="0" step="0.01" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} className="h-8 text-xs" />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] font-bold uppercase text-muted-foreground">Credit Due</Label>
+                  <div className="flex items-center gap-1">
+                    <Input type="number" min="0" step="0.01" value={creditDueInput} onChange={(e) => { setCreditDueInput(e.target.value); setCheckoutError(null); }} className="h-8 text-xs" />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 px-2 text-[10px] font-semibold"
+                      onClick={() => {
+                        setCashPaidInput('');
+                        setOnlinePaidInput('');
+                        setCashReceivedInput('');
+                        setCashManuallyEdited(true);
+                        setCashReceivedDirty(true);
+                        setCreditDueInput(String(Math.max(0, checkoutPreview.remainingPayableWhole)));
+                        setCheckoutError(null);
+                      }}
+                    >
+                      All Credit
+                    </Button>
+                  </div>
+                </div>
               </div>
               <div className="rounded border bg-white p-2 text-xs space-y-1">
                 <div className="flex justify-between"><span>Cash Paid</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
