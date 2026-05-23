@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -119,6 +119,10 @@ export default function Customers() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editingCustomerTx, setEditingCustomerTx] = useState<Transaction | null>(null);
   const [customerActionModalOpen, setCustomerActionModalOpen] = useState(false);
+  const [paymentAuditOpen, setPaymentAuditOpen] = useState(false);
+  const [paymentAuditResult, setPaymentAuditResult] = useState<ReturnType<typeof auditCustomerPaymentAllocations> | null>(null);
+  const [updatedViewOpen, setUpdatedViewOpen] = useState(false);
+  const [updatedViewPreview, setUpdatedViewPreview] = useState<ReturnType<typeof previewCustomerRepairedAllocationView> | null>(null);
   const [customerActionType, setCustomerActionType] = useState<'payment' | 'customer_cash_out' | 'customer_credit'>('payment');
   const [customerActionDateTime, setCustomerActionDateTime] = useState('');
   const [customerActionAmount, setCustomerActionAmount] = useState('');
@@ -251,6 +255,16 @@ export default function Customers() {
   const viewingCustomerTotalDue = Math.max(0, Number(viewingCustomerCanonical?.totalDue || 0));
   const viewingCustomerStoreCredit = Math.max(0, Number(viewingCustomerCanonical?.storeCredit || 0));
   const viewingCustomerNetReceivable = Math.max(0, viewingCustomerTotalDue - viewingCustomerStoreCredit);
+  const customerLedgerDebugEnabled = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const queryEnabled = new URLSearchParams(window.location.search).get('customerLedgerDebug') === '1';
+      const storageEnabled = window.localStorage.getItem('CUSTOMER_LEDGER_DEBUG') === '1';
+      return queryEnabled || storageEnabled;
+    } catch {
+      return false;
+    }
+  }, []);
   const selectedCustomers = useMemo(
     () => customers.filter(customer => selectedCustomerIds.includes(customer.id)),
     [customers, selectedCustomerIds]
@@ -1039,8 +1053,24 @@ export default function Customers() {
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" onClick={() => handleRecordPayment()}>
                                    <Coins className="w-4 h-4 mr-1.5" /> Receive Payment
                                </Button>
-                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
+                              <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
                                    <FileText className="w-4 h-4 mr-1.5" /> Get Statement
+                               </Button>
+                               {customerLedgerDebugEnabled && (
+                                 <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-amber-200 text-amber-700 shadow-sm" onClick={() => {
+                                   if (!viewingCustomer) return;
+                                   setPaymentAuditResult(auditCustomerPaymentAllocations(viewingCustomer.id));
+                                   setPaymentAuditOpen(true);
+                                 }}>
+                                   Audit Payments
+                                 </Button>
+                               )}
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-blue-200 text-blue-700 shadow-sm" onClick={() => {
+                                 if (!viewingCustomer) return;
+                                 setUpdatedViewPreview(previewCustomerRepairedAllocationView(viewingCustomer.id));
+                                 setUpdatedViewOpen(true);
+                               }}>
+                                 Updated View (Preview)
                                </Button>
                                <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => openCustomerActionModal('payment')}>
                                    <Plus className="w-4 h-4 mr-1.5" /> + Transaction
@@ -1250,6 +1280,138 @@ export default function Customers() {
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setCustomerActionModalOpen(false)}>Cancel</Button>
                 <Button onClick={handleSubmitCustomerAction}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {paymentAuditOpen && viewingCustomer && paymentAuditResult && (
+        <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
+          <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
+            <CardHeader className="border-b">
+              <CardTitle>Customer Payment Allocation Audit</CardTitle>
+              <p className="text-xs text-muted-foreground">Dry-run preview only. No data is modified.</p>
+            </CardHeader>
+            <CardContent className="p-4 space-y-3 overflow-auto">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                <div className="rounded border p-2"><div className="text-muted-foreground">Mismatch Count</div><div className="font-bold">{paymentAuditResult.summary.mismatchCount}</div></div>
+                <div className="rounded border p-2"><div className="text-muted-foreground">Saved Store Credit</div><div className="font-bold">₹{formatMoneyPrecise(paymentAuditResult.summary.totalSavedStoreCreditCreated)}</div></div>
+                <div className="rounded border p-2"><div className="text-muted-foreground">Natural Store Credit</div><div className="font-bold">₹{formatMoneyPrecise(paymentAuditResult.summary.totalNaturalStoreCreditCreated)}</div></div>
+                <div className="rounded border p-2"><div className="text-muted-foreground">Store Credit Difference</div><div className="font-bold">₹{formatMoneyPrecise(paymentAuditResult.summary.storeCreditDelta)}</div></div>
+              </div>
+              <div className="overflow-auto border rounded-lg">
+                <table className="w-full min-w-[1050px] text-xs">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="p-2 text-left">Date</th>
+                      <th className="p-2 text-left">Tx ID</th>
+                      <th className="p-2 text-right">Payment Amount</th>
+                      <th className="p-2 text-right">Saved Applied</th>
+                      <th className="p-2 text-right">Saved Credit</th>
+                      <th className="p-2 text-right">Natural Applied</th>
+                      <th className="p-2 text-right">Natural Credit</th>
+                      <th className="p-2 text-right">Difference</th>
+                      <th className="p-2 text-left">Needs Repair</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paymentAuditResult.rows.map((row) => (
+                      <tr key={row.transactionId} className="border-t">
+                        <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
+                        <td className="p-2 font-mono">{row.transactionId.slice(-8)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.amount)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.paymentAppliedToReceivable || (row.saved.paymentAppliedToCanonicalReceivable + row.saved.paymentAppliedToCustomOrderReceivable))}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.storeCreditCreated)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.paymentAppliedToReceivable)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.storeCreditCreated)}</td>
+                        <td className="p-2 text-right">Applied Δ ₹{formatMoneyPrecise(row.delta.paymentAppliedToReceivable)} • Credit Δ ₹{formatMoneyPrecise(row.delta.storeCreditCreated)}</td>
+                        <td className="p-2">{row.needsRepair ? <span className="text-red-600 font-semibold">Yes</span> : <span className="text-emerald-700 font-semibold">No</span>}</td>
+                      </tr>
+                    ))}
+                    {!paymentAuditResult.rows.length && (
+                      <tr><td className="p-3 text-center text-muted-foreground" colSpan={9}>No payment rows for this customer.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setPaymentAuditOpen(false)}>Close</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {updatedViewOpen && viewingCustomer && updatedViewPreview && (
+        <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
+          <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
+            <CardHeader className="border-b">
+              <CardTitle>Updated Customer Balance Preview</CardTitle>
+              <p className="text-xs text-muted-foreground">Preview only. No records are updated.</p>
+            </CardHeader>
+            <CardContent className="p-4 space-y-3 overflow-auto">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                <div className="rounded border p-2">
+                  <div className="font-semibold mb-1">Current View</div>
+                  <div>Current Dues: ₹{formatMoneyPrecise(updatedViewPreview.current.totalDue)}</div>
+                  <div>Store Credit: ₹{formatMoneyPrecise(updatedViewPreview.current.storeCredit)}</div>
+                  <div>Net Receivable: ₹{formatMoneyPrecise(updatedViewPreview.current.netReceivable)}</div>
+                </div>
+                <div className="rounded border p-2">
+                  <div className="font-semibold mb-1">Repaired Preview</div>
+                  <div>Current Dues: ₹{formatMoneyPrecise(updatedViewPreview.repairedPreview.totalDue)}</div>
+                  <div>Store Credit: ₹{formatMoneyPrecise(updatedViewPreview.repairedPreview.storeCredit)}</div>
+                  <div>Net Receivable: ₹{formatMoneyPrecise(updatedViewPreview.repairedPreview.netReceivable)}</div>
+                </div>
+                <div className="rounded border p-2">
+                  <div className="font-semibold mb-1">Difference</div>
+                  <div>Dues Δ: ₹{formatMoneyPrecise(updatedViewPreview.delta.totalDue)}</div>
+                  <div>Store Credit Δ: ₹{formatMoneyPrecise(updatedViewPreview.delta.storeCredit)}</div>
+                  <div>Net Receivable Δ: ₹{formatMoneyPrecise(updatedViewPreview.delta.netReceivable)}</div>
+                </div>
+              </div>
+              <div className="rounded border p-2 text-xs">
+                <div className="font-semibold mb-1">Payment Allocation Changes</div>
+                {updatedViewPreview.audit.rows.some((row) => row.needsRepair) ? (
+                  <div className="overflow-auto border rounded-lg">
+                    <table className="w-full min-w-[1050px] text-xs">
+                      <thead className="bg-slate-50">
+                        <tr>
+                          <th className="p-2 text-left">Date</th>
+                          <th className="p-2 text-left">Tx ID</th>
+                          <th className="p-2 text-right">Amount</th>
+                          <th className="p-2 text-right">Saved Applied</th>
+                          <th className="p-2 text-right">Saved Credit</th>
+                          <th className="p-2 text-right">Natural Applied</th>
+                          <th className="p-2 text-right">Natural Credit</th>
+                          <th className="p-2 text-right">Difference</th>
+                          <th className="p-2 text-left">Needs Repair</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {updatedViewPreview.audit.rows.map((row) => (
+                          <tr key={`upd-${row.transactionId}`} className={`border-t ${row.needsRepair ? 'bg-red-50/50' : ''}`}>
+                            <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
+                            <td className="p-2 font-mono">{row.transactionId.slice(-8)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.amount)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.paymentAppliedToReceivable || (row.saved.paymentAppliedToCanonicalReceivable + row.saved.paymentAppliedToCustomOrderReceivable))}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.storeCreditCreated)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.paymentAppliedToReceivable)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.storeCreditCreated)}</td>
+                            <td className="p-2 text-right">Applied Δ ₹{formatMoneyPrecise(row.delta.paymentAppliedToReceivable)} • Credit Δ ₹{formatMoneyPrecise(row.delta.storeCreditCreated)}</td>
+                            <td className="p-2">{row.needsRepair ? <span className="text-red-700 font-semibold">Yes</span> : <span className="text-emerald-700 font-semibold">No</span>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">No payment allocation differences found.</p>
+                )}
+              </div>
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setUpdatedViewOpen(false)}>Close</Button>
               </div>
             </CardContent>
           </Card>
