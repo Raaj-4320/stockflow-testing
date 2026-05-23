@@ -22,6 +22,7 @@ import {
   UpdatedTransactionRecord,
   CashAdjustment,
   UpfrontOrderLedgerEffect,
+  ManualCashbookEntry,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
@@ -709,21 +710,48 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
       const safeBTime = Number.isFinite(bTime) ? bTime : 0;
       return safeATime - safeBTime;
     });
+  const customerLedgerDebugEnabled = (() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const queryEnabled = new URLSearchParams(window.location.search).get('customerLedgerDebug') === '1';
+      const storageEnabled = window.localStorage.getItem('CUSTOMER_LEDGER_DEBUG') === '1';
+      return queryEnabled || storageEnabled;
+    } catch {
+      return false;
+    }
+  })();
+  const customerLedgerDebugRows: Array<Record<string, unknown>> = [];
 
   customerTransactionsAsc
     .forEach((tx, index) => {
       const amount = Math.abs(toFiniteNumber(tx.total, 0));
       const priorTransactions = customerTransactionsAsc.slice(0, index);
-      if (tx.type === 'sale') {
-        const settlement = getSaleSettlementBreakdown(tx);
+      if (tx.type === 'sale' || tx.type === 'historical_reference') {
+        const settlement = tx.type === 'historical_reference'
+          ? getHistoricalAwareSaleSettlement(tx)
+          : getSaleSettlementBreakdown(tx);
+        const historicalIsNonFinancial = tx.type === 'historical_reference' && Boolean((tx as any).displayOnly || (tx as any).nonFinancial);
         const consumedStoreCredit = Math.min(
           getRequestedStoreCreditUsed(tx),
           Math.abs(toFiniteNumber(tx.total, 0)),
           toFiniteNonNegative(runningStoreCredit)
         );
-        activeSalesTotal += amount;
-        runningDue = roundCurrency(runningDue + settlement.creditDue);
-        runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
+        if (!historicalIsNonFinancial) {
+          activeSalesTotal += amount;
+          runningDue = roundCurrency(runningDue + settlement.creditDue);
+          runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
+        }
+        if (customerLedgerDebugEnabled) {
+          customerLedgerDebugRows.push({
+            txId: tx.id,
+            type: tx.type,
+            reason: historicalIsNonFinancial ? 'historical_non_financial_skipped' : 'sale_like_due_applied',
+            dueDelta: historicalIsNonFinancial ? 0 : settlement.creditDue,
+            storeCreditDelta: historicalIsNonFinancial ? 0 : -consumedStoreCredit,
+            runningDue,
+            runningStoreCredit,
+          });
+        }
       } else if (tx.type === 'payment') {
         activePaymentsTotal += amount;
         const explicitApplied = Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0));
@@ -732,6 +760,19 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningDue = roundCurrency(Math.max(0, runningDue - paymentToDue));
         const paymentRemainder = roundCurrency(explicitApplied > 0 || explicitStoreCredit > 0 ? Math.max(0, explicitStoreCredit || (amount - paymentToDue)) : Math.max(0, amount - paymentToDue));
         if (paymentRemainder > 0) runningStoreCredit = roundCurrency(runningStoreCredit + paymentRemainder);
+        if (customerLedgerDebugEnabled) {
+          customerLedgerDebugRows.push({
+            txId: tx.id,
+            type: tx.type,
+            reason: 'payment_applied',
+            explicitApplied,
+            explicitStoreCredit,
+            paymentToDue,
+            paymentRemainder,
+            runningDue,
+            runningStoreCredit,
+          });
+        }
       } else if (tx.type === 'return') {
         activeReturnsTotal += amount;
         const reconciliation = getReturnReconciliationAmounts(tx, priorTransactions, runningDue);
@@ -748,6 +789,9 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningDue = roundCurrency(runningDue + receivableIncrease);
       }
     });
+  if (customerLedgerDebugEnabled && customerLedgerDebugRows.length) {
+    console.log('[CUSTOMER_LEDGER_DEBUG]', { customerId, rows: customerLedgerDebugRows });
+  }
 
   const totalDue = roundCurrency(Math.max(0, runningDue));
   const storeCredit = roundCurrency(Math.max(0, runningStoreCredit));
@@ -4214,6 +4258,38 @@ export const getPurchaseParties = (): PurchaseParty[] => {
   return data.purchaseParties || [];
 };
 
+export const getManualCashbookEntries = (): ManualCashbookEntry[] => {
+  const data = loadData();
+  return [...(data.manualCashbookEntries || [])]
+    .filter((entry) => !entry?.isDeleted)
+    .sort((a, b) => new Date(b.date || b.createdAt || 0).getTime() - new Date(a.date || a.createdAt || 0).getTime());
+};
+
+export const createManualCashbookEntry = async (
+  payload: Omit<ManualCashbookEntry, 'id' | 'createdAt' | 'updatedAt' | 'paymentMethod'>
+): Promise<ManualCashbookEntry> => {
+  const amount = Math.max(0, Number(payload.amount || 0));
+  if (!(amount > 0)) throw new Error('Amount must be greater than zero.');
+  if (payload.type !== 'cash_in' && payload.type !== 'cash_out') throw new Error('Invalid manual cash entry type.');
+  if (!String(payload.date || '').trim()) throw new Error('Date is required.');
+  const now = new Date().toISOString();
+  const entry: ManualCashbookEntry = {
+    id: `mce-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    date: payload.date,
+    type: payload.type,
+    amount,
+    details: String(payload.details || '').trim(),
+    paymentMethod: 'Cash',
+    createdAt: now,
+    updatedAt: now,
+    isDeleted: Boolean(payload.isDeleted),
+  };
+  const data = loadData();
+  const next = [entry, ...(data.manualCashbookEntries || [])];
+  await saveData({ ...data, manualCashbookEntries: next }, { throwOnError: true, reason: 'createManualCashbookEntry', auditOperation: 'CREATE' });
+  return entry;
+};
+
 export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'createdAt' | 'updatedAt'>): Promise<PurchaseParty> => {
   const data = loadData();
   const now = new Date().toISOString();
@@ -4238,6 +4314,12 @@ export const updatePurchaseParty = async (party: PurchaseParty): Promise<Purchas
   const next = (data.purchaseParties || []).map(item => item.id === party.id ? { ...party, updatedAt: new Date().toISOString() } : item);
   await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty', auditOperation: 'UPDATE' });
   return party;
+};
+
+export const deletePurchaseParty = async (partyId: string): Promise<void> => {
+  const data = loadData();
+  const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty', auditOperation: 'DELETE' });
 };
 
 export const getPurchaseOrders = (): PurchaseOrder[] => {
@@ -4568,6 +4650,140 @@ export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orde
     };
   });
   await saveData({ ...data, purchaseOrders: nextOrders }, { throwOnError: true, reason: 'deleteLegacySupplierPaymentGroup', auditOperation: 'DELETE' });
+};
+
+
+export const editInventoryPurchaseHistoryEntry = async (
+  productId: string,
+  purchaseHistoryId: string,
+  patch: { quantity: number; unitPrice: number }
+): Promise<Product[]> => {
+  const data = loadData();
+  const products = [...(data.products || [])];
+  const productIndex = products.findIndex((p) => p.id === productId);
+  if (productIndex < 0) failValidation('PRODUCT_NOT_FOUND', 'Product not found.', { productId });
+
+  const product = products[productIndex];
+  const historyIndex = (product.purchaseHistory || []).findIndex((h) => h.id === purchaseHistoryId);
+  if (historyIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase history entry not found.', { productId, purchaseHistoryId });
+  const history = (product.purchaseHistory || [])[historyIndex];
+  if (!history.purchaseOrderId) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Legacy purchase entry cannot be safely edited without linked purchase order.', { productId, purchaseHistoryId });
+
+  const orders = [...(data.purchaseOrders || [])];
+  const orderIndex = orders.findIndex((o) => o.id === history.purchaseOrderId);
+  if (orderIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Linked purchase order not found.', { purchaseOrderId: history.purchaseOrderId });
+  const order = orders[orderIndex];
+
+  const newQty = Math.max(0, Number(patch.quantity || 0));
+  const newUnitPrice = Math.max(0, Number(patch.unitPrice || 0));
+  if (newQty <= 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Purchase quantity must be greater than zero.', { quantity: patch.quantity });
+  if (!Number.isFinite(newUnitPrice) || newUnitPrice < 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Purchase unit price must be zero or greater.', { unitPrice: patch.unitPrice });
+
+  const oldQty = Math.max(0, Number(history.quantity || 0));
+  const qtyDelta = newQty - oldQty;
+  if (qtyDelta < 0 && Math.max(0, Number(product.stock || 0)) < Math.abs(qtyDelta)) {
+    failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot reduce purchase quantity because current stock is lower than the reduction.', { stock: product.stock, reduction: Math.abs(qtyDelta) });
+  }
+
+  const lines = Array.isArray(order.lines) ? [...order.lines] : [];
+  let targetLineIndex = -1;
+  if (lines.length === 1) {
+    targetLineIndex = 0;
+  } else {
+    const variant = String(history.variant || '').trim().toLowerCase();
+    const color = String(history.color || '').trim().toLowerCase();
+    const candidates = lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => String(line.productId || '').trim() === productId)
+      .filter(({ line }) => String(line.variant || '').trim().toLowerCase() === variant && String(line.color || '').trim().toLowerCase() === color)
+      .filter(({ line }) => Math.abs(Math.max(0, Number(line.quantity || 0)) - oldQty) < 0.0001);
+    if (candidates.length === 1) targetLineIndex = candidates[0].idx;
+  }
+  if (targetLineIndex < 0) {
+    failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot edit this purchase because the linked purchase order line could not be identified.', { purchaseOrderId: order.id, purchaseHistoryId });
+  }
+
+  const line = lines[targetLineIndex];
+  lines[targetLineIndex] = { ...line, quantity: newQty, unitCost: newUnitPrice, totalCost: Number((newQty * newUnitPrice).toFixed(2)) };
+
+  const totalQuantity = lines.reduce((sum, l) => sum + Math.max(0, Number(l.quantity || 0)), 0);
+  const totalAmount = Number(lines.reduce((sum, l) => sum + Math.max(0, Number(l.totalCost || 0)), 0).toFixed(2));
+  const paymentHistory = Array.isArray(order.paymentHistory) ? [...order.paymentHistory] : [];
+  const coveredAmount = Number(paymentHistory.reduce((sum, payment: any) => sum + Math.max(0, Number(payment.amount || 0)), 0).toFixed(2));
+  const remainingAmount = Math.max(0, Number((totalAmount - coveredAmount).toFixed(2)));
+  const overpaidAmount = Math.max(0, Number((coveredAmount - totalAmount).toFixed(2)));
+
+  const now = new Date().toISOString();
+  const nextBuyPrice = Number(newUnitPrice.toFixed(2));
+  const nextHistory = [...(product.purchaseHistory || [])];
+  nextHistory[historyIndex] = {
+    ...history,
+    quantity: newQty,
+    unitPrice: newUnitPrice,
+    nextBuyPrice,
+    date: history.date || now,
+    notes: `${history.notes || ''}${history.notes ? ' | ' : ''}Edited purchase entry`,
+  } as any;
+
+  let nextStockRows = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
+  const hasVariant = Boolean(history.variant || history.color);
+  if (hasVariant) {
+    const normalizedVariant = (history.variant || 'No Variant').trim() || 'No Variant';
+    const normalizedColor = (history.color || 'No Color').trim() || 'No Color';
+    const idx = nextStockRows.findIndex((row) => (row.variant || 'No Variant') === normalizedVariant && (row.color || 'No Color') === normalizedColor);
+    if (idx >= 0) {
+      const row = nextStockRows[idx];
+      const nextRowStock = Math.max(0, Number(row.stock || 0) + qtyDelta);
+      const nextRowTotalPurchase = Math.max(0, Number(row.totalPurchase || 0) + qtyDelta);
+      nextStockRows[idx] = { ...row, stock: nextRowStock, totalPurchase: nextRowTotalPurchase, buyPrice: nextBuyPrice };
+    }
+  }
+
+  const nextProduct: Product = {
+    ...product,
+    stock: Math.max(0, Number(product.stock || 0) + qtyDelta),
+    totalPurchase: Math.max(0, Number(product.totalPurchase || 0) + qtyDelta),
+    buyPrice: nextBuyPrice,
+    stockByVariantColor: nextStockRows,
+    purchaseHistory: nextHistory,
+  };
+
+  const nextOrder: PurchaseOrder = {
+    ...order,
+    lines,
+    totalQuantity: Number(totalQuantity.toFixed(2)),
+    totalAmount,
+    totalPaid: coveredAmount,
+    remainingAmount,
+    paymentHistory,
+    updatedAt: now,
+    notes: `${order.notes || ''}${overpaidAmount > 0 ? `${order.notes ? ' | ' : ''}Overpayment after edit: ₹${overpaidAmount.toFixed(2)}` : ''}`.trim(),
+  };
+
+  const editCreditId = `pce-edit-${order.id}`;
+  const existingCredits = Array.isArray((data as any).partyCreditLedger) ? ([...(data as any).partyCreditLedger] as PartyCreditLedgerEntry[]) : [];
+  const nextPartyCreditLedger = existingCredits.filter((entry) => entry.id !== editCreditId);
+  if (overpaidAmount > 0) {
+    nextPartyCreditLedger.unshift({
+      id: editCreditId,
+      partyId: order.partyId,
+      partyName: order.partyName,
+      type: 'supplier_overpayment',
+      sourcePaymentId: editCreditId,
+      sourceVoucherNo: order.billNumber || order.id,
+      amountCreated: Number(overpaidAmount.toFixed(2)),
+      remainingAmount: Number(overpaidAmount.toFixed(2)),
+      usageHistory: [],
+      createdAt: now,
+      updatedAt: now,
+      note: `Overpayment after purchase edit for ${order.billNumber || order.id}`,
+    } as PartyCreditLedgerEntry);
+  }
+
+  products[productIndex] = nextProduct;
+  orders[orderIndex] = nextOrder;
+  await saveData({ ...data, products, purchaseOrders: orders, partyCreditLedger: nextPartyCreditLedger }, { throwOnError: true, reason: 'editInventoryPurchaseHistoryEntry', auditOperation: 'UPDATE' });
+  return products;
 };
 
 export const reverseInventoryPurchaseHistoryEntry = async (productId: string, purchaseHistoryId: string): Promise<Product> => {
