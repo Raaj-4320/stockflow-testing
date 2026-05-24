@@ -3426,3 +3426,17 @@ export default function Finance() {
     </div>
   );
 }
+  const deletedByOriginalId = new Map<string, DeletedTransactionRecord>(
+    (deletedTransactions || []).map((record) => [String(record.originalTransactionId || record.originalTransaction?.id || ''), record])
+  );
+  const explicitDeletedSaleCashIncluded = (deleteCompensations || [])
+    .filter((record) => isExplicitDeleteRefund(record))
+    .reduce((sum, record) => {
+      const eventTime = new Date(record.createdAt).getTime();
+      if (!Number.isFinite(eventTime) || eventTime < windowStart || eventTime > windowEnd) return sum;
+      const linkedDeleted = deletedByOriginalId.get(String(record.transactionId || ''));
+      const original = linkedDeleted?.originalTransaction;
+      if (!original || !isSaleLikeTx(original)) return sum;
+      const settlement = getSaleSettlementBreakdown(original);
+      return roundMoney(sum + Math.max(0, Number(settlement.cashPaid || 0)));
+    }, 0);
