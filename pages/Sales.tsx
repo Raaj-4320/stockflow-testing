@@ -1138,7 +1138,16 @@ export default function Sales() {
       exportInvoiceToExcel(transactionComplete);
     }
   };
-  const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
+  const resolvedSelectedCustomer = useMemo(() => {
+    if (!selectedCustomer) return null;
+    return customers.find((c) => (
+      (selectedCustomer.id && c.id === selectedCustomer.id)
+      || (selectedCustomer.phone && c.phone === selectedCustomer.phone)
+      || (selectedCustomer.name && c.name === selectedCustomer.name)
+    )) || selectedCustomer;
+  }, [selectedCustomer, customers]);
+  const availableStoreCredit = Math.max(0, Number(resolvedSelectedCustomer?.storeCredit || 0));
+  const selectedCustomerDue = Math.max(0, Number(resolvedSelectedCustomer?.totalDue || 0));
   const originalInvoiceTotal = Math.max(0, Number(buildCheckoutMoney({
     cartItems: cart,
     taxRate: selectedTax.value,
@@ -1934,9 +1943,21 @@ export default function Sales() {
                 {!selectedCustomer ? (
                   <Input placeholder="Search phone or name..." value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} />
                 ) : (
-                  <div className="flex justify-between items-center bg-muted p-2 rounded border">
-                    <div><p className="text-sm font-bold">{selectedCustomer.name}</p><p className="text-xs text-muted-foreground">{selectedCustomer.phone}</p></div>
-                    <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                  <div className="bg-muted p-2 rounded border">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold truncate">{resolvedSelectedCustomer?.name || selectedCustomer.name}</p>
+                        <p className="text-xs text-muted-foreground">{resolvedSelectedCustomer?.phone || selectedCustomer.phone}</p>
+                      </div>
+                      {selectedCustomerDue > 0 && (
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-semibold text-orange-700 whitespace-nowrap">Due: ₹{formatMoneyPrecise(selectedCustomerDue)}</p>
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-1 flex justify-end">
+                      <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                    </div>
                   </div>
                 )}
                 {customerSearch && !selectedCustomer && filteredCustomers.length > 0 && (
@@ -2256,12 +2277,21 @@ export default function Sales() {
                         <Input placeholder="Search phone or name..." value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} className="pl-9" />
                       </div>
                     ) : (
-                      <div className="flex justify-between items-center bg-muted p-3 rounded-lg border">
-                        <div className="text-sm">
-                          <p className="font-bold">{selectedCustomer.name}</p>
-                          <p className="text-xs text-muted-foreground">{selectedCustomer.phone}</p>
+                      <div className="bg-muted p-3 rounded-lg border">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-sm min-w-0">
+                            <p className="font-bold truncate">{resolvedSelectedCustomer?.name || selectedCustomer.name}</p>
+                            <p className="text-xs text-muted-foreground">{resolvedSelectedCustomer?.phone || selectedCustomer.phone}</p>
+                          </div>
+                          {selectedCustomerDue > 0 && (
+                            <div className="text-right shrink-0">
+                              <p className="text-xs font-semibold text-orange-700 whitespace-nowrap">Due: ₹{formatMoneyPrecise(selectedCustomerDue)}</p>
+                            </div>
+                          )}
                         </div>
-                        <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                        <div className="mt-1 flex justify-end">
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                        </div>
                       </div>
                     )}
                     {customerSearch && !selectedCustomer && filteredCustomers.length > 0 && (
