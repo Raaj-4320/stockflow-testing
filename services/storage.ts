@@ -920,6 +920,8 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
 
   customerTransactionsAsc
     .forEach((tx, index) => {
+      const beforeDue = runningDue;
+      const beforeCredit = runningStoreCredit;
       const amount = Math.abs(toFiniteNumber(tx.total, 0));
       const priorTransactions = customerTransactionsAsc.slice(0, index);
       if (tx.type === 'sale' || tx.type === 'historical_reference') {
@@ -984,6 +986,20 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - storeCreditUsed));
         runningDue = roundCurrency(runningDue + receivableIncrease);
       }
+      console.log("[STORE CREDIT DEBUG]", JSON.stringify({
+        stage: "composite_balance_rebuild",
+        txId: tx.id,
+        txType: tx.type,
+        customerId,
+        total: amount,
+        storeCreditCreated: (tx as any).storeCreditCreated || 0,
+        storeCreditUsed: (tx as any).storeCreditUsed || 0,
+        paymentAppliedToReceivable: (tx as any).paymentAppliedToReceivable || 0,
+        beforeDue,
+        beforeCredit,
+        afterDue: runningDue,
+        afterCredit: runningStoreCredit
+      }, null, 2));
     });
   if (customerLedgerDebugEnabled && customerLedgerDebugRows.length) {
     console.log('[CUSTOMER_LEDGER_DEBUG]', { customerId, rows: customerLedgerDebugRows });
@@ -5205,6 +5221,18 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 };
 
 export const processTransaction = (transaction: Transaction): AppState => {
+  console.log("[STORE CREDIT DEBUG]", JSON.stringify({
+    stage: "process_transaction_received",
+    transactionId: transaction.id,
+    type: transaction.type,
+    customerId: transaction.customerId,
+    customerName: transaction.customerName,
+    total: transaction.total,
+    paymentMethod: transaction.paymentMethod,
+    storeCreditUsed: transaction.storeCreditUsed,
+    storeCreditCreated: transaction.storeCreditCreated,
+    saleSettlement: transaction.saleSettlement
+  }, null, 2));
   let data = ensureDocumentSeriesDefaults(loadData());
   let effectiveTransaction: Transaction = transaction.type === 'sale'
     ? { ...transaction, saleSettlement: getSaleSettlementBreakdown(transaction) }
@@ -5345,6 +5373,14 @@ export const processTransaction = (transaction: Transaction): AppState => {
       const rebuiltBalance = rebuildCustomerBalanceFromLedger(c.id, newTransactions);
       totalDue = rebuiltBalance.totalDue;
       storeCredit = rebuiltBalance.storeCredit;
+      console.log("[STORE CREDIT DEBUG]", JSON.stringify({
+        stage: "customer_balance_before",
+        customerId: c.id,
+        totalDueBefore: dueBefore,
+        storeCreditBefore,
+        storeCreditCreated,
+        storeCreditUsed
+      }, null, 2));
       newCustomers[customerIndex] = {
         ...c,
         totalSpend: newTotalSpend,
@@ -5353,6 +5389,14 @@ export const processTransaction = (transaction: Transaction): AppState => {
         visitCount: newVisitCount,
         lastVisit: newLastVisit
       };
+      console.log("[STORE CREDIT DEBUG]", JSON.stringify({
+        stage: "customer_balance_after",
+        customerId: c.id,
+        totalDueAfter: totalDue,
+        storeCreditAfter: storeCredit,
+        storeCreditCreated,
+        storeCreditUsed
+      }, null, 2));
       if (effectiveTransaction.type === 'payment') {
       }
   }
