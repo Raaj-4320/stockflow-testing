@@ -16,6 +16,7 @@ import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle,
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { auth } from '../services/firebase';
+import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
@@ -1153,14 +1154,19 @@ export default function Sales() {
     });
     return matchedCustomer || selectedCustomer;
   }, [selectedCustomer, customers]);
-  const availableStoreCredit = Math.max(0, Number(resolvedSelectedCustomer?.storeCredit || 0));
-  const selectedCustomerDue = Math.max(0, Number(resolvedSelectedCustomer?.totalDue || 0));
+  const selectedCustomerBalanceView = useMemo(() => getCanonicalCustomerBalanceView(resolvedSelectedCustomer, customers, transactions, upfrontOrders), [resolvedSelectedCustomer, customers, transactions, upfrontOrders]);
+  const availableStoreCredit = selectedCustomerBalanceView.canonicalStoreCredit;
+  const selectedCustomerDue = selectedCustomerBalanceView.canonicalDue;
   console.log('[POS DEBUG] resolvedSelectedCustomer', resolvedSelectedCustomer);
-  console.log('[POS DEBUG] selectedCustomerDue', {
-    raw: resolvedSelectedCustomer?.totalDue,
-    computed: selectedCustomerDue,
-    type: typeof resolvedSelectedCustomer?.totalDue,
-  });
+  if (import.meta.env.DEV && resolvedSelectedCustomer?.id) {
+    console.log('[CUSTOMER BALANCE VIEW]', {
+      customerId: selectedCustomerBalanceView.customerId,
+      snapshotDue: selectedCustomerBalanceView.snapshotDue,
+      canonicalDue: selectedCustomerBalanceView.canonicalDue,
+      snapshotStoreCredit: selectedCustomerBalanceView.snapshotStoreCredit,
+      canonicalStoreCredit: selectedCustomerBalanceView.canonicalStoreCredit,
+    });
+  }
   console.log('[POS DEBUG] shouldRenderDue', selectedCustomerDue > 0);
   const originalInvoiceTotal = Math.max(0, Number(buildCheckoutMoney({
     cartItems: cart,
