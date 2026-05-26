@@ -1138,7 +1138,16 @@ export default function Sales() {
       exportInvoiceToExcel(transactionComplete);
     }
   };
-  const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
+  const resolvedSelectedCustomer = useMemo(() => {
+    if (!selectedCustomer) return null;
+    return customers.find((c) => (
+      (selectedCustomer.id && c.id === selectedCustomer.id)
+      || (selectedCustomer.phone && c.phone === selectedCustomer.phone)
+      || (selectedCustomer.name && c.name === selectedCustomer.name)
+    )) || selectedCustomer;
+  }, [selectedCustomer, customers]);
+  const availableStoreCredit = Math.max(0, Number(resolvedSelectedCustomer?.storeCredit || 0));
+  const selectedCustomerDue = Math.max(0, Number(resolvedSelectedCustomer?.totalDue || 0));
   const originalInvoiceTotal = Math.max(0, Number(buildCheckoutMoney({
     cartItems: cart,
     taxRate: selectedTax.value,
@@ -1935,7 +1944,11 @@ export default function Sales() {
                   <Input placeholder="Search phone or name..." value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} />
                 ) : (
                   <div className="flex justify-between items-center bg-muted p-2 rounded border">
-                    <div><p className="text-sm font-bold">{selectedCustomer.name}</p><p className="text-xs text-muted-foreground">{selectedCustomer.phone}</p></div>
+                    <div>
+                      <p className="text-sm font-bold">{resolvedSelectedCustomer?.name || selectedCustomer.name}</p>
+                      <p className="text-xs text-muted-foreground">{resolvedSelectedCustomer?.phone || selectedCustomer.phone}</p>
+                      {selectedCustomerDue > 0 && <p className="text-xs font-semibold text-orange-700">Due: ₹{formatMoneyPrecise(selectedCustomerDue)}</p>}
+                    </div>
                     <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
                   </div>
                 )}
@@ -2258,8 +2271,9 @@ export default function Sales() {
                     ) : (
                       <div className="flex justify-between items-center bg-muted p-3 rounded-lg border">
                         <div className="text-sm">
-                          <p className="font-bold">{selectedCustomer.name}</p>
-                          <p className="text-xs text-muted-foreground">{selectedCustomer.phone}</p>
+                          <p className="font-bold">{resolvedSelectedCustomer?.name || selectedCustomer.name}</p>
+                          <p className="text-xs text-muted-foreground">{resolvedSelectedCustomer?.phone || selectedCustomer.phone}</p>
+                          {selectedCustomerDue > 0 && <p className="text-xs font-semibold text-orange-700">Due: ₹{formatMoneyPrecise(selectedCustomerDue)}</p>}
                         </div>
                         <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
                       </div>
