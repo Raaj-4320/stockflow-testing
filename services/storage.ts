@@ -1670,16 +1670,16 @@ const commitProcessTransactionAtomically = async ({
   transaction,
   legacyCustomerProductStatsSeed,
   allowLegacySeed,
+  customerTransactionsForLedger,
 }: {
   transaction: Transaction;
   legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }>;
   allowLegacySeed: boolean;
+  customerTransactionsForLedger: Transaction[];
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
-  const preloadedCustomerTransactionsForLedger = transaction.customerId
-    ? (await getDocs(query(getTransactionsCollectionRef(user.uid), where('customerId', '==', transaction.customerId)))).docs
-      .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
-      .filter(tx => !((tx as any).isDeleted))
+  const preloadedCustomerTransactionsForLedger = Array.isArray(customerTransactionsForLedger)
+    ? customerTransactionsForLedger.filter(tx => !((tx as any).isDeleted))
     : [];
 
   return runFirestoreTransaction(db!, async (firestoreTx) => {
@@ -2313,13 +2313,13 @@ const syncFromCloud = async () => {
                   && customerProductStatsBackfill?.version === CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION;
                 isCustomerProductStatsBackfillComplete = strictBackfill || ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL;
 
-                const subcollectionProducts = await readProductsFromSubcollection(user.uid);
-                const subcollectionCustomers = await readCustomersFromSubcollection(user.uid);
-                const subcollectionTransactions = await readTransactionsFromSubcollection(user.uid);
-                const subcollectionDeletedTransactions = await readDeletedTransactionsFromSubcollection(user.uid);
-                const hydratedProducts = subcollectionProducts;
-                const hydratedCustomers = subcollectionCustomers;
-                const hydratedTransactions = subcollectionTransactions;
+                // No debug logging in rebuild loops.
+                // Root doc snapshots should not trigger full subcollection hydration;
+                // dedicated subcollection listeners own products/customers/transactions/deletedTransactions.
+                const hydratedProducts = memoryState.products || [];
+                const hydratedCustomers = memoryState.customers || [];
+                const hydratedTransactions = memoryState.transactions || [];
+                const subcollectionDeletedTransactions = memoryState.deletedTransactions || [];
                 const fallbackFreightInquiries = Array.isArray(memoryState.freightInquiries) ? memoryState.freightInquiries : [];
                 const fallbackFreightConfirmedOrders = Array.isArray(memoryState.freightConfirmedOrders) ? memoryState.freightConfirmedOrders : [];
                 const fallbackFreightPurchases = Array.isArray(memoryState.freightPurchases) ? memoryState.freightPurchases : [];
@@ -2361,7 +2361,7 @@ const syncFromCloud = async () => {
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
                 emitCloudSyncStatus(CLOUD_SYNC_STATUSES.READY);
-                if (subcollectionProducts.length > 0) {
+                if (hydratedProducts.length > 0) {
                   void writeAuditEvent('SECURITY_EVENT', {
                     reason: 'products_read_from_subcollection',
                     migrationPhase: PRODUCTS_MIGRATION_PHASE,
@@ -5413,6 +5413,9 @@ export const processTransaction = (transaction: Transaction): AppState => {
       transaction: effectiveTransaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
+      customerTransactionsForLedger: effectiveTransaction.customerId
+        ? data.transactions.filter(tx => tx.customerId === effectiveTransaction.customerId)
+        : [],
     })
       .then(({ created, committedProducts, committedCustomer }) => {
         if (!created) {
@@ -5474,7 +5477,6 @@ export const processTransaction = (transaction: Transaction): AppState => {
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
             transactionId: effectiveTransaction.id,
           }),
-syncToCloud({ ...data }),
         ]).catch(error => {
         });
       })
