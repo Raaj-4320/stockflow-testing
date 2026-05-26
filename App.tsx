@@ -7,7 +7,7 @@ import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, MessageCircle } from 'lucide-react';
 import { Button } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
