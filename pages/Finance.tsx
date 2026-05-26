@@ -9,6 +9,7 @@ import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, U
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
 import { compareCashSession, compareLegacyVsLedger } from '../services/erpComparison';
+import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 type Expense = {
   id: string;
@@ -1226,7 +1227,26 @@ export default function Finance() {
 
   const expensesTotalForDate = useMemo(() => filteredExpenses.reduce((sum, e) => sum + e.amount, 0), [filteredExpenses]);
 
-  const creditCustomers = useMemo(() => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue), [data.customers]);
+
+  const canonicalCustomerBalanceById = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getCanonicalCustomerBalanceView>>();
+    data.customers.forEach((customer) => {
+      const view = getCanonicalCustomerBalanceView(customer, data.customers, data.transactions, data.upfrontOrders || []);
+      map.set(customer.id, view);
+      if (import.meta.env.DEV) {
+        console.log('[CUSTOMER BALANCE VIEW]', {
+          customerId: view.customerId,
+          snapshotDue: view.snapshotDue,
+          canonicalDue: view.canonicalDue,
+          snapshotStoreCredit: view.snapshotStoreCredit,
+          canonicalStoreCredit: view.canonicalStoreCredit,
+        });
+      }
+    });
+    return map;
+  }, [data.customers, data.transactions, data.upfrontOrders]);
+
+  const creditCustomers = useMemo(() => data.customers.filter(c => (canonicalCustomerBalanceById.get(c.id)?.canonicalDue || 0) > 0).sort((a, b) => (canonicalCustomerBalanceById.get(b.id)?.canonicalDue || 0) - (canonicalCustomerBalanceById.get(a.id)?.canonicalDue || 0)), [data.customers, canonicalCustomerBalanceById]);
 
   const dueStoreCreditSummary = useMemo(() => {
     const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions);
@@ -3397,8 +3417,8 @@ export default function Finance() {
                     <p className="text-sm text-muted-foreground">Last Visit: {new Date(customer.lastVisit).toLocaleDateString()}</p>
                   </div>
                   <div className="text-right">
-                    <p className="font-bold text-red-700">Due: {formatINRSummary(customer.totalDue)}</p>
-                    <Button size="sm" onClick={() => { setCollectingCustomer(customer); setPaymentAmount(customer.totalDue.toFixed(2)); }}>Collect Payment</Button>
+                    <p className="font-bold text-red-700">Due: {formatINRSummary(canonicalCustomerBalanceById.get(customer.id)?.canonicalDue || 0)}</p>
+                    <Button size="sm" onClick={() => { const due = canonicalCustomerBalanceById.get(customer.id)?.canonicalDue || 0; setCollectingCustomer(customer); setPaymentAmount(due.toFixed(2)); }}>Collect Payment</Button>
                   </div>
                 </div>
               ))}
