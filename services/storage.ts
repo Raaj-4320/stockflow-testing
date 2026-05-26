@@ -1670,16 +1670,16 @@ const commitProcessTransactionAtomically = async ({
   transaction,
   legacyCustomerProductStatsSeed,
   allowLegacySeed,
+  customerTransactionsForLedger,
 }: {
   transaction: Transaction;
   legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }>;
   allowLegacySeed: boolean;
+  customerTransactionsForLedger: Transaction[];
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
-  const preloadedCustomerTransactionsForLedger = transaction.customerId
-    ? (await getDocs(query(getTransactionsCollectionRef(user.uid), where('customerId', '==', transaction.customerId)))).docs
-      .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
-      .filter(tx => !((tx as any).isDeleted))
+  const preloadedCustomerTransactionsForLedger = Array.isArray(customerTransactionsForLedger)
+    ? customerTransactionsForLedger.filter(tx => !((tx as any).isDeleted))
     : [];
 
   return runFirestoreTransaction(db!, async (firestoreTx) => {
@@ -5413,6 +5413,9 @@ export const processTransaction = (transaction: Transaction): AppState => {
       transaction: effectiveTransaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
+      customerTransactionsForLedger: effectiveTransaction.customerId
+        ? data.transactions.filter(tx => tx.customerId === effectiveTransaction.customerId)
+        : [],
     })
       .then(({ created, committedProducts, committedCustomer }) => {
         if (!created) {
