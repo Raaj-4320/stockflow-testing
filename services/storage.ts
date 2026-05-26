@@ -114,6 +114,12 @@ const emitLocalStorageUpdate = () => {
 };
 
 
+const shouldTraceLoad = () => typeof import.meta !== 'undefined' && Boolean((import.meta as any).env?.DEV);
+const traceLoad = (payload: Record<string, unknown>) => {
+  if (!shouldTraceLoad()) return;
+  console.log('[LOAD TRACE]', JSON.stringify(payload, null, 2));
+};
+
 const emitBehaviorStateChange = (detail: { type: string; from?: string; to?: string; entityId?: string; metadata?: Record<string, unknown> }) => {
   window.dispatchEvent(new CustomEvent('app-state-change', { detail }));
 };
@@ -1670,16 +1676,16 @@ const commitProcessTransactionAtomically = async ({
   transaction,
   legacyCustomerProductStatsSeed,
   allowLegacySeed,
+  customerTransactionsForLedger,
 }: {
   transaction: Transaction;
   legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }>;
   allowLegacySeed: boolean;
+  customerTransactionsForLedger: Transaction[];
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
-  const preloadedCustomerTransactionsForLedger = transaction.customerId
-    ? (await getDocs(query(getTransactionsCollectionRef(user.uid), where('customerId', '==', transaction.customerId)))).docs
-      .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
-      .filter(tx => !((tx as any).isDeleted))
+  const preloadedCustomerTransactionsForLedger = Array.isArray(customerTransactionsForLedger)
+    ? customerTransactionsForLedger.filter(tx => !((tx as any).isDeleted))
     : [];
 
   return runFirestoreTransaction(db!, async (firestoreTx) => {
@@ -2219,9 +2225,11 @@ if (typeof window !== 'undefined') {
 }
 
 const syncFromCloud = async () => {
+    traceLoad({ stage: 'initialize_cloud_sync_start', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'unknown', timestamp: new Date().toISOString() });
     if (!db || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    traceLoad({ stage: 'initialize_cloud_sync_user_detected', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'auth', uid: user.uid, timestamp: new Date().toISOString() });
     if (!user.emailVerified) {
       throw new Error('Email verification required before cloud access.');
     }
@@ -2259,7 +2267,9 @@ const syncFromCloud = async () => {
             unsubscribeDeletedTransactionsSnapshot();
         }
 
+        traceLoad({ stage: 'listener_registered', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'listener', uid: user.uid, listenerName: 'products', timestamp: new Date().toISOString() });
         unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(user.uid), (productsSnap) => {
+            traceLoad({ stage: 'listener_fired', file: 'services/storage.ts', functionName: 'products_onSnapshot', source: 'listener', uid: user.uid, listenerName: 'products', snapshotSize: productsSnap.size, docChangesCount: productsSnap.docChanges().length, fromCache: productsSnap.metadata.fromCache, hasPendingWrites: productsSnap.metadata.hasPendingWrites, timestamp: new Date().toISOString() });
             const products = productsSnap.docs
               .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
               .filter(p => !((p as any).isDeleted));
@@ -2268,8 +2278,10 @@ const syncFromCloud = async () => {
             logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
+            console.warn('[LOAD TRACE]', JSON.stringify({ stage: 'firestore_error', file: 'services/storage.ts', functionName: 'products_onSnapshot', operation: 'onSnapshot', code: (error as any)?.code || null, name: (error as any)?.name || null, message: (error as any)?.message || null, listenerName: 'products' }, null, 2));
         });
 
+        traceLoad({ stage: 'listener_registered', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'listener', uid: user.uid, listenerName: 'customers', timestamp: new Date().toISOString() });
         unsubscribeCustomersSnapshot = onSnapshot(getCustomersCollectionRef(user.uid), (customersSnap) => {
             const customers = customersSnap.docs
               .map(docItem => ({ ...(docItem.data() as Customer), id: docItem.id }))
@@ -2281,6 +2293,7 @@ const syncFromCloud = async () => {
         }, (error) => {
         });
 
+        traceLoad({ stage: 'listener_registered', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'listener', uid: user.uid, listenerName: 'transactions', timestamp: new Date().toISOString() });
         unsubscribeTransactionsSnapshot = onSnapshot(getTransactionsCollectionRef(user.uid), (transactionsSnap) => {
             const transactions = transactionsSnap.docs
               .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
@@ -2293,6 +2306,7 @@ const syncFromCloud = async () => {
         }, (error) => {
         });
 
+        traceLoad({ stage: 'listener_registered', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'listener', uid: user.uid, listenerName: 'deletedTransactions', timestamp: new Date().toISOString() });
         unsubscribeDeletedTransactionsSnapshot = onSnapshot(getDeletedTransactionsCollectionRef(user.uid), (deletedSnap) => {
             const deletedTransactions = deletedSnap.docs
               .map(docItem => ({ ...(docItem.data() as DeletedTransactionRecord), id: docItem.id }))
@@ -2303,23 +2317,25 @@ const syncFromCloud = async () => {
         }, (error) => {
         });
         
+        traceLoad({ stage: 'listener_registered', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'listener', uid: user.uid, listenerName: 'rootDoc', timestamp: new Date().toISOString() });
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
             if (docSnap.exists()) {
                 storeDocumentExists = true;
                 const cloudData = docSnap.data() as AppState;
+                traceLoad({ stage: 'listener_fired', file: 'services/storage.ts', functionName: 'rootDoc_onSnapshot', source: 'listener', uid: user.uid, listenerName: 'rootDoc', exists: docSnap.exists(), rootKeys: Object.keys(cloudData || {}), willReadSubcollections: false, note: 'root listener must not hydrate subcollections', timestamp: new Date().toISOString() });
                 const customerProductStatsBackfill = cloudData.migrationMarkers?.customerProductStatsBackfill;
                 const strictBackfill = customerProductStatsBackfill?.status === 'completed'
                   && customerProductStatsBackfill?.strictModeEnabled === true
                   && customerProductStatsBackfill?.version === CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION;
                 isCustomerProductStatsBackfillComplete = strictBackfill || ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL;
 
-                const subcollectionProducts = await readProductsFromSubcollection(user.uid);
-                const subcollectionCustomers = await readCustomersFromSubcollection(user.uid);
-                const subcollectionTransactions = await readTransactionsFromSubcollection(user.uid);
-                const subcollectionDeletedTransactions = await readDeletedTransactionsFromSubcollection(user.uid);
-                const hydratedProducts = subcollectionProducts;
-                const hydratedCustomers = subcollectionCustomers;
-                const hydratedTransactions = subcollectionTransactions;
+                // No debug logging in rebuild loops.
+                // Root doc snapshots should not trigger full subcollection hydration;
+                // dedicated subcollection listeners own products/customers/transactions/deletedTransactions.
+                const hydratedProducts = memoryState.products || [];
+                const hydratedCustomers = memoryState.customers || [];
+                const hydratedTransactions = memoryState.transactions || [];
+                const subcollectionDeletedTransactions = memoryState.deletedTransactions || [];
                 const fallbackFreightInquiries = Array.isArray(memoryState.freightInquiries) ? memoryState.freightInquiries : [];
                 const fallbackFreightConfirmedOrders = Array.isArray(memoryState.freightConfirmedOrders) ? memoryState.freightConfirmedOrders : [];
                 const fallbackFreightPurchases = Array.isArray(memoryState.freightPurchases) ? memoryState.freightPurchases : [];
@@ -2361,25 +2377,25 @@ const syncFromCloud = async () => {
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
                 emitCloudSyncStatus(CLOUD_SYNC_STATUSES.READY);
-                if (subcollectionProducts.length > 0) {
+                if (hydratedProducts.length > 0) {
                   void writeAuditEvent('SECURITY_EVENT', {
-                    reason: 'products_read_from_subcollection',
+                    reason: 'products_present_in_memory_during_root_snapshot',
                     migrationPhase: PRODUCTS_MIGRATION_PHASE,
-                    productsCount: subcollectionProducts.length,
+                    productsCount: hydratedProducts.length,
                   });
                 }
-                if (subcollectionCustomers.length > 0) {
+                if (hydratedCustomers.length > 0) {
                   void writeAuditEvent('SECURITY_EVENT', {
-                    reason: 'customers_read_from_subcollection',
+                    reason: 'customers_present_in_memory_during_root_snapshot',
                     migrationPhase: CUSTOMERS_MIGRATION_PHASE,
-                    customersCount: subcollectionCustomers.length,
+                    customersCount: hydratedCustomers.length,
                   });
                 }
-                if (subcollectionTransactions.length > 0) {
+                if (hydratedTransactions.length > 0) {
                   void writeAuditEvent('SECURITY_EVENT', {
-                    reason: 'transactions_read_from_subcollection',
+                    reason: 'transactions_present_in_memory_during_root_snapshot',
                     migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-                    transactionsCount: subcollectionTransactions.length,
+                    transactionsCount: hydratedTransactions.length,
                   });
                 }
                 emitLocalStorageUpdate();
@@ -2396,6 +2412,7 @@ const syncFromCloud = async () => {
                 });
             }
         }, (error) => {
+            console.warn('[LOAD TRACE]', JSON.stringify({ stage: 'firestore_error', file: 'services/storage.ts', functionName: 'rootDoc_onSnapshot', operation: 'onSnapshot', code: (error as any)?.code || null, name: (error as any)?.name || null, message: (error as any)?.message || null, listenerName: 'rootDoc' }, null, 2));
             emitCloudSyncStatus(CLOUD_SYNC_STATUSES.ERROR, 'Unable to read cloud data.');
         });
         
@@ -2968,6 +2985,7 @@ const syncToCloud = async (data: AppState) => {
     if (!db || !isCloudSynced || !auth) return;
     const user = auth.currentUser;
     if (!user) return;
+    traceLoad({ stage: 'initialize_cloud_sync_user_detected', file: 'services/storage.ts', functionName: 'syncFromCloud', source: 'auth', uid: user.uid, timestamp: new Date().toISOString() });
     if (!user.emailVerified) {
       throw new Error('Email verification required before cloud writes.');
     }
@@ -3012,6 +3030,7 @@ export const loadData = (): AppState => {
     }
   }
   logLoadedState(memoryState);
+  traceLoad({ stage: 'load_data_return', file: 'services/storage.ts', functionName: 'loadData', source: 'memory', productCount: (memoryState.products || []).length, customerCount: (memoryState.customers || []).length, transactionCount: (memoryState.transactions || []).length, deletedTransactionCount: (memoryState.deletedTransactions || []).length, timestamp: new Date().toISOString() });
   return memoryState;
 };
 
@@ -5413,6 +5432,9 @@ export const processTransaction = (transaction: Transaction): AppState => {
       transaction: effectiveTransaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
+      customerTransactionsForLedger: effectiveTransaction.customerId
+        ? data.transactions.filter(tx => tx.customerId === effectiveTransaction.customerId)
+        : [],
     })
       .then(({ created, committedProducts, committedCustomer }) => {
         if (!created) {
@@ -5474,7 +5496,6 @@ export const processTransaction = (transaction: Transaction): AppState => {
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
             transactionId: effectiveTransaction.id,
           }),
-syncToCloud({ ...data }),
         ]).catch(error => {
         });
       })
