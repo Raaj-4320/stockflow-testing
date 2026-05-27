@@ -5,6 +5,9 @@ import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
 import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
+import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
+import { appendWhatsAppLog } from '../services/whatsappLogs';
+import { auth } from '../services/firebase';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -776,6 +779,41 @@ export default function Customers() {
       doc.save(`Customer_Dues_Report.pdf`);
   };
 
+
+  const handleShareCustomerLedger = async (customer: Customer) => {
+    if (!customer.phone) {
+      window.alert('Customer phone number is missing.');
+      return;
+    }
+    try {
+      const customerTx = transactions.filter(tx => tx.customerId === customer.id);
+      const profile = loadData().profile || {};
+      const rows = customerTx.map(row => ({
+        date: row.date,
+        reference: row.id,
+        description: row.customerName || customer.name,
+        type: row.type,
+        debit: row.type === 'sale' ? Math.abs(Number(row.total || 0)) : 0,
+        credit: row.type !== 'sale' ? Math.abs(Number(row.total || 0)) : 0,
+        balance: 0,
+      }));
+      await generateAccountStatementPDF({
+        profile,
+        entityLabel: 'BILLED TO',
+        entityName: customer.name,
+        entityMeta: [customer.phone || '', `Customer ID: ${customer.id}`],
+        rows,
+        fileName: `Statement_${customer.name.replace(/\s+/g, '_')}.pdf`,
+      });
+      const result = await shareCustomerLedgerViaWhatsApp(customer);
+      const uid = auth?.currentUser?.uid || '';
+      await appendWhatsAppLog(uid, { type: 'ledger', customerId: customer.id, customerName: customer.name, customerPhone: customer.phone, ledgerId: `LEDGER-${customer.id}`, pdfUrl: '', status: result.ok ? 'sent' : 'failed', error: result.ok ? null : result.reason, sentAt: result.ok ? new Date().toISOString() : null, createdBy: uid, meta: { customerId: customer.id } });
+      window.alert(result.message);
+    } catch (error) {
+      window.alert('Ledger PDF could not be prepared. Please try again.');
+    }
+  };
+
   const handleExport = (format: 'pdf' | 'excel') => {
       if (exportType === 'statement' && viewingCustomer) {
           if (format === 'pdf') {
@@ -954,7 +992,23 @@ export default function Customers() {
             </tr>
           </thead>
           <tbody>
-            {paginatedCustomers.map((customer) => (
+            {paginatedCustomers.map((customer) => {
+              const snapshotCustomer = customers.find(c => c.id === customer.id);
+              const name = String(customer.name || '').toLowerCase();
+              const phone = String(customer.phone || '').trim();
+              const shouldTrace = name.includes('ruchit') || phone === '9726759110' || String(customer.id || '') === 'ruchit';
+              if (shouldTrace) {
+                console.log("[STORE CREDIT TRACE]", JSON.stringify({
+                  stage: "customers_row_display",
+                  customerId: customer.id,
+                  customerName: customer.name,
+                  snapshotStoreCredit: snapshotCustomer?.storeCredit || 0,
+                  canonicalStoreCredit: customer.storeCredit || 0,
+                  snapshotDue: snapshotCustomer?.totalDue || 0,
+                  canonicalDue: customer.totalDue || 0
+                }, null, 2));
+              }
+              return (
               <tr key={customer.id} className="border-t hover:bg-muted/20">
                 <td className="p-3">
                   <input
@@ -978,6 +1032,7 @@ export default function Customers() {
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={() => setViewingCustomer(customer)}>View Details</Button>
+                    <Button size="sm" variant="outline" onClick={() => void handleShareCustomerLedger(customer)}>WhatsApp Ledger</Button>
                     <Button size="sm" variant="outline" onClick={() => openCreateOrderForCustomer(customer)}>+ Create Order</Button>
                     <Button size="sm" variant="outline" onClick={() => openCustomerEditor(customer)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => {
@@ -991,7 +1046,8 @@ export default function Customers() {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1136,6 +1192,9 @@ export default function Customers() {
                                </Button>
                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
                                    <FileText className="w-4 h-4 mr-1.5" /> Get Statement
+                               </Button>
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-emerald-200 text-emerald-700 shadow-sm" onClick={() => { if (viewingCustomer) void handleShareCustomerLedger(viewingCustomer); }}>
+                                 WhatsApp Ledger
                                </Button>
                                {customerLedgerDebugEnabled && (
                                  <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-amber-200 text-amber-700 shadow-sm" onClick={() => {

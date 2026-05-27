@@ -62,7 +62,7 @@ export const generateAccountStatementPDF = async ({
   rows,
   fileName,
 }: {
-  profile: StoreProfile;
+  profile?: Partial<StoreProfile> | null;
   entityLabel: string;
   entityName: string;
   entityMeta: string[];
@@ -85,7 +85,8 @@ export const generateAccountStatementPDF = async ({
   const formatDate = (d: Date) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   const formatINR = (n: number) => `INR ${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-  const logoData = await getPdfImageSource(profile.logoImage);
+  const safeProfile = profile || {};
+  const logoData = await getPdfImageSource(safeProfile?.logoImage || '');
   const logoX = margin;
   const logoY = 10;
   const logoBoxW = 24;
@@ -102,16 +103,16 @@ export const generateAccountStatementPDF = async ({
   }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(15);
-  doc.text(profile.storeName || 'StockFlow', logoData ? 40 : margin, 15);
+  doc.text(safeProfile?.storeName || 'StockFlow', logoData ? 40 : margin, 15);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
   const headerLines = [
-    profile.ownerName,
-    profile.addressLine1,
-    profile.addressLine2,
-    profile.phone ? `Phone: ${profile.phone}` : '',
-    profile.email ? `Email: ${profile.email}` : '',
-    profile.gstin ? `GSTIN: ${profile.gstin}` : '',
+    safeProfile?.ownerName,
+    safeProfile?.addressLine1,
+    safeProfile?.addressLine2,
+    safeProfile?.phone ? `Phone: ${safeProfile.phone}` : '',
+    safeProfile?.email ? `Email: ${safeProfile.email}` : '',
+    safeProfile?.gstin ? `GSTIN: ${safeProfile.gstin}` : '',
   ].filter(Boolean) as string[];
   const leftStartY = 20;
   const leftMaxWidth = 106;
