@@ -7,6 +7,8 @@ import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
 import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
+import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
+import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -1504,6 +1506,23 @@ export default function Transactions() {
     return `Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` • SC ${formatINRPrecise(used)}` : ''}`;
   };
 
+
+  const handleShareInvoiceWhatsApp = async (tx: Transaction) => {
+    if (!tx.customerPhone) {
+      window.alert('Customer phone number is missing.');
+      return;
+    }
+    try {
+      generateReceiptPDF(tx, customers);
+      const result = await shareTransactionInvoiceViaWhatsApp(tx);
+      const uid = auth?.currentUser?.uid || '';
+      await appendWhatsAppLog(uid, { type: 'invoice', customerId: tx.customerId || '', customerName: tx.customerName || '', customerPhone: tx.customerPhone || '', invoiceId: tx.id, invoiceNumber: tx.invoiceNo || tx.id, pdfUrl: '', status: result.ok ? 'sent' : 'failed', error: result.ok ? null : result.reason, sentAt: result.ok ? new Date().toISOString() : null, createdBy: uid, meta: { transactionId: tx.id } });
+      window.alert(result.message);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Failed to prepare invoice PDF.');
+    }
+  };
+
   const handleDownloadPDF = () => {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -1964,6 +1983,7 @@ export default function Transactions() {
                                                 {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
                                                 {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleShareInvoiceWhatsApp(tx)}><Download className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>
                                     </tr>
