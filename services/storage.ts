@@ -3189,7 +3189,7 @@ export const requestStoreProvisioning = async (context?: string) => {
     context: context || 'unknown',
     storeDocumentExists,
   });
-  throw new Error('Store is not provisioned. Provision via backend-admin path only.');
+  throw new Error('Store is not provisioned. Use privileged admin provisioning only.');
 };
 
 export const updateStoreProfile = (profile: StoreProfile) => {
@@ -3208,7 +3208,7 @@ export const resetData = () => {
       reason: 'resetData_blocked_client_side',
       message: 'Client-side full reset is disabled for incident remediation.',
     });
-    throw new Error('Reset is disabled in client. Use privileged backend-admin flow.');
+    throw new Error('Reset is disabled in client. Use privileged admin flow.');
 };
 
 export const addProduct = async (product: Product): Promise<Product[]> => {

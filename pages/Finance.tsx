@@ -8,7 +8,6 @@ import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompen
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
-import { compareCashSession, compareLegacyVsLedger } from '../services/erpComparison';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 type Expense = {
@@ -767,7 +766,6 @@ export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<FinanceTabKey>('cash');
-  const [showErpFinanceCompare, setShowErpFinanceCompare] = useState(false);
   useEffect(() => {
     if (!['cash', 'expense'].includes(activeTab)) setActiveTab('cash');
   }, [activeTab]);
@@ -2396,25 +2394,7 @@ export default function Finance() {
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
   ];
 
-  const erpCompareInput = useMemo(() => ({
-    transactions: data.transactions,
-    deletedTransactions: data.deletedTransactions,
-    deleteCompensations: data.deleteCompensations,
-    supplierPayments: data.supplierPayments,
-    purchaseOrders: data.purchaseOrders,
-    manualCashbookEntries: data.manualCashbookEntries,
-    upfrontOrders,
-    customers: data.customers,
-    products: data.products,
-    cashSessions: data.cashSessions,
-    expenses: data.expenses,
-  }), [data, upfrontOrders]);
 
-  const erpLegacyVsLedger = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
-  const erpCashSessionCompare = useMemo(
-    () => compareCashSession({ ...erpCompareInput, session: openSession }),
-    [erpCompareInput, openSession]
-  );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -2448,57 +2428,7 @@ export default function Finance() {
           })}
         </div>
 
-        <Card className="border-violet-200 bg-violet-50/40 shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center justify-between gap-2 text-base">
-              <span>New ERP Finance Compare</span>
-              <Button size="sm" variant="outline" onClick={() => setShowErpFinanceCompare(prev => !prev)}>
-                {showErpFinanceCompare ? 'Hide' : 'Show'}
-              </Button>
-            </CardTitle>
-            <p className="text-xs text-violet-800">Read-only comparison — does not affect production cash totals.</p>
-          </CardHeader>
-          {showErpFinanceCompare && (
-            <CardContent className="space-y-3 text-sm">
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-                <div className="rounded border bg-white p-2">
-                  <div className="text-[11px] text-slate-500">Legacy session snapshot</div>
-                  <div className="font-semibold">{formatINR(erpCashSessionCompare.legacySessionSystemCashTotal)}</div>
-                </div>
-                <div className="rounded border bg-white p-2">
-                  <div className="text-[11px] text-slate-500">Legacy recomputed cash</div>
-                  <div className="font-semibold">{formatINR(erpCashSessionCompare.legacyRecomputedCashTotal)}</div>
-                </div>
-                <div className="rounded border bg-white p-2">
-                  <div className="text-[11px] text-slate-500">Ledger cash total</div>
-                  <div className="font-semibold">{formatINR(erpCashSessionCompare.ledgerCashTotal)}</div>
-                </div>
-                <div className="rounded border bg-white p-2">
-                  <div className="text-[11px] text-slate-500">Delta (ledger - legacy snapshot)</div>
-                  <div className={`font-semibold ${Math.abs(erpCashSessionCompare.deltaLegacySnapshotVsLedger) < 0.01 ? 'text-emerald-700' : 'text-red-700'}`}>
-                    {formatINR(erpCashSessionCompare.deltaLegacySnapshotVsLedger)}
-                  </div>
-                </div>
-              </div>
 
-              <div className="rounded border bg-white p-2">
-                <div className="text-xs font-medium mb-1">Status: <span className="uppercase">{erpCashSessionCompare.status}</span></div>
-                <div className="text-xs text-slate-600">Cash dimension legacy vs ledger delta: {formatINR(erpLegacyVsLedger.cash.delta)}</div>
-              </div>
-
-              <div className="rounded border bg-white p-2">
-                <div className="text-xs font-medium mb-1">Warnings / linkage flags</div>
-                {erpCashSessionCompare.flags.length ? (
-                  <ul className="list-disc pl-5 space-y-0.5 text-xs text-slate-700">
-                    {erpCashSessionCompare.flags.map(flag => <li key={flag}>{flag}</li>)}
-                  </ul>
-                ) : (
-                  <div className="text-xs text-slate-500">No comparison flags emitted.</div>
-                )}
-              </div>
-            </CardContent>
-          )}
-        </Card>
 
         {activeTab === '__removed_cashbook__' && (
           <div className="space-y-4">

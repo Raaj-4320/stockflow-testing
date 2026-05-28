@@ -5,9 +5,7 @@ import { allocateCustomerPaymentAgainstCompositeReceivable, applyPartyCreditToPu
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { buildPurchasePartyLedger } from '../services/purchaseLedger';
-import { buildErpLedgerFromLegacyData, compareLegacyVsLedger } from '../services/erpComparison';
 import { generateAccountStatementPDF } from '../services/pdf';
-import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 type CustomerReceivableRow = Customer & { receivable: number };
@@ -106,7 +104,6 @@ function StatementModal({ open, title, subtitle, onClose, children }: { open: bo
 }
 
 export default function Dashboard() {
-  const [showErpKpiPreview, setShowErpKpiPreview] = useState(false);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [parties, setParties] = useState<PurchaseParty[]>([]);
@@ -439,45 +436,6 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
   const totalPayable = useMemo(() => partyPayables.reduce((sum, party) => sum + party.payable, 0), [partyPayables]);
-  const erpDataSnapshot = useMemo(() => loadData(), [transactions, orders, supplierPayments, customers, cashSessions, expenses, deleteCompensations, upfrontOrders]);
-  const safeTransactions = transactions || [];
-  const safeCustomers = customers || [];
-  const safeProducts = erpDataSnapshot.products || [];
-  const safeDeletedTransactions = erpDataSnapshot.deletedTransactions || [];
-  const safeDeleteCompensations = deleteCompensations || [];
-  const safeSupplierPayments = supplierPayments || [];
-  const safePurchaseOrders = orders || [];
-  const safeManualCashbookEntries = erpDataSnapshot.manualCashbookEntries || [];
-  const safeUpfrontOrders = upfrontOrders || [];
-  const safeCashSessions = cashSessions || [];
-  const safeExpenses = expenses || [];
-  const erpCompareInput = useMemo(() => ({
-    transactions: safeTransactions,
-    deletedTransactions: safeDeletedTransactions,
-    deleteCompensations: safeDeleteCompensations,
-    supplierPayments: safeSupplierPayments,
-    purchaseOrders: safePurchaseOrders,
-    manualCashbookEntries: safeManualCashbookEntries,
-    upfrontOrders: safeUpfrontOrders,
-    customers: safeCustomers,
-    products: safeProducts,
-    cashSessions: safeCashSessions,
-    expenses: safeExpenses,
-  }), [safeTransactions, safeDeletedTransactions, safeDeleteCompensations, safeSupplierPayments, safePurchaseOrders, safeManualCashbookEntries, safeUpfrontOrders, safeCustomers, safeProducts, safeCashSessions, safeExpenses]);
-  const erpDashboardComparison = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
-  const erpDashboardBuild = useMemo(() => buildErpLedgerFromLegacyData(erpCompareInput), [erpCompareInput]);
-  const erpDashboardWarnings = useMemo(() => {
-    const warnings: string[] = [];
-    if (erpDashboardBuild.auditFindings.some((f) => f.code === 'MISSING_SALE_SETTLEMENT')) warnings.push('fallback settlement usage');
-    if (erpDashboardBuild.auditFindings.some((f) => f.code === 'LEGACY_HISTORICAL_REFERENCE')) warnings.push('historical_reference usage');
-    if (erpDashboardBuild.auditFindings.some((f) => f.code === 'CUSTOMER_DUE_AND_CREDIT_COEXIST')) warnings.push('customer projection mismatch');
-    if (erpDashboardBuild.auditFindings.some((f) => f.code === 'SUPPLIER_PAYMENT_DUPLICATION_RISK')) warnings.push('supplier payment duplication risk');
-    if (erpDashboardBuild.auditFindings.some((f) => f.code === 'DELETED_SALE_REFUND_MISMATCH')) warnings.push('deleted-sale refund mismatch');
-    if (erpDashboardBuild.auditFindings.some((f) => f.code === 'OPEN_SESSION_STORED_SYSTEM_CASH')) warnings.push('cash session snapshot mismatch');
-    warnings.push('inventory ambiguity');
-    warnings.push('profit/loss uncertainty due missing cost data');
-    return Array.from(new Set(warnings));
-  }, [erpDashboardBuild.auditFindings]);
   const isPayableTraceEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -657,16 +615,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
 
   const selectedCustomer = useMemo(() => customers.find(c => c.id === statementCustomerId) || null, [customers, statementCustomerId]);
   const selectedParty = useMemo(() => parties.find(p => p.id === statementPartyId) || null, [parties, statementPartyId]);
-  useEffect(() => {
-    const recon = reconcileReceivableSurfaces({
-      customers,
-      transactions,
-      upfrontOrders,
-      dashboardReceivable: totalReceivable,
-      sourceLabel: 'Dashboard',
-    });
-    logReceivableReconciliationIfNeeded(recon);
-  }, [customers, transactions, upfrontOrders, totalReceivable]);
+
 
   const customerStatement = useMemo(() => {
     if (!selectedCustomer) return null;
@@ -1056,59 +1005,6 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
             <CardContent><div className="text-xl font-bold text-orange-700">{formatINRPrecise(totalPayable)}</div></CardContent>
           </Card>
         </div>
-        <Card className="border-violet-200 bg-violet-50/50">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between gap-2">
-              <span>New ERP KPI Preview</span>
-              <Button size="sm" variant="outline" onClick={() => setShowErpKpiPreview((prev) => !prev)}>
-                {showErpKpiPreview ? 'Hide' : 'Show'}
-              </Button>
-            </CardTitle>
-            <p className="text-xs text-violet-800">Read-only comparison — does not affect production dashboard KPIs.</p>
-          </CardHeader>
-          {showErpKpiPreview && (
-            <CardContent className="space-y-3">
-              <div className="overflow-x-auto rounded border bg-white">
-                <table className="w-full text-xs">
-                  <thead className="bg-slate-50">
-                    <tr className="text-left border-b">
-                      <th className="p-2">Dimension</th><th className="p-2 text-right">Legacy</th><th className="p-2 text-right">ERP Ledger</th><th className="p-2 text-right">Delta</th><th className="p-2">Status</th><th className="p-2">Reasons/Warnings</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {([
-                      ['cash', erpDashboardComparison.cash],
-                      ['bank', erpDashboardComparison.bank],
-                      ['revenue', erpDashboardComparison.revenue],
-                      ['receivable', erpDashboardComparison.receivable],
-                      ['payable', erpDashboardComparison.payable],
-                      ['inventory', erpDashboardComparison.inventory],
-                      ['profitLoss', erpDashboardComparison.profitLoss],
-                      ['audit', erpDashboardComparison.audit],
-                    ] as const).map(([label, dim]) => (
-                      <tr key={label} className="border-b">
-                        <td className="p-2 font-medium">{label}</td>
-                        <td className="p-2 text-right">{formatINRPrecise(dim.legacyValue)}</td>
-                        <td className="p-2 text-right">{formatINRPrecise(dim.ledgerValue)}</td>
-                        <td className="p-2 text-right">{formatINRPrecise(dim.delta)}</td>
-                        <td className={`p-2 uppercase font-medium ${dim.status === 'match' ? 'text-emerald-700' : dim.status === 'mismatch' ? 'text-red-700' : 'text-amber-700'}`}>{dim.status}</td>
-                        <td className="p-2">{dim.reasons.length ? dim.reasons.join(' • ') : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="rounded border bg-white p-2 text-xs">
-                <div className="font-medium mb-1">Warnings / Ambiguities</div>
-                {erpDashboardWarnings.length ? (
-                  <ul className="list-disc pl-5 space-y-0.5 text-slate-700">
-                    {erpDashboardWarnings.map((warning) => <li key={warning}>{warning}</li>)}
-                  </ul>
-                ) : <div className="text-slate-500">No warnings emitted.</div>}
-              </div>
-            </CardContent>
-          )}
-        </Card>
       </div>
 
       <div className="min-h-0 flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4">
