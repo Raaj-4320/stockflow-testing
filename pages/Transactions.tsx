@@ -619,6 +619,13 @@ export default function Transactions() {
     return editingTx.type === 'return' ? -unsigned : unsigned;
   };
 
+  const resetProductPickerState = () => {
+    setIsProductPickerOpen(false);
+    setProductPickerSearch('');
+    setProductPickerQuantities({});
+    setRecentlyAddedProductId(null);
+  };
+
   const openTransactionEditor = (tx: Transaction) => {
     const settlement = getSaleSettlementBreakdown(tx);
     setEditingTx(tx);
@@ -632,7 +639,7 @@ export default function Transactions() {
     setEditingOnlinePaid(String(settlement.onlinePaid || 0));
     setEditingCreditDue(String(settlement.creditDue || 0));
     setEditingReturnMode(tx.returnHandlingMode || 'refund_cash');
-    setNewSaleProductId('');
+    resetProductPickerState();
     setEditingError(null);
     setEditingSectionWarning(null);
   };
@@ -648,7 +655,7 @@ export default function Transactions() {
     setEditingCashPaid('');
     setEditingOnlinePaid('');
     setEditingCreditDue('');
-    setNewSaleProductId('');
+    resetProductPickerState();
     setEditingSectionWarning(null);
   };
 
