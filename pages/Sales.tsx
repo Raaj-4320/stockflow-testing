@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, UpfrontOrder, TAX_OPTIONS } from '../types';
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
@@ -834,7 +835,7 @@ export default function Sales() {
               setCustomerSearch(finalCustomer.name);
               setCustomerTab('search');
           } catch (error) {
-              setCheckoutError(error instanceof Error ? error.message : 'Failed to create customer. Please try again.');
+              setCheckoutError(getFriendlyErrorMessage(error, 'sales.create_customer'));
               return;
           }
       }
@@ -1031,7 +1032,7 @@ export default function Sales() {
         setPrefilledTransactionDateTimeIso(null);
         if(isReturnMode) setIsReturnMode(false);
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unable to save transaction. Please try again.';
+        const message = getFriendlyErrorMessage(error, 'sales.process_transaction');
         setCheckoutError(message);
         setTransactionSyncStatus({ phase: 'error', message });
       }
@@ -1076,7 +1077,7 @@ export default function Sales() {
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
       });
-      setSendInvoiceMessage(error instanceof Error ? error.message : 'Failed to send WhatsApp invoice');
+      setSendInvoiceMessage(getFriendlyErrorMessage(error, 'sales.send_invoice'));
     } finally {
       setTimeout(() => setWaSendingStage(null), 1000);
     }
@@ -1518,7 +1519,7 @@ export default function Sales() {
       setSelectedReturnTxId(null);
       setReturnSubmitError(null);
     } catch (error) {
-      setReturnSubmitError(error instanceof Error ? error.message : 'Failed to create return transaction.');
+      setReturnSubmitError(getFriendlyErrorMessage(error, 'sales.return_transaction'));
     }
   };
 

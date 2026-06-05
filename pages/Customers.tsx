@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
 import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
@@ -358,7 +359,7 @@ export default function Customers() {
 
       closeCustomerEditor();
     } catch (error) {
-      setCustomerEditError(error instanceof Error ? error.message : 'Customer update failed. Please try again.');
+      setCustomerEditError(getFriendlyErrorMessage(error, 'customers.update'));
     }
   };
 
@@ -490,7 +491,7 @@ export default function Customers() {
       setEditingCustomerTx(null);
       refreshData();
     } catch (error) {
-      setEditTxError(error instanceof Error ? error.message : 'Unable to update transaction.');
+      setEditTxError(getFriendlyErrorMessage(error, 'customers.update_transaction'));
     }
   };
 
@@ -536,7 +537,7 @@ export default function Customers() {
           setIsAddModalOpen(false);
           setNewCustomer({ name: '', phone: '', gstName: '', gstNumber: '' });
       } catch (error) {
-          const message = error instanceof Error ? error.message : 'Failed to create customer. Please try again.';
+          const message = getFriendlyErrorMessage(error, 'customers.create');
           setAddCustomerError(message);
       }
   };

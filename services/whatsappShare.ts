@@ -1,3 +1,4 @@
+import { getFriendlyErrorMessage } from './errorMessages';
 import { Customer, Transaction } from '../types';
 import { auth } from './firebase';
 import { getConfiguredWhatsAppServerUrl, sendCustomerLedgerViaWhatsAppMultipart, sendInvoiceViaWhatsAppMultipart } from './whatsappStatus';
@@ -67,7 +68,7 @@ export const shareCustomerLedgerViaWhatsApp = async (
     return {
       ok: false,
       reason: 'WHATSAPP_SEND_FAILED',
-      message: error instanceof Error ? error.message : 'Unable to send ledger to WhatsApp.',
+      message: getFriendlyErrorMessage(error, 'whatsapp.share_ledger'),
     };
   }
 };
@@ -119,7 +120,7 @@ export const shareTransactionInvoiceViaWhatsApp = async (
     return {
       ok: false,
       reason: 'WHATSAPP_SEND_FAILED',
-      message: error instanceof Error ? error.message : 'Unable to send invoice to WhatsApp.',
+      message: getFriendlyErrorMessage(error, 'whatsapp.share_invoice'),
     };
   }
 };

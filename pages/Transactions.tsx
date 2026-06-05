@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder, SupplierPaymentLedgerEntry } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
@@ -962,7 +963,7 @@ export default function Transactions() {
 
       closeTransactionEditor();
     } catch (error) {
-      setEditingError(error instanceof Error ? error.message : 'Transaction update failed. Please try again.');
+      setEditingError(getFriendlyErrorMessage(error, 'transactions.update'));
       setEditingSectionWarning({ section: 'general', message: 'Save failed during reconcile. Review audit impact and try again.' });
     } finally {
       setIsSavingTransaction(false);
@@ -1195,7 +1196,7 @@ export default function Transactions() {
       await appendWhatsAppLog(uid, { type: 'invoice', customerId: tx.customerId || '', customerName: tx.customerName || '', customerPhone: tx.customerPhone || '', invoiceId: tx.id, invoiceNumber: tx.invoiceNo || tx.id, pdfUrl: '', status: result.ok ? 'sent' : 'failed', error: result.ok ? null : result.reason, sentAt: result.ok ? new Date().toISOString() : null, createdBy: uid, meta: { transactionId: tx.id } });
       setWaSendingStage(result.ok ? 'Sent successfully' : `Failed: ${result.message}`);
     } catch (error) {
-      setWaSendingStage(`Failed: ${error instanceof Error ? error.message : 'Failed to prepare invoice PDF.'}`);
+      setWaSendingStage(`Failed: ${getFriendlyErrorMessage(error, 'transactions.prepare_invoice')}`);
     } finally {
       setTimeout(() => setWaSendingStage(null), 1200);
     }
