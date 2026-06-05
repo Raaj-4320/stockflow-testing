@@ -13,6 +13,9 @@ import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
+import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
+
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   if (!open) return null;
   return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4"><Card className="w-full max-w-md"><CardHeader><CardTitle>{title}</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">{message}</p><div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button></div></CardContent></Card></div>;
@@ -168,7 +171,7 @@ export default function Admin() {
       setSelectedPhotoProduct(refreshed);
       setNotice({ type: 'success', message: 'Product photo updated successfully.' });
     } catch (error: any) {
-      setPhotoUploadError(error?.message || 'Failed to upload photo.');
+      setPhotoUploadError(getFriendlyErrorMessage(error, 'admin.photo_upload'));
     } finally {
       setIsPhotoUploading(false);
     }
@@ -241,6 +244,28 @@ export default function Admin() {
     };
   }, []);
 
+
+  useEffect(() => {
+    console.info('[StockFlowDataAudit]', 'inventory.render', {
+      productsCount: products.length,
+      firstProducts: getProductAuditSample(products),
+    });
+  }, [products]);
+
+
+  useEffect(() => {
+    const malformed = products
+      .map((product) => {
+        const missingFields = ['name', 'category'].filter((field) => !safeText((product as any)[field]));
+        return missingFields.length ? { id: product.id, missingFields } : null;
+      })
+      .filter(Boolean)
+      .slice(0, 10);
+    if (malformed.length) {
+      console.info('[StockFlowDataAudit]', 'product.optional_fields_detected', { products: malformed });
+    }
+  }, [products]);
+
   // Barcode Generation Effect
   useEffect(() => {
     if (barcodePreview && barcodeCanvasRef.current) {
@@ -281,7 +306,7 @@ export default function Admin() {
     return Number.isFinite(n) && n >= 0 ? n : fallback;
   };
 
-  const displayProductText = (value: any, fallback = 'not set yet') => cleanOptionalText(value) || fallback;
+  const displayProductText = (value: any, fallback = 'not set yet') => safeText(value, fallback);
 
   const getSuggestedStock = (totalPurchase: any, totalSold: any) => {
     const purchase = toNonNegativeNumber(totalPurchase);
@@ -316,7 +341,7 @@ export default function Admin() {
       setPurchaseTarget(nextTarget);
       setPendingPurchaseReverse(null);
     } catch (error) {
-      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.' });
+      setNotice({ type: 'error', message: getFriendlyErrorMessage(error, 'admin.reverse_purchase') });
     }
   };
 
@@ -346,7 +371,7 @@ export default function Admin() {
       setPurchaseEditError(null);
       setNotice({ type: 'success', message: 'Purchase entry updated.' });
     } catch (error) {
-      setPurchaseEditError(error instanceof Error ? error.message : 'Unable to edit purchase entry.');
+      setPurchaseEditError(getFriendlyErrorMessage(error, 'admin.edit_purchase_history'));
     }
   };
 
@@ -657,7 +682,7 @@ export default function Admin() {
         if (supplierSectionTouched) {
           const existingParty = (formData.supplierPartyId
             ? getPurchaseParties().find((p) => p.id === formData.supplierPartyId)
-            : undefined) || getPurchaseParties().find((p) => p.name.toLowerCase() === supplierName.toLowerCase());
+            : undefined) || getPurchaseParties().find((p) => safeLower(p.name) === safeLower(supplierName));
           const party = existingParty || await createPurchaseParty({ name: supplierName });
           if (supplierPayable > 0) {
             const now = new Date().toISOString();
@@ -723,7 +748,7 @@ export default function Admin() {
         closeModal();
       }
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
+      const message = getFriendlyErrorMessage(saveError, 'admin.product_save');
       setError(message);
       const userMessage = message.toLowerCase().includes('image upload failed')
         ? 'Image upload failed. Please try again.'
@@ -919,7 +944,7 @@ export default function Admin() {
 
     const existingParty = (selectedPurchasePartyId
       ? getPurchaseParties().find((p) => p.id === selectedPurchasePartyId)
-      : undefined) || getPurchaseParties().find((p) => p.name.toLowerCase() === partyName.toLowerCase());
+      : undefined) || getPurchaseParties().find((p) => safeLower(p.name) === safeLower(partyName));
     const party = existingParty || await createPurchaseParty({ name: partyName });
     const now = new Date().toISOString();
     const orderId = `po-admin-${Date.now()}`;
@@ -1134,7 +1159,7 @@ export default function Admin() {
   const handleCreateSupplierParty = async () => {
     const name = newSupplierPartyName.trim();
     if (!name) return setError('Party name is required.');
-    const existing = getPurchaseParties().find((p) => p.name.trim().toLowerCase() === name.toLowerCase());
+    const existing = getPurchaseParties().find((p) => safeLower(p.name).trim() === safeLower(name));
     const party = existing || await createPurchaseParty({
       name,
       phone: newSupplierPartyPhone.trim() || undefined,
@@ -1459,16 +1484,17 @@ export default function Admin() {
       return ['all', ...[...categories].sort()];
   }, [categories]);
 
+  const getProductSearchTextForAdmin = (p: Product) => [p.name, p.barcode, p.category, (p as any).hsn, (p as any).description].map((value) => safeText(value)).filter(Boolean).join(' ');
+
   const filteredProducts = useMemo(() => {
     let result = products.filter(p => 
-      (p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      p.barcode.toLowerCase().includes(searchTerm.toLowerCase())) &&
-      (categoryFilter === 'all' || p.category === categoryFilter)
+      (safeLower(getProductSearchTextForAdmin(p)).includes(safeLower(searchTerm))) &&
+      (categoryFilter === 'all' || getProductCategory(p) === categoryFilter)
     );
 
     result.sort((a, b) => {
       switch(sortOption) {
-        case 'name-asc': return a.name.localeCompare(b.name);
+        case 'name-asc': return getProductName(a).localeCompare(getProductName(b));
         case 'price-asc': return a.buyPrice - b.buyPrice; // Using Buy Price as requested
         case 'price-desc': return b.buyPrice - a.buyPrice;
         case 'stock-asc': return a.stock - b.stock;
@@ -1511,11 +1537,11 @@ export default function Admin() {
   }, [products]);
 
   const lowStockProducts = useMemo(() => {
-      let result = products.filter(p => p.stock <= 10 && (lowStockCategoryFilter === 'all' || p.category === lowStockCategoryFilter));
+      let result = products.filter(p => Number(p.stock || 0) <= 10 && (lowStockCategoryFilter === 'all' || getProductCategory(p) === lowStockCategoryFilter));
       
       result.sort((a, b) => {
           switch(lowStockSortOption) {
-              case 'name-asc': return a.name.localeCompare(b.name);
+              case 'name-asc': return getProductName(a).localeCompare(getProductName(b));
               case 'price-asc': return a.sellPrice - b.sellPrice;
               case 'price-desc': return b.sellPrice - a.sellPrice;
               case 'stock-asc': return a.stock - b.stock;
@@ -1961,7 +1987,7 @@ export default function Admin() {
                   const unit = Math.max(0, Number(p.lostDamageUnitCost || p.buyPrice || 0));
                   return (
                     <tr key={p.id} className="border-t">
-                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{p.name}</div><div className="text-xs text-muted-foreground">{p.barcode}</div></div></div></td><td className="p-3">{p.barcode}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
+                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={getProductName(p)} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{getProductName(p)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(p)}</div></div></div></td><td className="p-3">{getProductBarcode(p)}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
                       <td className="p-3"><Button size="sm" variant="outline" onClick={() => openLostDamageModal(p)}>Edit</Button></td>
                     </tr>
                   );
@@ -2730,8 +2756,8 @@ export default function Admin() {
                                           )}
                                       </div>
                                       <div className="p-3 min-w-0">
-                                          <h4 className="font-bold text-xs truncate" title={p.name}>{p.name}</h4>
-                                          <p className="text-[9px] text-muted-foreground font-mono truncate">{p.barcode}</p>
+                                          <h4 className="font-bold text-xs truncate" title={getProductName(p)}>{getProductName(p)}</h4>
+                                          <p className="text-[9px] text-muted-foreground font-mono truncate">{getProductBarcode(p)}</p>
                                           <div className="flex items-center justify-between mt-2">
                                               <span className="text-xs font-bold">₹{p.sellPrice}</span>
                                               <Badge variant={p.stock === 0 ? "destructive" : "secondary"} className="h-5 px-1.5 text-[10px]">

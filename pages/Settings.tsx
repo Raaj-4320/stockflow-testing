@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { StoreProfile, TAX_OPTIONS } from '../types';
 import { loadData, updateStoreProfile, uploadImageFileToCloudinary } from '../services/storage';
 import { logout, getCurrentUser } from '../services/auth';
@@ -122,7 +123,7 @@ export default function Settings() {
       setProfile(prev => ({ ...prev, signatureImage: url }));
       setUploadMessage({ type: 'success', text: 'Signature uploaded successfully.' });
     } catch (error) {
-      setUploadMessage({ type: 'error', text: error instanceof Error ? error.message : 'Signature upload failed.' });
+      setUploadMessage({ type: 'error', text: getFriendlyErrorMessage(error, 'settings.signature_upload') });
     } finally {
       setUploadingField(null);
     }
@@ -139,7 +140,7 @@ export default function Settings() {
       setProfile(prev => ({ ...prev, logoImage: url }));
       setUploadMessage({ type: 'success', text: 'Logo uploaded successfully.' });
     } catch (error) {
-      setUploadMessage({ type: 'error', text: error instanceof Error ? error.message : 'Logo upload failed.' });
+      setUploadMessage({ type: 'error', text: getFriendlyErrorMessage(error, 'settings.logo_upload') });
     } finally {
       setUploadingField(null);
     }
@@ -249,7 +250,7 @@ export default function Settings() {
       setWaMessage('Server health check successful.');
     } catch (error) {
       setWaHealthSummary('Unavailable');
-      setWaMessage(error instanceof Error ? error.message : 'Health check failed');
+      setWaMessage(getFriendlyErrorMessage(error, 'settings.whatsapp_health'));
     }
   };
 
@@ -261,7 +262,7 @@ export default function Settings() {
       if (qrRes?.qr) { setWaQr(qrRes.qr); setWaModalOpen(true); }
       else setWaMessage('QR is not available yet. Start session first.');
     } catch (error) {
-      setWaMessage(error instanceof Error ? error.message : 'Unable to fetch QR');
+      setWaMessage(getFriendlyErrorMessage(error, 'settings.whatsapp_qr'));
     }
   };
 
@@ -313,7 +314,7 @@ export default function Settings() {
       }));
       setUploadMessage({ type: 'success', text: 'Catalog first page uploaded successfully.' });
     } catch (error) {
-      setUploadMessage({ type: 'error', text: error instanceof Error ? error.message : 'Catalog first page upload failed.' });
+      setUploadMessage({ type: 'error', text: getFriendlyErrorMessage(error, 'settings.catalog_upload') });
     } finally {
       setUploadingField(null);
     }

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
 import { applyPartyCreditToPurchaseOrder, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
@@ -224,12 +225,12 @@ export default function PurchasePanel() {
   }, []);
 
   const filteredProducts = useMemo(() => {
-    const q = productSearch.trim().toLowerCase();
+    const q = safeLower(productSearch.trim());
     if (!q) return products;
-    return products.filter(p => [p.name, p.category, p.barcode].join(' ').toLowerCase().includes(q));
+    return products.filter(p => safeLower(getProductSearchText(p)).includes(q));
   }, [products, productSearch]);
   const categorySuggestions = useMemo(
-    () => Array.from(new Set(products.map(p => (p.category || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    () => Array.from(new Set(products.map(p => getProductCategory(p).trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [products]
   );
 
@@ -942,7 +943,7 @@ export default function PurchasePanel() {
               {parties.map(p => (
                 <div key={p.id} className="rounded-xl border p-3">
                   <div className="flex items-start justify-between gap-2">
-                    <div className="font-medium">{p.name}</div>
+                    <div className="font-medium">{getProductName(p)}</div>
                     <div className="flex gap-1">
                       <Button type="button" variant="outline" size="sm" onClick={() => openPartyPaymentModal(p)} className="h-8 px-2 text-xs">Give Payment</Button>
                       <Button type="button" variant="outline" size="sm" onClick={() => startEditingParty(p, true)} className="h-8 px-2 text-xs"><Pencil className="mr-1 h-3.5 w-3.5" />Edit</Button>
@@ -1177,10 +1178,10 @@ export default function PurchasePanel() {
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {filteredProducts.map(product => (
                 <button key={product.id} onClick={() => selectProduct(product)} className="overflow-hidden rounded-3xl border border-slate-200 text-left transition hover:-translate-y-0.5 hover:shadow-md">
-                  <img src={product.image || ''} alt={product.name} className="h-44 w-full object-cover" />
+                  <img src={product.image || ''} alt={getProductName(product)} className="h-44 w-full object-cover" />
                   <div className="p-4">
                     <div className="flex items-start justify-between gap-3">
-                      <div><h3 className="text-base font-semibold text-slate-900">{product.name}</h3><p className="text-sm text-slate-500">{product.category}</p></div>
+                      <div><h3 className="text-base font-semibold text-slate-900">{getProductName(product)}</h3><p className="text-sm text-slate-500">{getProductCategory(product)}</p></div>
                       <ChevronRight className="mt-1 h-4 w-4 text-slate-400" />
                     </div>
                     <div className="mt-4 grid grid-cols-3 gap-2 text-xs">

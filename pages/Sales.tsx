@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
+import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower, safeText } from '../utils/productText';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, UpfrontOrder, TAX_OPTIONS } from '../types';
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
@@ -104,13 +106,13 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
         >
             <button
                 type="button"
-                aria-label={`Add ${product.name} to cart`}
+                aria-label={`Add ${getProductName(product)} to cart`}
                 className="relative aspect-square w-full overflow-hidden rounded-t-xl bg-muted"
                 onClick={() => !isDisabled && onAdd(1)}
                 disabled={isDisabled}
             >
                 {productImage ? (
-                    <img src={productImage} alt={product.name} className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-110" loading="lazy" />
+                    <img src={productImage} alt={getProductName(product)} className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-110" loading="lazy" />
                 ) : (
                     <div className="flex h-full w-full items-center justify-center bg-secondary/50">
                         <Package className="h-8 w-8 text-muted-foreground/30" />
@@ -136,7 +138,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 
             <div className="flex flex-1 flex-col p-3">
                 <div className="mb-2">
-                    <h3 className="font-semibold text-xs sm:text-sm leading-tight line-clamp-2" title={product.name}>{product.name}</h3>
+                    <h3 className="font-semibold text-xs sm:text-sm leading-tight line-clamp-2" title={getProductName(product)}>{getProductName(product)}</h3>
                 </div>
                 <div className="mt-auto flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <Button variant="outline" size="icon" className="h-7 w-7 rounded-lg shrink-0" onClick={handleMinus} disabled={isDisabled}><Minus className="w-3 h-3" /></Button>
@@ -500,8 +502,8 @@ export default function Sales() {
   const productLookupByCode = useMemo(() => {
     const map = new Map<string, Product>();
     products.forEach((product) => {
-      map.set(product.id.toLowerCase(), product);
-      if (product.barcode) map.set(product.barcode.toLowerCase(), product);
+      map.set(safeLower(product.id), product);
+      if (safeText(product.barcode)) map.set(safeLower(product.barcode), product);
     });
     return map;
   }, [products]);
@@ -834,7 +836,7 @@ export default function Sales() {
               setCustomerSearch(finalCustomer.name);
               setCustomerTab('search');
           } catch (error) {
-              setCheckoutError(error instanceof Error ? error.message : 'Failed to create customer. Please try again.');
+              setCheckoutError(getFriendlyErrorMessage(error, 'sales.create_customer'));
               return;
           }
       }
@@ -1031,7 +1033,7 @@ export default function Sales() {
         setPrefilledTransactionDateTimeIso(null);
         if(isReturnMode) setIsReturnMode(false);
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unable to save transaction. Please try again.';
+        const message = getFriendlyErrorMessage(error, 'sales.process_transaction');
         setCheckoutError(message);
         setTransactionSyncStatus({ phase: 'error', message });
       }
@@ -1076,7 +1078,7 @@ export default function Sales() {
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
       });
-      setSendInvoiceMessage(error instanceof Error ? error.message : 'Failed to send WhatsApp invoice');
+      setSendInvoiceMessage(getFriendlyErrorMessage(error, 'sales.send_invoice'));
     } finally {
       setTimeout(() => setWaSendingStage(null), 1000);
     }
@@ -1242,19 +1244,18 @@ export default function Sales() {
     }
   }, [cart.length, cashToCollectValue, cashReceivedInput]);
 
-  const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
+  const categories = ['All', ...Array.from(new Set(products.map((p) => getProductCategory(p))))];
   const filteredProducts = products.filter(p => {
-    const searchMatch = p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.barcode.toLowerCase().includes(productSearch.toLowerCase()) || (p.variants || []).some(v => v.toLowerCase().includes(productSearch.toLowerCase())) || (p.colors || []).some(c => c.toLowerCase().includes(productSearch.toLowerCase()));
-    const categoryMatch = selectedCategory === 'All' || (p.category || 'Uncategorized') === selectedCategory;
+    const query = safeLower(productSearch);
+    const searchMatch = safeLower(getProductSearchText(p)).includes(query);
+    const categoryMatch = selectedCategory === 'All' || getProductCategory(p) === selectedCategory;
     return searchMatch && categoryMatch;
   }).sort((a, b) => {
-    const categoryA = (a.category || 'Uncategorized').trim().toLowerCase();
-    const categoryB = (b.category || 'Uncategorized').trim().toLowerCase();
+    const categoryA = safeLower(getProductCategory(a).trim());
+    const categoryB = safeLower(getProductCategory(b).trim());
     const categoryCompare = categoryA.localeCompare(categoryB, undefined, { sensitivity: 'base' });
     if (categoryCompare !== 0) return categoryCompare;
-    const nameA = (a.name || '').trim().toLowerCase();
-    const nameB = (b.name || '').trim().toLowerCase();
-    return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+    return getProductName(a).localeCompare(getProductName(b), undefined, { sensitivity: 'base' });
   });
 
   useEffect(() => {
@@ -1518,7 +1519,7 @@ export default function Sales() {
       setSelectedReturnTxId(null);
       setReturnSubmitError(null);
     } catch (error) {
-      setReturnSubmitError(error instanceof Error ? error.message : 'Failed to create return transaction.');
+      setReturnSubmitError(getFriendlyErrorMessage(error, 'sales.return_transaction'));
     }
   };
 
@@ -1670,7 +1671,7 @@ export default function Sales() {
           <Card className="w-full max-w-2xl" onClick={e => e.stopPropagation()}>
             <CardHeader className="border-b">
               <CardTitle className="text-center">Show Variants</CardTitle>
-              <p className="text-sm text-muted-foreground text-center">{variantPicker.product.name}</p>
+              <p className="text-sm text-muted-foreground text-center">{getProductName(variantPicker.product)}</p>
             </CardHeader>
             <CardContent className="space-y-3 pt-5">
               {variantPicker.rows.map((row, idx) => {

@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
+import { getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { addCategory, convertConfirmedOrderToPurchase, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, getFreightPurchases, loadData, receiveFreightPurchaseIntoInventory, updateFreightInquiry, uploadImageFileToCloudinary } from '../services/storage';
 import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
@@ -255,7 +257,7 @@ export default function FreightBooking() {
       setReceiveTargetOrder(null);
       refresh();
     } catch (error: any) {
-      setReceiveError(error?.message || 'Unable to receive inventory.');
+      setReceiveError(getFriendlyErrorMessage(error, 'freight.receive_inventory'));
     } finally {
       setMaterializingOrderId(null);
     }
@@ -300,9 +302,9 @@ export default function FreightBooking() {
   const visibleConfirmedOrders = useMemo(() => confirmedOrders.slice(0, visibleConfirmedCount), [confirmedOrders, visibleConfirmedCount]);
 
   const filteredProducts = useMemo(() => {
-    const q = productSearch.trim().toLowerCase();
+    const q = safeLower(productSearch.trim());
     if (!q) return products;
-    return products.filter(p => [p.name, p.category, p.barcode].join(' ').toLowerCase().includes(q));
+    return products.filter(p => safeLower(getProductSearchText(p)).includes(q));
   }, [products, productSearch]);
 
   const costingEntry = pricingEntries['new-product-default'];

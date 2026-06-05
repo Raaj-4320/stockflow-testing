@@ -1,3 +1,4 @@
+import { getProductBarcode, getProductCategory, getProductName, safeLower } from '../utils/productText';
 import { useEffect, useMemo, useState } from 'react';
 import { BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
@@ -185,7 +186,7 @@ export default function ProductAnalytics() {
   const productsById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
   const customersById = useMemo(() => new Map(customers.map((c) => [c.id, c])), [customers]);
 
-  const categories = useMemo(() => Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort(), [products]);
+  const categories = useMemo(() => Array.from(new Set(products.map((p) => getProductCategory(p)).filter(Boolean))).sort(), [products]);
 
   const parsedLines = useMemo<ParsedLine[]>(() => {
     const rows: ParsedLine[] = [];
@@ -251,9 +252,9 @@ export default function ProductAnalytics() {
 
         rows.push({
           productId: item.id,
-          productName: item.name || product?.name || 'Unknown Product',
-          barcode: product?.barcode || '',
-          category: product?.category || 'Uncategorized',
+          productName: item.name || getProductName(product),
+          barcode: getProductBarcode(product, ''),
+          category: getProductCategory(product),
           variant: item.selectedVariant || 'Standard',
           color: item.selectedColor || 'Default',
           txId: tx.id,
@@ -285,7 +286,7 @@ export default function ProductAnalytics() {
   const distinctPayments = useMemo(() => Array.from(new Set(parsedLines.map((line) => line.paymentMethod))).sort(), [parsedLines]);
 
   const filteredLines = useMemo(() => {
-    const query = productSearch.trim().toLowerCase();
+    const query = safeLower(productSearch.trim());
     const minQtyN = minQty === '' ? null : safeNum(minQty);
     const maxQtyN = maxQty === '' ? null : safeNum(maxQty);
     const minProfitN = minProfit === '' ? null : safeNum(minProfit);
@@ -294,7 +295,7 @@ export default function ProductAnalytics() {
     return parsedLines.filter((line) => {
       if (!inDateRange(line.txDate, dateRange.from, dateRange.to)) return false;
       if (query) {
-        const product = `${line.productName} ${line.productId} ${line.barcode}`.toLowerCase();
+        const product = safeLower(`${line.productName || ''} ${line.productId || ''} ${line.barcode || ''}`);
         if (!product.includes(query)) return false;
       }
       if (categoryFilter !== 'all' && line.category !== categoryFilter) return false;

@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder, SupplierPaymentLedgerEntry } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
@@ -712,17 +714,10 @@ export default function Transactions() {
   };
 
   const filteredProductsForPicker = useMemo(() => {
-    const term = productPickerSearch.trim().toLowerCase();
+    const term = safeLower(productPickerSearch.trim());
     if (!term) return products;
     return products.filter((product) => {
-      const haystack = [
-        product.name,
-        product.barcode,
-        product.category,
-        (product as any).sku,
-        product.variants?.join(' '),
-        product.colors?.join(' '),
-      ].filter(Boolean).join(' ').toLowerCase();
+      const haystack = safeLower(getProductSearchText(product));
       return haystack.includes(term);
     });
   }, [productPickerSearch, products]);
@@ -962,7 +957,7 @@ export default function Transactions() {
 
       closeTransactionEditor();
     } catch (error) {
-      setEditingError(error instanceof Error ? error.message : 'Transaction update failed. Please try again.');
+      setEditingError(getFriendlyErrorMessage(error, 'transactions.update'));
       setEditingSectionWarning({ section: 'general', message: 'Save failed during reconcile. Review audit impact and try again.' });
     } finally {
       setIsSavingTransaction(false);
@@ -1195,7 +1190,7 @@ export default function Transactions() {
       await appendWhatsAppLog(uid, { type: 'invoice', customerId: tx.customerId || '', customerName: tx.customerName || '', customerPhone: tx.customerPhone || '', invoiceId: tx.id, invoiceNumber: tx.invoiceNo || tx.id, pdfUrl: '', status: result.ok ? 'sent' : 'failed', error: result.ok ? null : result.reason, sentAt: result.ok ? new Date().toISOString() : null, createdBy: uid, meta: { transactionId: tx.id } });
       setWaSendingStage(result.ok ? 'Sent successfully' : `Failed: ${result.message}`);
     } catch (error) {
-      setWaSendingStage(`Failed: ${error instanceof Error ? error.message : 'Failed to prepare invoice PDF.'}`);
+      setWaSendingStage(`Failed: ${getFriendlyErrorMessage(error, 'transactions.prepare_invoice')}`);
     } finally {
       setTimeout(() => setWaSendingStage(null), 1200);
     }
@@ -2466,12 +2461,12 @@ export default function Transactions() {
                       <div key={product.id} className="rounded-md border p-2.5 space-y-2">
                         <div className="flex gap-2">
                           <div className="h-14 w-14 rounded border bg-muted overflow-hidden shrink-0">
-                            {imageSrc ? <img src={imageSrc} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-full h-full p-2 opacity-30" />}
+                            {imageSrc ? <img src={imageSrc} alt={getProductName(product)} className="h-full w-full object-cover" /> : <Package className="w-full h-full p-2 opacity-30" />}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="font-medium text-sm truncate">{product.name}</div>
-                            <div className="text-xs text-muted-foreground truncate">{(product as any).sku || product.barcode || 'No SKU/Barcode'}</div>
-                            <div className="text-xs text-muted-foreground truncate">{product.category || 'Uncategorized'}</div>
+                            <div className="font-medium text-sm truncate">{getProductName(product)}</div>
+                            <div className="text-xs text-muted-foreground truncate">{(product as any).sku || getProductBarcode(product, 'No SKU/Barcode')}</div>
+                            <div className="text-xs text-muted-foreground truncate">{getProductCategory(product)}</div>
                           </div>
                         </div>
                         <div className="flex items-center justify-between text-sm">
