@@ -32,6 +32,7 @@ import { financeLog } from './financeLogger';
 import { roundMoneyWhole } from './numberFormat';
 import { emitFinanceSnapshot } from '../utils/financeDebugLogger';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { getFriendlyErrorMessage, logStockFlowError } from './errorMessages';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -116,6 +117,9 @@ const emitLocalStorageUpdate = () => {
 
 
 let syncInitInFlight = false;
+let syncInitPromise: Promise<void> | null = null;
+let activeSyncUid: string | null = null;
+let syncGeneration = 0;
 
 const emitBehaviorStateChange = (detail: { type: string; from?: string; to?: string; entityId?: string; metadata?: Record<string, unknown> }) => {
   window.dispatchEvent(new CustomEvent('app-state-change', { detail }));
@@ -184,6 +188,47 @@ const writeAuditEvent = async (operation: AuditOperation, payload: Record<string
 };
 
 
+
+const STOCKFLOW_DATA_AUDIT_PREFIX = '[StockFlowDataAudit]';
+let legacyRootProductsCache: Product[] = [];
+let subcollectionProductsCache: Product[] = [];
+
+const getProductAuditSample = (products: Product[] = []) => products.slice(0, 3).map((product) => ({
+  id: product.id,
+  name: product.name,
+}));
+
+const logStockFlowDataAudit = (event: string, detail: Record<string, unknown>) => {
+  try {
+    console.info(STOCKFLOW_DATA_AUDIT_PREFIX, event, detail);
+  } catch (_error) {
+  }
+};
+
+const mergeProductsForTransition = (rootProducts: Product[] = [], subcollectionProducts: Product[] = []) => {
+  const merged = new Map<string, Product>();
+  rootProducts.filter(p => !((p as any).isDeleted)).forEach((product) => merged.set(product.id, product));
+  subcollectionProducts.filter(p => !((p as any).isDeleted)).forEach((product) => merged.set(product.id, product));
+  return Array.from(merged.values());
+};
+
+const applyMergedProductsToMemory = (uid: string, source: string) => {
+  const mergedProducts = mergeProductsForTransition(legacyRootProductsCache, subcollectionProductsCache);
+  memoryState = { ...memoryState, products: mergedProducts };
+  logStockFlowDataAudit('products.merge', {
+    uid,
+    source,
+    rootProductsCount: legacyRootProductsCache.length,
+    subcollectionProductsCount: subcollectionProductsCache.length,
+    mergedProductsCount: mergedProducts.length,
+    memoryProductsCount: memoryState.products.length,
+    firstProducts: getProductAuditSample(mergedProducts),
+  });
+  logLoadedState(memoryState);
+  emitLocalStorageUpdate();
+  return mergedProducts;
+};
+
 const shouldEmitFinanceSnapshot = (reason: string) => {
   const r = reason.toLowerCase();
   return ['transaction','payment','purchase','expense','cash','shift','product','freight','import','finance','customer','order'].some(k => r.includes(k));
@@ -193,6 +238,39 @@ const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
 const getDeletedTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'deletedTransactions');
 const getOperationCommitsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'operationCommits');
+const getPurchaseOrdersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseOrders');
+const getPurchasePartiesCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseParties');
+const getSupplierPaymentsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'supplierPayments');
+const getPartyCreditLedgerCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'partyCreditLedger');
+
+const ROOT_STORE_BLOCKED_ARRAY_FIELDS = [
+  'products',
+  'transactions',
+  'customers',
+  'purchaseOrders',
+  'expenses',
+  'supplierPayments',
+  'auditEvents',
+  'operationCommits',
+  'customerProductStats',
+  'purchaseParties',
+  'partyCreditLedger',
+] as const;
+
+const assertNoLargeArraysInRootStorePayload = (payload: Record<string, unknown>, reason: string) => {
+  const blockedFields = ROOT_STORE_BLOCKED_ARRAY_FIELDS
+    .map((field) => ({ field, value: payload[field] }))
+    .filter(({ value }) => Array.isArray(value));
+
+  if (!blockedFields.length) return;
+
+  const details = blockedFields.map(({ field, value }) => ({
+    field,
+    length: Array.isArray(value) ? value.length : 0,
+  }));
+  console.error('[storage] Blocked root stores/{uid} write containing large array fields.', { functionName: reason, fields: details });
+  throw new Error(`Blocked root store write from ${reason} containing large array fields: ${details.map((item) => item.field).join(', ')}`);
+};
 
 const ensureStoreInitializedForCurrentUser = async (
   user: NonNullable<typeof auth>['currentUser'],
@@ -209,11 +287,13 @@ const ensureStoreInitializedForCurrentUser = async (
       return { created: false };
     }
 
-    firestoreTx.set(storeRef, {
+    const initializationPayload = {
       initializedAt: nowIso,
       initializedBy: user.uid,
       provisioningSource: `client_${context}`,
-    }, { merge: true });
+    };
+    assertNoLargeArraysInRootStorePayload(initializationPayload, 'ensureStoreInitializedForCurrentUser');
+    firestoreTx.set(storeRef, initializationPayload, { merge: true });
 
     return { created: true };
   });
@@ -299,6 +379,31 @@ const deleteCustomerInSubcollection = async (customerId: string, reason: string)
 const upsertTransactionInSubcollection = async (transaction: Transaction, reason: string) => {
   const user = await assertCloudWriteReady(reason);
   await setDoc(doc(db!, 'stores', user.uid, 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
+};
+
+const upsertPurchaseOrderInSubcollection = async (order: PurchaseOrder, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'purchaseOrders', order.id), sanitizeData(order), { merge: true });
+};
+
+const upsertPurchasePartyInSubcollection = async (party: PurchaseParty, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'purchaseParties', party.id), sanitizeData(party), { merge: true });
+};
+
+const deletePurchasePartyInSubcollection = async (partyId: string, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await deleteDoc(doc(db!, 'stores', user.uid, 'purchaseParties', partyId));
+};
+
+const upsertSupplierPaymentInSubcollection = async (payment: SupplierPaymentLedgerEntry, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'supplierPayments', payment.id), sanitizeData(payment), { merge: true });
+};
+
+const upsertPartyCreditLedgerEntryInSubcollection = async (entry: PartyCreditLedgerEntry, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'partyCreditLedger', entry.id), sanitizeData(entry), { merge: true });
 };
 
 const getDeleteReversalTransactionType = (type: Transaction['type']): Transaction['type'] | null => {
@@ -2180,44 +2285,86 @@ let unsubscribeProductsSnapshot: any = null;
 let unsubscribeCustomersSnapshot: any = null;
 let unsubscribeTransactionsSnapshot: any = null;
 let unsubscribeDeletedTransactionsSnapshot: any = null;
+let unsubscribePurchaseOrdersSnapshot: any = null;
+let unsubscribePurchasePartiesSnapshot: any = null;
+let unsubscribeSupplierPaymentsSnapshot: any = null;
+let unsubscribePartyCreditLedgerSnapshot: any = null;
+
+
+const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
+  if (unsubscribeSnapshot) {
+    unsubscribeSnapshot();
+    unsubscribeSnapshot = null;
+  }
+  if (unsubscribeProductsSnapshot) {
+    unsubscribeProductsSnapshot();
+    unsubscribeProductsSnapshot = null;
+    logStockFlowDataAudit('products.listener.unsubscribed', { uid, reason, listenerUnsubscribed: true });
+  }
+  if (unsubscribeCustomersSnapshot) {
+    unsubscribeCustomersSnapshot();
+    unsubscribeCustomersSnapshot = null;
+  }
+  if (unsubscribeTransactionsSnapshot) {
+    unsubscribeTransactionsSnapshot();
+    unsubscribeTransactionsSnapshot = null;
+  }
+  if (unsubscribeDeletedTransactionsSnapshot) {
+    unsubscribeDeletedTransactionsSnapshot();
+    unsubscribeDeletedTransactionsSnapshot = null;
+  }
+  if (unsubscribePurchaseOrdersSnapshot) {
+    unsubscribePurchaseOrdersSnapshot();
+    unsubscribePurchaseOrdersSnapshot = null;
+  }
+  if (unsubscribePurchasePartiesSnapshot) {
+    unsubscribePurchasePartiesSnapshot();
+    unsubscribePurchasePartiesSnapshot = null;
+  }
+  if (unsubscribeSupplierPaymentsSnapshot) {
+    unsubscribeSupplierPaymentsSnapshot();
+    unsubscribeSupplierPaymentsSnapshot = null;
+  }
+  if (unsubscribePartyCreditLedgerSnapshot) {
+    unsubscribePartyCreditLedgerSnapshot();
+    unsubscribePartyCreditLedgerSnapshot = null;
+  }
+};
+
+const resetCloudStateForUser = (uid: string | null, reason: string) => {
+  memoryState = { ...initialData };
+  hasInitialSynced = false;
+  isCloudSynced = false;
+  hasCompletedInitialCloudLoad = false;
+  storeDocumentExists = false;
+  isCustomerProductStatsBackfillComplete = false;
+  legacyRootProductsCache = [];
+  subcollectionProductsCache = [];
+  activeSyncUid = uid;
+  syncGeneration += 1;
+  syncInitInFlight = false;
+  syncInitPromise = null;
+  logStockFlowDataAudit('storage.state.reset', { uid, reason });
+};
 
 // Listen for auth state changes to trigger sync
 if (auth) {
     onAuthStateChanged(auth, (user) => {
         if (user) {
+            logStockFlowDataAudit('auth.user.resolved', { uid: user.uid, emailVerified: user.emailVerified });
+            if (activeSyncUid !== user.uid) {
+              unsubscribeCloudListeners(activeSyncUid, 'auth_user_changed');
+              resetCloudStateForUser(user.uid, 'auth_user_changed');
+            }
             hasInitialSynced = true;
             emitCloudSyncStatus(CLOUD_SYNC_STATUSES.LOADING);
-            syncFromCloud();
+            void syncFromCloud();
         } else {
-            // Clear state on logout
-            memoryState = { ...initialData };
-            hasInitialSynced = false;
-            isCloudSynced = false;
-            hasCompletedInitialCloudLoad = false;
-            storeDocumentExists = false;
-            isCustomerProductStatsBackfillComplete = false;
+            unsubscribeCloudListeners(activeSyncUid, 'logout');
+            resetCloudStateForUser(null, 'logout');
+            logStockFlowDataAudit('auth.logout.reset', { uid: null, listenerUnsubscribed: true });
             emitCloudSyncStatus(CLOUD_SYNC_STATUSES.IDLE);
             hasLoggedInitKpiSnapshot = false;
-            if (unsubscribeSnapshot) {
-                unsubscribeSnapshot();
-                unsubscribeSnapshot = null;
-            }
-            if (unsubscribeProductsSnapshot) {
-                unsubscribeProductsSnapshot();
-                unsubscribeProductsSnapshot = null;
-            }
-            if (unsubscribeCustomersSnapshot) {
-                unsubscribeCustomersSnapshot();
-                unsubscribeCustomersSnapshot = null;
-            }
-            if (unsubscribeTransactionsSnapshot) {
-                unsubscribeTransactionsSnapshot();
-                unsubscribeTransactionsSnapshot = null;
-            }
-            if (unsubscribeDeletedTransactionsSnapshot) {
-                unsubscribeDeletedTransactionsSnapshot();
-                unsubscribeDeletedTransactionsSnapshot = null;
-            }
             emitLocalStorageUpdate();
         }
     });
@@ -2235,23 +2382,47 @@ if (typeof window !== 'undefined') {
   });
 }
 
-const syncFromCloud = async () => {
-    if (syncInitInFlight) {
+const syncFromCloud = async (): Promise<void> => {
+    const requestedUid = auth?.currentUser?.uid || null;
+    if (syncInitInFlight && syncInitPromise) {
+      logStockFlowDataAudit('storage.sync.skip_in_flight', { uid: requestedUid, activeSyncUid, waitingForExistingSync: true });
+      await syncInitPromise;
       return;
     }
+
     syncInitInFlight = true;
-    if (!db || !auth) return;
-    const user = auth.currentUser;
-    if (!user) return;
-    if (!user.emailVerified) {
-      throw new Error('Email verification required before cloud access.');
-    }
-    if (!navigator.onLine) {
-      emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
-      return;
-    }
-    
-    try {
+    syncInitPromise = (async () => {
+      const syncTimeout = window.setTimeout(() => {
+        logStockFlowDataAudit('storage.sync.timeout_reset', { uid: auth?.currentUser?.uid || null, activeSyncUid });
+        syncInitInFlight = false;
+        syncInitPromise = null;
+      }, 30000);
+
+      try {
+        if (!db || !auth) {
+          logStockFlowDataAudit('storage.sync.not_configured', { hasDb: Boolean(db), hasAuth: Boolean(auth) });
+          return;
+        }
+        const user = auth.currentUser;
+        if (!user) {
+          logStockFlowDataAudit('storage.sync.no_user', { uid: null });
+          return;
+        }
+        if (activeSyncUid !== user.uid) {
+          unsubscribeCloudListeners(activeSyncUid, 'sync_uid_changed');
+          resetCloudStateForUser(user.uid, 'sync_uid_changed');
+          syncInitInFlight = true;
+        }
+        const syncRunGeneration = syncGeneration;
+        logStockFlowDataAudit('storage.sync.start', { uid: user.uid, storeDocumentExists, hasCompletedInitialCloudLoad, syncGeneration: syncRunGeneration });
+        if (!user.emailVerified) {
+          throw new Error('Email verification required before cloud access.');
+        }
+        if (!navigator.onLine) {
+          emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
+          return;
+        }
+
         const ensureResult = await ensureStoreInitializedForCurrentUser(user, 'first_verified_login');
         if (ensureResult.created) {
           void writeAuditEvent('SECURITY_EVENT', {
@@ -2261,33 +2432,32 @@ const syncFromCloud = async () => {
           });
         }
 
-        // Use UID for strict isolation
+        if (syncRunGeneration !== syncGeneration || auth?.currentUser?.uid !== user.uid) {
+          logStockFlowDataAudit('storage.sync.aborted_stale_user', { uid: user.uid, currentUid: auth?.currentUser?.uid || null, syncGeneration: syncRunGeneration, activeGeneration: syncGeneration });
+          return;
+        }
+
         const docRef = doc(db, "stores", user.uid);
-        
-        if (unsubscribeSnapshot) {
-            unsubscribeSnapshot();
-        }
-        if (unsubscribeProductsSnapshot) {
-            unsubscribeProductsSnapshot();
-        }
-        if (unsubscribeCustomersSnapshot) {
-            unsubscribeCustomersSnapshot();
-        }
-        if (unsubscribeTransactionsSnapshot) {
-            unsubscribeTransactionsSnapshot();
-        }
-        if (unsubscribeDeletedTransactionsSnapshot) {
-            unsubscribeDeletedTransactionsSnapshot();
-        }
+        unsubscribeCloudListeners(user.uid, 'sync_reinitialize');
+
         unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(user.uid), (productsSnap) => {
-            const products = productsSnap.docs
+            subcollectionProductsCache = productsSnap.docs
               .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
               .filter(p => !((p as any).isDeleted));
-
-            memoryState = { ...memoryState, products };
-            logLoadedState(memoryState);
-            emitLocalStorageUpdate();
-        }, (_error) => {
+            logStockFlowDataAudit('products.subcollection.snapshot', {
+              uid: user.uid,
+              rootProductsCount: legacyRootProductsCache.length,
+              subcollectionProductsCount: subcollectionProductsCache.length,
+              memoryProductsCount: memoryState.products.length,
+              firstProducts: getProductAuditSample(subcollectionProductsCache),
+            });
+            applyMergedProductsToMemory(user.uid, 'products_subcollection_listener');
+        }, (error) => {
+            logStockFlowError('products.subcollection.listener_error', error, { uid: user.uid });
+            logStockFlowDataAudit('products.subcollection.listener_error', {
+              uid: user.uid,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            });
         });
         unsubscribeCustomersSnapshot = onSnapshot(getCustomersCollectionRef(user.uid), (customersSnap) => {
             const customers = customersSnap.docs
@@ -2298,6 +2468,7 @@ const syncFromCloud = async () => {
             logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
+            logStockFlowError('customers.listener_error', error, { uid: user.uid });
         });
         unsubscribeTransactionsSnapshot = onSnapshot(getTransactionsCollectionRef(user.uid), (transactionsSnap) => {
             const transactions = transactionsSnap.docs
@@ -2309,6 +2480,7 @@ const syncFromCloud = async () => {
             logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
+            logStockFlowError('transactions.listener_error', error, { uid: user.uid });
         });
         unsubscribeDeletedTransactionsSnapshot = onSnapshot(getDeletedTransactionsCollectionRef(user.uid), (deletedSnap) => {
             const deletedTransactions = deletedSnap.docs
@@ -2318,21 +2490,80 @@ const syncFromCloud = async () => {
             financeLog.load('BIN_LOAD', { source: 'listener', count: deletedTransactions.length });
             emitLocalStorageUpdate();
         }, (error) => {
+            logStockFlowError('deletedTransactions.listener_error', error, { uid: user.uid });
+        });
+        unsubscribePurchaseOrdersSnapshot = onSnapshot(getPurchaseOrdersCollectionRef(user.uid), (purchaseOrdersSnap) => {
+            const subcollectionOrders = purchaseOrdersSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PurchaseOrder), id: docItem.id }));
+            const legacyRootOrders = Array.isArray(memoryState.purchaseOrders) ? memoryState.purchaseOrders : [];
+            const merged = new Map<string, PurchaseOrder>();
+            legacyRootOrders.forEach((order) => merged.set(order.id, order));
+            subcollectionOrders.forEach((order) => merged.set(order.id, order));
+            const purchaseOrders = Array.from(merged.values())
+              .sort((a, b) => new Date(b.orderDate || b.createdAt || '').getTime() - new Date(a.orderDate || a.createdAt || '').getTime());
+            memoryState = { ...memoryState, purchaseOrders };
+            emitLocalStorageUpdate();
+        }, (error) => {
+            logStockFlowError('purchaseOrders.listener_error', error, { uid: user.uid });
+        });
+        unsubscribePurchasePartiesSnapshot = onSnapshot(getPurchasePartiesCollectionRef(user.uid), (purchasePartiesSnap) => {
+            const subcollectionParties = purchasePartiesSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PurchaseParty), id: docItem.id }));
+            const legacyRootParties = Array.isArray(memoryState.purchaseParties) ? memoryState.purchaseParties : [];
+            const merged = new Map<string, PurchaseParty>();
+            legacyRootParties.forEach((party) => merged.set(party.id, party));
+            subcollectionParties.forEach((party) => merged.set(party.id, party));
+            memoryState = { ...memoryState, purchaseParties: Array.from(merged.values()).sort((a, b) => (a.name || '').localeCompare(b.name || '')) };
+            emitLocalStorageUpdate();
+        }, (error) => {
+            logStockFlowError('purchaseParties.listener_error', error, { uid: user.uid });
+        });
+        unsubscribeSupplierPaymentsSnapshot = onSnapshot(getSupplierPaymentsCollectionRef(user.uid), (supplierPaymentsSnap) => {
+            const subcollectionPayments = supplierPaymentsSnap.docs
+              .map(docItem => ({ ...(docItem.data() as SupplierPaymentLedgerEntry), id: docItem.id }));
+            const legacyRootPayments = Array.isArray(memoryState.supplierPayments) ? memoryState.supplierPayments : [];
+            const merged = new Map<string, SupplierPaymentLedgerEntry>();
+            legacyRootPayments.forEach((payment) => merged.set(payment.id, payment));
+            subcollectionPayments.forEach((payment) => merged.set(payment.id, payment));
+            memoryState = { ...memoryState, supplierPayments: Array.from(merged.values()).sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime()) };
+            emitLocalStorageUpdate();
+        }, (error) => {
+            logStockFlowError('supplierPayments.listener_error', error, { uid: user.uid });
+        });
+        unsubscribePartyCreditLedgerSnapshot = onSnapshot(getPartyCreditLedgerCollectionRef(user.uid), (partyCreditSnap) => {
+            const subcollectionCredits = partyCreditSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PartyCreditLedgerEntry), id: docItem.id }));
+            const legacyRootCredits = Array.isArray(memoryState.partyCreditLedger) ? memoryState.partyCreditLedger : [];
+            const merged = new Map<string, PartyCreditLedgerEntry>();
+            legacyRootCredits.forEach((entry) => merged.set(entry.id, entry));
+            subcollectionCredits.forEach((entry) => merged.set(entry.id, entry));
+            memoryState = { ...memoryState, partyCreditLedger: Array.from(merged.values()).sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime()) };
+            emitLocalStorageUpdate();
+        }, (error) => {
+            logStockFlowError('partyCreditLedger.listener_error', error, { uid: user.uid });
         });
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
             if (docSnap.exists()) {
                 storeDocumentExists = true;
                 const cloudData = docSnap.data() as AppState;
+                legacyRootProductsCache = Array.isArray(cloudData.products) ? cloudData.products.filter(p => !((p as any).isDeleted)) : [];
+                const mergedProducts = mergeProductsForTransition(legacyRootProductsCache, subcollectionProductsCache);
+                logStockFlowDataAudit('root.snapshot.load', {
+                  uid: user.uid,
+                  rootProductsCount: legacyRootProductsCache.length,
+                  subcollectionProductsCount: subcollectionProductsCache.length,
+                  mergedProductsCount: mergedProducts.length,
+                  memoryProductsCount: memoryState.products.length,
+                  firstProducts: getProductAuditSample(mergedProducts),
+                  storeDocumentExists: true,
+                });
                 const customerProductStatsBackfill = cloudData.migrationMarkers?.customerProductStatsBackfill;
                 const strictBackfill = customerProductStatsBackfill?.status === 'completed'
                   && customerProductStatsBackfill?.strictModeEnabled === true
                   && customerProductStatsBackfill?.version === CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION;
                 isCustomerProductStatsBackfillComplete = strictBackfill || ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL;
 
-                // No debug logging in rebuild loops.
-                // Root doc snapshots should not trigger full subcollection hydration;
-                // dedicated subcollection listeners own products/customers/transactions/deletedTransactions.
-                const hydratedProducts = memoryState.products || [];
+                const hydratedProducts = mergedProducts;
                 const hydratedCustomers = memoryState.customers || [];
                 const hydratedTransactions = memoryState.transactions || [];
                 const subcollectionDeletedTransactions = memoryState.deletedTransactions || [];
@@ -2359,9 +2590,10 @@ const syncFromCloud = async () => {
                     freightPurchases: cloudData.freightPurchases ?? fallbackFreightPurchases,
                     purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
                     freightBrokers: cloudData.freightBrokers || [],
-                    purchaseParties: cloudData.purchaseParties || [],
-                    purchaseOrders: cloudData.purchaseOrders || [],
-                    supplierPayments: cloudData.supplierPayments || [],
+                    purchaseParties: Array.isArray(memoryState.purchaseParties) && memoryState.purchaseParties.length > 0 ? memoryState.purchaseParties : (cloudData.purchaseParties || []),
+                    purchaseOrders: Array.isArray(memoryState.purchaseOrders) && memoryState.purchaseOrders.length > 0 ? memoryState.purchaseOrders : (cloudData.purchaseOrders || []),
+                    supplierPayments: Array.isArray(memoryState.supplierPayments) && memoryState.supplierPayments.length > 0 ? memoryState.supplierPayments : (cloudData.supplierPayments || []),
+                    partyCreditLedger: Array.isArray(memoryState.partyCreditLedger) && memoryState.partyCreditLedger.length > 0 ? memoryState.partyCreditLedger : (cloudData.partyCreditLedger || []),
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
@@ -2376,6 +2608,17 @@ const syncFromCloud = async () => {
                 logLoadedState(memoryState);
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
+                logStockFlowDataAudit('storage.sync.complete', {
+                  uid: user.uid,
+                  rootProductsCount: legacyRootProductsCache.length,
+                  subcollectionProductsCount: subcollectionProductsCache.length,
+                  mergedProductsCount: memoryState.products.length,
+                  customersCount: memoryState.customers.length,
+                  transactionsCount: memoryState.transactions.length,
+                  purchaseOrdersCount: (memoryState.purchaseOrders || []).length,
+                  purchasePartiesCount: (memoryState.purchaseParties || []).length,
+                  supplierPaymentsCount: (memoryState.supplierPayments || []).length,
+                });
                 emitCloudSyncStatus(CLOUD_SYNC_STATUSES.READY);
                 if (hydratedProducts.length > 0) {
                   void writeAuditEvent('SECURITY_EVENT', {
@@ -2402,6 +2645,9 @@ const syncFromCloud = async () => {
             } else {
                 isCloudSynced = true;
                 storeDocumentExists = false;
+                legacyRootProductsCache = [];
+                subcollectionProductsCache = [];
+                logStockFlowDataAudit('root.snapshot.missing_store', { uid: user.uid, rootProductsCount: 0, subcollectionProductsCount: 0, mergedProductsCount: 0 });
                 isCustomerProductStatsBackfillComplete = false;
                 hasCompletedInitialCloudLoad = true;
                 emitCloudSyncStatus(CLOUD_SYNC_STATUSES.MISSING_STORE, 'Store is not initialized. Contact admin to provision store data.');
@@ -2412,13 +2658,22 @@ const syncFromCloud = async () => {
                 });
             }
         }, (_error) => {
+            logStockFlowError('root.snapshot.listener_error', _error, { uid: user.uid });
+            logStockFlowDataAudit('root.snapshot.listener_error', { uid: user.uid, errorMessage: _error instanceof Error ? _error.message : String(_error) });
             emitCloudSyncStatus(CLOUD_SYNC_STATUSES.ERROR, 'Unable to read cloud data.');
         });
-        
-    } catch (e) { 
-    } finally {
-      syncInitInFlight = false;
-    }
+      } catch (e) {
+        logStockFlowError('storage.sync.error', e, { uid: auth?.currentUser?.uid || null });
+        logStockFlowDataAudit('storage.sync.error', { uid: auth?.currentUser?.uid || null, errorMessage: e instanceof Error ? e.message : String(e) });
+        emitCloudSyncStatus(CLOUD_SYNC_STATUSES.ERROR, getFriendlyErrorMessage(e, 'storage.sync.error'));
+      } finally {
+        window.clearTimeout(syncTimeout);
+        syncInitInFlight = false;
+        syncInitPromise = null;
+      }
+    })();
+
+    await syncInitPromise;
 };
 
 // Helper to recursively remove undefined values for Firestore compatibility
@@ -3035,12 +3290,13 @@ const syncToCloud = async (data: AppState) => {
 
     try {
         // Keep subcollection-owned entities out of root store writes to avoid array-overwrite blast radius.
-        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, freightInquiries: _omitFreightInquiries, freightConfirmedOrders: _omitFreightConfirmedOrders, freightPurchases: _omitFreightPurchases, ...rootStateWithoutMigratedEntities } = data;
+        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, purchaseOrders: _omitPurchaseOrders, expenses: _omitExpenses, supplierPayments: _omitSupplierPayments, customerProductStats: _omitCustomerProductStats, auditEvents: _omitAuditEvents, operationCommits: _omitOperationCommits, purchaseParties: _omitPurchaseParties, partyCreditLedger: _omitPartyCreditLedger, freightInquiries: _omitFreightInquiries, freightConfirmedOrders: _omitFreightConfirmedOrders, freightPurchases: _omitFreightPurchases, ...rootStateWithoutMigratedEntities } = data as AppState & Record<string, unknown>;
         const normalizedState = { ...rootStateWithoutMigratedEntities };
         const cleanData = sanitizeData(normalizedState);
         if (!cleanData || typeof cleanData !== 'object' || Object.keys(cleanData).length === 0) {
           return;
         }
+        assertNoLargeArraysInRootStorePayload(cleanData as Record<string, unknown>, 'syncToCloud');
         await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
     } catch (e) {
         throw e;
@@ -3206,7 +3462,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
         phase: DATA_OP_PHASES.ERROR,
         op: options?.reason || 'saveData',
         entity: 'state',
-        error: error instanceof Error ? error.message : 'Save failed.',
+        error: getFriendlyErrorMessage(error, options?.reason || 'saveData'),
       });
       throw error;
     }
@@ -3214,7 +3470,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
       phase: DATA_OP_PHASES.ERROR,
       op: options?.reason || 'saveData',
       entity: 'state',
-      error: error instanceof Error ? error.message : 'Save failed.',
+      error: getFriendlyErrorMessage(error, options?.reason || 'saveData'),
     });
   }
 };
@@ -3269,8 +3525,9 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
   const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...(preparedProduct.variants || [])]));
   const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...(preparedProduct.colors || [])]));
 
-  await saveData({ ...data, variantsMaster, colorsMaster }, { throwOnError: true, reason: 'addProduct_metadata', auditOperation: 'UPDATE' });
+  subcollectionProductsCache = mergeProductsForTransition([], [preparedProduct, ...subcollectionProductsCache.filter(p => p.id !== preparedProduct.id)]);
   memoryState = { ...memoryState, products: newProducts, variantsMaster, colorsMaster };
+  logStockFlowDataAudit('products.write.success', { uid: auth?.currentUser?.uid || null, operation: 'addProduct', productId: preparedProduct.id, memoryProductsCount: memoryState.products.length, firstProducts: getProductAuditSample(memoryState.products) });
   emitLocalStorageUpdate();
   await writeAuditEvent('CREATE', {
     reason: 'addProduct_subcollection',
@@ -3304,8 +3561,9 @@ export const updateProduct = async (product: Product): Promise<Product[]> => {
   const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...allVariants]));
   const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...allColors]));
 
-  await saveData({ ...data, variantsMaster, colorsMaster }, { throwOnError: true, reason: 'updateProduct_metadata', auditOperation: 'UPDATE' });
+  subcollectionProductsCache = mergeProductsForTransition([], [preparedProduct, ...subcollectionProductsCache.filter(p => p.id !== preparedProduct.id)]);
   memoryState = { ...memoryState, products: newProducts, variantsMaster, colorsMaster };
+  logStockFlowDataAudit('products.write.success', { uid: auth?.currentUser?.uid || null, operation: 'updateProduct', productId: preparedProduct.id, memoryProductsCount: memoryState.products.length, firstProducts: getProductAuditSample(memoryState.products) });
   emitLocalStorageUpdate();
   await writeAuditEvent('UPDATE', {
     reason: 'updateProduct_subcollection',
@@ -3326,8 +3584,10 @@ export const deleteProduct = async (id: string): Promise<Product[]> => {
     await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'deleteProduct_local_fallback', auditOperation: 'DELETE' });
     return newProducts;
   }
-  await syncToCloud({ ...data });
+  subcollectionProductsCache = subcollectionProductsCache.filter(p => p.id !== id);
+  legacyRootProductsCache = legacyRootProductsCache.filter(p => p.id !== id);
   memoryState = { ...memoryState, products: newProducts };
+  logStockFlowDataAudit('products.write.success', { uid: auth?.currentUser?.uid || null, operation: 'deleteProduct', productId: id, memoryProductsCount: memoryState.products.length, firstProducts: getProductAuditSample(memoryState.products) });
   emitLocalStorageUpdate();
   await writeAuditEvent('DELETE', {
     reason: 'deleteProduct_subcollection',
@@ -4555,21 +4815,46 @@ export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'c
     updatedAt: now,
   };
   const next = [party, ...(data.purchaseParties || [])];
-  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'createPurchaseParty', auditOperation: 'CREATE' });
+  if (db) {
+    await upsertPurchasePartyInSubcollection(party, 'createPurchaseParty');
+    memoryState = { ...memoryState, purchaseParties: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('CREATE', { reason: 'createPurchaseParty_subcollection', purchasePartyId: party.id, purchasePartiesCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'createPurchaseParty_local_fallback', auditOperation: 'CREATE' });
+  }
   return party;
 };
 
 export const updatePurchaseParty = async (party: PurchaseParty): Promise<PurchaseParty> => {
   const data = loadData();
-  const next = (data.purchaseParties || []).map(item => item.id === party.id ? { ...party, updatedAt: new Date().toISOString() } : item);
-  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty', auditOperation: 'UPDATE' });
-  return party;
+  const updatedParty = { ...party, updatedAt: new Date().toISOString() };
+  const existingParties = data.purchaseParties || [];
+  const next = existingParties.some(item => item.id === party.id)
+    ? existingParties.map(item => item.id === party.id ? updatedParty : item)
+    : [updatedParty, ...existingParties];
+  if (db) {
+    await upsertPurchasePartyInSubcollection(updatedParty, 'updatePurchaseParty');
+    memoryState = { ...memoryState, purchaseParties: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', { reason: 'updatePurchaseParty_subcollection', purchasePartyId: updatedParty.id, purchasePartiesCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty_local_fallback', auditOperation: 'UPDATE' });
+  }
+  return updatedParty;
 };
 
 export const deletePurchaseParty = async (partyId: string): Promise<void> => {
   const data = loadData();
   const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
-  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty', auditOperation: 'DELETE' });
+  if (db) {
+    await deletePurchasePartyInSubcollection(partyId, 'deletePurchaseParty');
+    memoryState = { ...memoryState, purchaseParties: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('DELETE', { reason: 'deletePurchaseParty_subcollection', purchasePartyId: partyId, purchasePartiesCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty_local_fallback', auditOperation: 'DELETE' });
+  }
 };
 
 export const getPurchaseOrders = (): PurchaseOrder[] => {
@@ -4588,7 +4873,14 @@ export const createPurchaseOrder = async (order: PurchaseOrder): Promise<Purchas
     paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
   };
   const next = [normalizedOrder, ...(data.purchaseOrders || [])];
-  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder', auditOperation: 'CREATE' });
+  if (db) {
+    await upsertPurchaseOrderInSubcollection(normalizedOrder, 'createPurchaseOrder');
+    memoryState = { ...memoryState, purchaseOrders: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('CREATE', { reason: 'createPurchaseOrder_subcollection', purchaseOrderId: normalizedOrder.id, purchaseOrdersCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder_local_fallback', auditOperation: 'CREATE' });
+  }
   return normalizedOrder;
 };
 
@@ -4602,8 +4894,18 @@ export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<Purchas
     remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
     paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
   };
-  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? normalizedOrder : item);
-  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder', auditOperation: 'UPDATE' });
+  const existingOrders = data.purchaseOrders || [];
+  const next = existingOrders.some(item => item.id === order.id)
+    ? existingOrders.map(item => item.id === order.id ? normalizedOrder : item)
+    : [normalizedOrder, ...existingOrders];
+  if (db) {
+    await upsertPurchaseOrderInSubcollection(normalizedOrder, 'updatePurchaseOrder');
+    memoryState = { ...memoryState, purchaseOrders: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', { reason: 'updatePurchaseOrder_subcollection', purchaseOrderId: normalizedOrder.id, purchaseOrdersCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder_local_fallback', auditOperation: 'UPDATE' });
+  }
   return normalizedOrder;
 };
 
@@ -4741,7 +5043,21 @@ export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerE
     };
     nextPartyCredits.unshift(creditEntry);
   }
-  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])], partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
+  const nextSupplierPayments = [payment, ...(data.supplierPayments || [])];
+  if (db) {
+    await Promise.all([
+      upsertSupplierPaymentInSubcollection(payment, 'createSupplierPayment'),
+      ...nextOrders.map((order) => upsertPurchaseOrderInSubcollection(order, 'createSupplierPayment_allocate_order')),
+      ...nextPartyCredits
+        .filter((entry) => entry.sourcePaymentId === paymentId)
+        .map((entry) => upsertPartyCreditLedgerEntryInSubcollection(entry, 'createSupplierPayment_party_credit')),
+    ]);
+    memoryState = { ...memoryState, documentSeries: data.documentSeries, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('CREATE', { reason: 'createSupplierPayment_subcollection', supplierPaymentId: payment.id, supplierPaymentsCount: nextSupplierPayments.length, allocatedOrdersCount: allocations.length });
+  } else {
+    await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'createSupplierPayment_local_fallback', auditOperation: 'CREATE' });
+  }
   return payment;
 };
 
@@ -4786,7 +5102,19 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
     remaining = Number((remaining - usable).toFixed(2));
   }
   const nextOrders = (data.purchaseOrders || []).map((o) => (o.id === orderId ? nextOrder : o));
-  await saveData({ ...data, purchaseOrders: nextOrders, partyCreditLedger: nextCredits }, { throwOnError: true, reason: 'applyPartyCreditToPurchaseOrder', auditOperation: 'UPDATE' });
+  if (db) {
+    await Promise.all([
+      upsertPurchaseOrderInSubcollection(nextOrder, 'applyPartyCreditToPurchaseOrder_order'),
+      ...nextCredits
+        .filter((entry) => updatedCreditEntryIds.has(entry.id))
+        .map((entry) => upsertPartyCreditLedgerEntryInSubcollection(entry, 'applyPartyCreditToPurchaseOrder_credit')),
+    ]);
+    memoryState = { ...memoryState, purchaseOrders: nextOrders, partyCreditLedger: nextCredits };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', { reason: 'applyPartyCreditToPurchaseOrder_subcollection', purchaseOrderId: nextOrder.id, appliedAmount: Number(appliedAmount.toFixed(2)), updatedCreditEntriesCount: updatedCreditEntryIds.size });
+  } else {
+    await saveData({ ...data, purchaseOrders: nextOrders, partyCreditLedger: nextCredits }, { throwOnError: true, reason: 'applyPartyCreditToPurchaseOrder_local_fallback', auditOperation: 'UPDATE' });
+  }
   return {
     order: nextOrder,
     appliedAmount: Number(appliedAmount.toFixed(2)),
@@ -5541,7 +5869,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
           phase: DATA_OP_PHASES.ERROR,
           op: OPERATION_TYPES.PROCESS_TRANSACTION,
           entity: 'transaction',
-          error: error instanceof Error ? error.message : 'Transaction save failed.',
+          error: getFriendlyErrorMessage(error, 'processTransaction'),
           transactionId: effectiveTransaction.id,
         });
       });

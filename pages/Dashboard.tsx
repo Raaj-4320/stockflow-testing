@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { CashAdjustment, Customer, DeleteCompensationRecord, Expense, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
 import { allocateCustomerPaymentAgainstCompositeReceivable, applyPartyCreditToPurchaseOrder, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
@@ -826,7 +827,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         fileName: `customer-statement-${selectedCustomer.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
       });
     } catch (error) {
-      setStatementPdfError(error instanceof Error ? error.message : 'Failed to generate PDF.');
+      setStatementPdfError(getFriendlyErrorMessage(error, 'dashboard.statement_pdf'));
     } finally {
       setIsGeneratingCustomerPdf(false);
     }
@@ -859,7 +860,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         fileName: `party-statement-${selectedParty.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
       });
     } catch (error) {
-      setStatementPdfError(error instanceof Error ? error.message : 'Failed to generate PDF.');
+      setStatementPdfError(getFriendlyErrorMessage(error, 'dashboard.statement_pdf'));
     } finally {
       setIsGeneratingPartyPdf(false);
     }
@@ -904,7 +905,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       setEditingSupplierPayment(null);
       refresh();
     } catch (error) {
-      setEditSupplierError(error instanceof Error ? error.message : 'Unable to update supplier payment.');
+      setEditSupplierError(getFriendlyErrorMessage(error, 'dashboard.update_supplier_payment'));
     }
   };
 

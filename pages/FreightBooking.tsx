@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { addCategory, convertConfirmedOrderToPurchase, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, getFreightPurchases, loadData, receiveFreightPurchaseIntoInventory, updateFreightInquiry, uploadImageFileToCloudinary } from '../services/storage';
 import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
@@ -255,7 +256,7 @@ export default function FreightBooking() {
       setReceiveTargetOrder(null);
       refresh();
     } catch (error: any) {
-      setReceiveError(error?.message || 'Unable to receive inventory.');
+      setReceiveError(getFriendlyErrorMessage(error, 'freight.receive_inventory'));
     } finally {
       setMaterializingOrderId(null);
     }

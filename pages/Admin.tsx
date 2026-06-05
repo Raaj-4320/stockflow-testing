@@ -13,6 +13,13 @@ import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
+
+const getProductAuditSample = (products: Product[] = []) => products.slice(0, 3).map((product) => ({
+  id: product.id,
+  name: product.name,
+}));
+
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   if (!open) return null;
   return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4"><Card className="w-full max-w-md"><CardHeader><CardTitle>{title}</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">{message}</p><div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button></div></CardContent></Card></div>;
@@ -168,7 +175,7 @@ export default function Admin() {
       setSelectedPhotoProduct(refreshed);
       setNotice({ type: 'success', message: 'Product photo updated successfully.' });
     } catch (error: any) {
-      setPhotoUploadError(error?.message || 'Failed to upload photo.');
+      setPhotoUploadError(getFriendlyErrorMessage(error, 'admin.photo_upload'));
     } finally {
       setIsPhotoUploading(false);
     }
@@ -240,6 +247,14 @@ export default function Admin() {
         window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
+
+
+  useEffect(() => {
+    console.info('[StockFlowDataAudit]', 'inventory.render', {
+      productsCount: products.length,
+      firstProducts: getProductAuditSample(products),
+    });
+  }, [products]);
 
   // Barcode Generation Effect
   useEffect(() => {
@@ -316,7 +331,7 @@ export default function Admin() {
       setPurchaseTarget(nextTarget);
       setPendingPurchaseReverse(null);
     } catch (error) {
-      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.' });
+      setNotice({ type: 'error', message: getFriendlyErrorMessage(error, 'admin.reverse_purchase') });
     }
   };
 
@@ -346,7 +361,7 @@ export default function Admin() {
       setPurchaseEditError(null);
       setNotice({ type: 'success', message: 'Purchase entry updated.' });
     } catch (error) {
-      setPurchaseEditError(error instanceof Error ? error.message : 'Unable to edit purchase entry.');
+      setPurchaseEditError(getFriendlyErrorMessage(error, 'admin.edit_purchase_history'));
     }
   };
 
@@ -723,7 +738,7 @@ export default function Admin() {
         closeModal();
       }
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
+      const message = getFriendlyErrorMessage(saveError, 'admin.product_save');
       setError(message);
       const userMessage = message.toLowerCase().includes('image upload failed')
         ? 'Image upload failed. Please try again.'
