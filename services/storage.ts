@@ -193,6 +193,39 @@ const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
 const getDeletedTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'deletedTransactions');
 const getOperationCommitsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'operationCommits');
+const getPurchaseOrdersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseOrders');
+const getPurchasePartiesCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseParties');
+const getSupplierPaymentsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'supplierPayments');
+const getPartyCreditLedgerCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'partyCreditLedger');
+
+const ROOT_STORE_BLOCKED_ARRAY_FIELDS = [
+  'products',
+  'transactions',
+  'customers',
+  'purchaseOrders',
+  'expenses',
+  'supplierPayments',
+  'auditEvents',
+  'operationCommits',
+  'customerProductStats',
+  'purchaseParties',
+  'partyCreditLedger',
+] as const;
+
+const assertNoLargeArraysInRootStorePayload = (payload: Record<string, unknown>, reason: string) => {
+  const blockedFields = ROOT_STORE_BLOCKED_ARRAY_FIELDS
+    .map((field) => ({ field, value: payload[field] }))
+    .filter(({ value }) => Array.isArray(value));
+
+  if (!blockedFields.length) return;
+
+  const details = blockedFields.map(({ field, value }) => ({
+    field,
+    length: Array.isArray(value) ? value.length : 0,
+  }));
+  console.error('[storage] Blocked root stores/{uid} write containing large array fields.', { functionName: reason, fields: details });
+  throw new Error(`Blocked root store write from ${reason} containing large array fields: ${details.map((item) => item.field).join(', ')}`);
+};
 
 const ensureStoreInitializedForCurrentUser = async (
   user: NonNullable<typeof auth>['currentUser'],
@@ -209,11 +242,13 @@ const ensureStoreInitializedForCurrentUser = async (
       return { created: false };
     }
 
-    firestoreTx.set(storeRef, {
+    const initializationPayload = {
       initializedAt: nowIso,
       initializedBy: user.uid,
       provisioningSource: `client_${context}`,
-    }, { merge: true });
+    };
+    assertNoLargeArraysInRootStorePayload(initializationPayload, 'ensureStoreInitializedForCurrentUser');
+    firestoreTx.set(storeRef, initializationPayload, { merge: true });
 
     return { created: true };
   });
@@ -299,6 +334,31 @@ const deleteCustomerInSubcollection = async (customerId: string, reason: string)
 const upsertTransactionInSubcollection = async (transaction: Transaction, reason: string) => {
   const user = await assertCloudWriteReady(reason);
   await setDoc(doc(db!, 'stores', user.uid, 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
+};
+
+const upsertPurchaseOrderInSubcollection = async (order: PurchaseOrder, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'purchaseOrders', order.id), sanitizeData(order), { merge: true });
+};
+
+const upsertPurchasePartyInSubcollection = async (party: PurchaseParty, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'purchaseParties', party.id), sanitizeData(party), { merge: true });
+};
+
+const deletePurchasePartyInSubcollection = async (partyId: string, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await deleteDoc(doc(db!, 'stores', user.uid, 'purchaseParties', partyId));
+};
+
+const upsertSupplierPaymentInSubcollection = async (payment: SupplierPaymentLedgerEntry, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'supplierPayments', payment.id), sanitizeData(payment), { merge: true });
+};
+
+const upsertPartyCreditLedgerEntryInSubcollection = async (entry: PartyCreditLedgerEntry, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'partyCreditLedger', entry.id), sanitizeData(entry), { merge: true });
 };
 
 const getDeleteReversalTransactionType = (type: Transaction['type']): Transaction['type'] | null => {
@@ -2180,6 +2240,10 @@ let unsubscribeProductsSnapshot: any = null;
 let unsubscribeCustomersSnapshot: any = null;
 let unsubscribeTransactionsSnapshot: any = null;
 let unsubscribeDeletedTransactionsSnapshot: any = null;
+let unsubscribePurchaseOrdersSnapshot: any = null;
+let unsubscribePurchasePartiesSnapshot: any = null;
+let unsubscribeSupplierPaymentsSnapshot: any = null;
+let unsubscribePartyCreditLedgerSnapshot: any = null;
 
 // Listen for auth state changes to trigger sync
 if (auth) {
@@ -2217,6 +2281,22 @@ if (auth) {
             if (unsubscribeDeletedTransactionsSnapshot) {
                 unsubscribeDeletedTransactionsSnapshot();
                 unsubscribeDeletedTransactionsSnapshot = null;
+            }
+            if (unsubscribePurchaseOrdersSnapshot) {
+                unsubscribePurchaseOrdersSnapshot();
+                unsubscribePurchaseOrdersSnapshot = null;
+            }
+            if (unsubscribePurchasePartiesSnapshot) {
+                unsubscribePurchasePartiesSnapshot();
+                unsubscribePurchasePartiesSnapshot = null;
+            }
+            if (unsubscribeSupplierPaymentsSnapshot) {
+                unsubscribeSupplierPaymentsSnapshot();
+                unsubscribeSupplierPaymentsSnapshot = null;
+            }
+            if (unsubscribePartyCreditLedgerSnapshot) {
+                unsubscribePartyCreditLedgerSnapshot();
+                unsubscribePartyCreditLedgerSnapshot = null;
             }
             emitLocalStorageUpdate();
         }
@@ -2279,6 +2359,18 @@ const syncFromCloud = async () => {
         if (unsubscribeDeletedTransactionsSnapshot) {
             unsubscribeDeletedTransactionsSnapshot();
         }
+        if (unsubscribePurchaseOrdersSnapshot) {
+            unsubscribePurchaseOrdersSnapshot();
+        }
+        if (unsubscribePurchasePartiesSnapshot) {
+            unsubscribePurchasePartiesSnapshot();
+        }
+        if (unsubscribeSupplierPaymentsSnapshot) {
+            unsubscribeSupplierPaymentsSnapshot();
+        }
+        if (unsubscribePartyCreditLedgerSnapshot) {
+            unsubscribePartyCreditLedgerSnapshot();
+        }
         unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(user.uid), (productsSnap) => {
             const products = productsSnap.docs
               .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
@@ -2316,6 +2408,52 @@ const syncFromCloud = async () => {
               .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
             memoryState = { ...memoryState, deletedTransactions };
             financeLog.load('BIN_LOAD', { source: 'listener', count: deletedTransactions.length });
+            emitLocalStorageUpdate();
+        }, (error) => {
+        });
+        unsubscribePurchaseOrdersSnapshot = onSnapshot(getPurchaseOrdersCollectionRef(user.uid), (purchaseOrdersSnap) => {
+            const subcollectionOrders = purchaseOrdersSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PurchaseOrder), id: docItem.id }));
+            const legacyRootOrders = Array.isArray(memoryState.purchaseOrders) ? memoryState.purchaseOrders : [];
+            const merged = new Map<string, PurchaseOrder>();
+            legacyRootOrders.forEach((order) => merged.set(order.id, order));
+            subcollectionOrders.forEach((order) => merged.set(order.id, order));
+            const purchaseOrders = Array.from(merged.values())
+              .sort((a, b) => new Date(b.orderDate || b.createdAt || '').getTime() - new Date(a.orderDate || a.createdAt || '').getTime());
+            memoryState = { ...memoryState, purchaseOrders };
+            emitLocalStorageUpdate();
+        }, (error) => {
+        });
+        unsubscribePurchasePartiesSnapshot = onSnapshot(getPurchasePartiesCollectionRef(user.uid), (purchasePartiesSnap) => {
+            const subcollectionParties = purchasePartiesSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PurchaseParty), id: docItem.id }));
+            const legacyRootParties = Array.isArray(memoryState.purchaseParties) ? memoryState.purchaseParties : [];
+            const merged = new Map<string, PurchaseParty>();
+            legacyRootParties.forEach((party) => merged.set(party.id, party));
+            subcollectionParties.forEach((party) => merged.set(party.id, party));
+            memoryState = { ...memoryState, purchaseParties: Array.from(merged.values()).sort((a, b) => (a.name || '').localeCompare(b.name || '')) };
+            emitLocalStorageUpdate();
+        }, (error) => {
+        });
+        unsubscribeSupplierPaymentsSnapshot = onSnapshot(getSupplierPaymentsCollectionRef(user.uid), (supplierPaymentsSnap) => {
+            const subcollectionPayments = supplierPaymentsSnap.docs
+              .map(docItem => ({ ...(docItem.data() as SupplierPaymentLedgerEntry), id: docItem.id }));
+            const legacyRootPayments = Array.isArray(memoryState.supplierPayments) ? memoryState.supplierPayments : [];
+            const merged = new Map<string, SupplierPaymentLedgerEntry>();
+            legacyRootPayments.forEach((payment) => merged.set(payment.id, payment));
+            subcollectionPayments.forEach((payment) => merged.set(payment.id, payment));
+            memoryState = { ...memoryState, supplierPayments: Array.from(merged.values()).sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime()) };
+            emitLocalStorageUpdate();
+        }, (error) => {
+        });
+        unsubscribePartyCreditLedgerSnapshot = onSnapshot(getPartyCreditLedgerCollectionRef(user.uid), (partyCreditSnap) => {
+            const subcollectionCredits = partyCreditSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PartyCreditLedgerEntry), id: docItem.id }));
+            const legacyRootCredits = Array.isArray(memoryState.partyCreditLedger) ? memoryState.partyCreditLedger : [];
+            const merged = new Map<string, PartyCreditLedgerEntry>();
+            legacyRootCredits.forEach((entry) => merged.set(entry.id, entry));
+            subcollectionCredits.forEach((entry) => merged.set(entry.id, entry));
+            memoryState = { ...memoryState, partyCreditLedger: Array.from(merged.values()).sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime()) };
             emitLocalStorageUpdate();
         }, (error) => {
         });
@@ -2359,9 +2497,10 @@ const syncFromCloud = async () => {
                     freightPurchases: cloudData.freightPurchases ?? fallbackFreightPurchases,
                     purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
                     freightBrokers: cloudData.freightBrokers || [],
-                    purchaseParties: cloudData.purchaseParties || [],
-                    purchaseOrders: cloudData.purchaseOrders || [],
-                    supplierPayments: cloudData.supplierPayments || [],
+                    purchaseParties: Array.isArray(memoryState.purchaseParties) && memoryState.purchaseParties.length > 0 ? memoryState.purchaseParties : (cloudData.purchaseParties || []),
+                    purchaseOrders: Array.isArray(memoryState.purchaseOrders) && memoryState.purchaseOrders.length > 0 ? memoryState.purchaseOrders : (cloudData.purchaseOrders || []),
+                    supplierPayments: Array.isArray(memoryState.supplierPayments) && memoryState.supplierPayments.length > 0 ? memoryState.supplierPayments : (cloudData.supplierPayments || []),
+                    partyCreditLedger: Array.isArray(memoryState.partyCreditLedger) && memoryState.partyCreditLedger.length > 0 ? memoryState.partyCreditLedger : (cloudData.partyCreditLedger || []),
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
@@ -3035,12 +3174,13 @@ const syncToCloud = async (data: AppState) => {
 
     try {
         // Keep subcollection-owned entities out of root store writes to avoid array-overwrite blast radius.
-        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, freightInquiries: _omitFreightInquiries, freightConfirmedOrders: _omitFreightConfirmedOrders, freightPurchases: _omitFreightPurchases, ...rootStateWithoutMigratedEntities } = data;
+        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, purchaseOrders: _omitPurchaseOrders, expenses: _omitExpenses, supplierPayments: _omitSupplierPayments, customerProductStats: _omitCustomerProductStats, auditEvents: _omitAuditEvents, operationCommits: _omitOperationCommits, purchaseParties: _omitPurchaseParties, partyCreditLedger: _omitPartyCreditLedger, freightInquiries: _omitFreightInquiries, freightConfirmedOrders: _omitFreightConfirmedOrders, freightPurchases: _omitFreightPurchases, ...rootStateWithoutMigratedEntities } = data as AppState & Record<string, unknown>;
         const normalizedState = { ...rootStateWithoutMigratedEntities };
         const cleanData = sanitizeData(normalizedState);
         if (!cleanData || typeof cleanData !== 'object' || Object.keys(cleanData).length === 0) {
           return;
         }
+        assertNoLargeArraysInRootStorePayload(cleanData as Record<string, unknown>, 'syncToCloud');
         await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
     } catch (e) {
         throw e;
@@ -3269,7 +3409,6 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
   const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...(preparedProduct.variants || [])]));
   const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...(preparedProduct.colors || [])]));
 
-  await saveData({ ...data, variantsMaster, colorsMaster }, { throwOnError: true, reason: 'addProduct_metadata', auditOperation: 'UPDATE' });
   memoryState = { ...memoryState, products: newProducts, variantsMaster, colorsMaster };
   emitLocalStorageUpdate();
   await writeAuditEvent('CREATE', {
@@ -3304,7 +3443,6 @@ export const updateProduct = async (product: Product): Promise<Product[]> => {
   const variantsMaster = Array.from(new Set([...(data.variantsMaster || []), ...allVariants]));
   const colorsMaster = Array.from(new Set([...(data.colorsMaster || []), ...allColors]));
 
-  await saveData({ ...data, variantsMaster, colorsMaster }, { throwOnError: true, reason: 'updateProduct_metadata', auditOperation: 'UPDATE' });
   memoryState = { ...memoryState, products: newProducts, variantsMaster, colorsMaster };
   emitLocalStorageUpdate();
   await writeAuditEvent('UPDATE', {
@@ -3326,7 +3464,6 @@ export const deleteProduct = async (id: string): Promise<Product[]> => {
     await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'deleteProduct_local_fallback', auditOperation: 'DELETE' });
     return newProducts;
   }
-  await syncToCloud({ ...data });
   memoryState = { ...memoryState, products: newProducts };
   emitLocalStorageUpdate();
   await writeAuditEvent('DELETE', {
@@ -4555,21 +4692,46 @@ export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'c
     updatedAt: now,
   };
   const next = [party, ...(data.purchaseParties || [])];
-  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'createPurchaseParty', auditOperation: 'CREATE' });
+  if (db) {
+    await upsertPurchasePartyInSubcollection(party, 'createPurchaseParty');
+    memoryState = { ...memoryState, purchaseParties: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('CREATE', { reason: 'createPurchaseParty_subcollection', purchasePartyId: party.id, purchasePartiesCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'createPurchaseParty_local_fallback', auditOperation: 'CREATE' });
+  }
   return party;
 };
 
 export const updatePurchaseParty = async (party: PurchaseParty): Promise<PurchaseParty> => {
   const data = loadData();
-  const next = (data.purchaseParties || []).map(item => item.id === party.id ? { ...party, updatedAt: new Date().toISOString() } : item);
-  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty', auditOperation: 'UPDATE' });
-  return party;
+  const updatedParty = { ...party, updatedAt: new Date().toISOString() };
+  const existingParties = data.purchaseParties || [];
+  const next = existingParties.some(item => item.id === party.id)
+    ? existingParties.map(item => item.id === party.id ? updatedParty : item)
+    : [updatedParty, ...existingParties];
+  if (db) {
+    await upsertPurchasePartyInSubcollection(updatedParty, 'updatePurchaseParty');
+    memoryState = { ...memoryState, purchaseParties: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', { reason: 'updatePurchaseParty_subcollection', purchasePartyId: updatedParty.id, purchasePartiesCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty_local_fallback', auditOperation: 'UPDATE' });
+  }
+  return updatedParty;
 };
 
 export const deletePurchaseParty = async (partyId: string): Promise<void> => {
   const data = loadData();
   const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
-  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty', auditOperation: 'DELETE' });
+  if (db) {
+    await deletePurchasePartyInSubcollection(partyId, 'deletePurchaseParty');
+    memoryState = { ...memoryState, purchaseParties: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('DELETE', { reason: 'deletePurchaseParty_subcollection', purchasePartyId: partyId, purchasePartiesCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty_local_fallback', auditOperation: 'DELETE' });
+  }
 };
 
 export const getPurchaseOrders = (): PurchaseOrder[] => {
@@ -4588,7 +4750,14 @@ export const createPurchaseOrder = async (order: PurchaseOrder): Promise<Purchas
     paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
   };
   const next = [normalizedOrder, ...(data.purchaseOrders || [])];
-  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder', auditOperation: 'CREATE' });
+  if (db) {
+    await upsertPurchaseOrderInSubcollection(normalizedOrder, 'createPurchaseOrder');
+    memoryState = { ...memoryState, purchaseOrders: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('CREATE', { reason: 'createPurchaseOrder_subcollection', purchaseOrderId: normalizedOrder.id, purchaseOrdersCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'createPurchaseOrder_local_fallback', auditOperation: 'CREATE' });
+  }
   return normalizedOrder;
 };
 
@@ -4602,8 +4771,18 @@ export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<Purchas
     remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
     paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
   };
-  const next = (data.purchaseOrders || []).map(item => item.id === order.id ? normalizedOrder : item);
-  await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder', auditOperation: 'UPDATE' });
+  const existingOrders = data.purchaseOrders || [];
+  const next = existingOrders.some(item => item.id === order.id)
+    ? existingOrders.map(item => item.id === order.id ? normalizedOrder : item)
+    : [normalizedOrder, ...existingOrders];
+  if (db) {
+    await upsertPurchaseOrderInSubcollection(normalizedOrder, 'updatePurchaseOrder');
+    memoryState = { ...memoryState, purchaseOrders: next };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', { reason: 'updatePurchaseOrder_subcollection', purchaseOrderId: normalizedOrder.id, purchaseOrdersCount: next.length });
+  } else {
+    await saveData({ ...data, purchaseOrders: next }, { throwOnError: true, reason: 'updatePurchaseOrder_local_fallback', auditOperation: 'UPDATE' });
+  }
   return normalizedOrder;
 };
 
@@ -4741,7 +4920,21 @@ export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerE
     };
     nextPartyCredits.unshift(creditEntry);
   }
-  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])], partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
+  const nextSupplierPayments = [payment, ...(data.supplierPayments || [])];
+  if (db) {
+    await Promise.all([
+      upsertSupplierPaymentInSubcollection(payment, 'createSupplierPayment'),
+      ...nextOrders.map((order) => upsertPurchaseOrderInSubcollection(order, 'createSupplierPayment_allocate_order')),
+      ...nextPartyCredits
+        .filter((entry) => entry.sourcePaymentId === paymentId)
+        .map((entry) => upsertPartyCreditLedgerEntryInSubcollection(entry, 'createSupplierPayment_party_credit')),
+    ]);
+    memoryState = { ...memoryState, documentSeries: data.documentSeries, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('CREATE', { reason: 'createSupplierPayment_subcollection', supplierPaymentId: payment.id, supplierPaymentsCount: nextSupplierPayments.length, allocatedOrdersCount: allocations.length });
+  } else {
+    await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'createSupplierPayment_local_fallback', auditOperation: 'CREATE' });
+  }
   return payment;
 };
 
@@ -4786,7 +4979,19 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
     remaining = Number((remaining - usable).toFixed(2));
   }
   const nextOrders = (data.purchaseOrders || []).map((o) => (o.id === orderId ? nextOrder : o));
-  await saveData({ ...data, purchaseOrders: nextOrders, partyCreditLedger: nextCredits }, { throwOnError: true, reason: 'applyPartyCreditToPurchaseOrder', auditOperation: 'UPDATE' });
+  if (db) {
+    await Promise.all([
+      upsertPurchaseOrderInSubcollection(nextOrder, 'applyPartyCreditToPurchaseOrder_order'),
+      ...nextCredits
+        .filter((entry) => updatedCreditEntryIds.has(entry.id))
+        .map((entry) => upsertPartyCreditLedgerEntryInSubcollection(entry, 'applyPartyCreditToPurchaseOrder_credit')),
+    ]);
+    memoryState = { ...memoryState, purchaseOrders: nextOrders, partyCreditLedger: nextCredits };
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', { reason: 'applyPartyCreditToPurchaseOrder_subcollection', purchaseOrderId: nextOrder.id, appliedAmount: Number(appliedAmount.toFixed(2)), updatedCreditEntriesCount: updatedCreditEntryIds.size });
+  } else {
+    await saveData({ ...data, purchaseOrders: nextOrders, partyCreditLedger: nextCredits }, { throwOnError: true, reason: 'applyPartyCreditToPurchaseOrder_local_fallback', auditOperation: 'UPDATE' });
+  }
   return {
     order: nextOrder,
     appliedAmount: Number(appliedAmount.toFixed(2)),
