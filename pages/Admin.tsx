@@ -13,6 +13,16 @@ import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
+
+const LEGACY_STORE_SIZE_FRIENDLY_MESSAGE = 'Unable to save purchase data because legacy store data is too large. Product was not damaged. Please retry after sync cleanup.';
+
+const formatLegacyStoreSizeError = (error: unknown, fallback: string) => {
+  const message = error instanceof Error ? error.message : fallback;
+  const lower = message.toLowerCase();
+  const isRootStoreSizeError = lower.includes('stores/')
+    && (lower.includes('maximum allowed size') || lower.includes('exceed') || lower.includes('1,048,576') || lower.includes('1048576'));
+  return isRootStoreSizeError ? LEGACY_STORE_SIZE_FRIENDLY_MESSAGE : message;
+};
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   if (!open) return null;
   return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4"><Card className="w-full max-w-md"><CardHeader><CardTitle>{title}</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">{message}</p><div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button></div></CardContent></Card></div>;
@@ -723,7 +733,7 @@ export default function Admin() {
         closeModal();
       }
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
+      const message = formatLegacyStoreSizeError(saveError, 'Product save failed. Please try again.');
       setError(message);
       const userMessage = message.toLowerCase().includes('image upload failed')
         ? 'Image upload failed. Please try again.'
