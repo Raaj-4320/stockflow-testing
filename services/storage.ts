@@ -5018,8 +5018,14 @@ export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerE
   const now = new Date().toISOString();
   const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const amount = Math.max(0, Number(payload.amount) || 0);
-  const payableApplied = Math.max(0, Math.min(amount, Number(payload.payableApplied ?? amount) || 0));
-  const partyCreditCreated = Math.max(0, Number(payload.partyCreditCreated ?? Math.max(0, amount - payableApplied)) || 0);
+  // Supplier payment accounting is service-owned. The UI may send preview values,
+  // but create must recompute from the current persisted open payable to avoid
+  // stale payableApplied / creditCreated values.
+  const actualOpenPayable = (data.purchaseOrders || [])
+    .filter((order) => order.partyId === payload.partyId && order.status !== 'cancelled')
+    .reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
+  const payableApplied = Number(Math.min(amount, Math.max(0, actualOpenPayable)).toFixed(2));
+  const partyCreditCreated = Number(Math.max(0, amount - payableApplied).toFixed(2));
   const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, payableApplied, payload.method, payload.note, payload.paidAt || now);
   let voucherNo = payload.voucherNo;
   if (!voucherNo) {
@@ -5153,7 +5159,7 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
     .reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
   const paymentAppliedToPayable = Number(Math.max(0, Math.min(nextAmount, payableBeforeThisPayment)).toFixed(2));
   const partyCreditCreated = Number(Math.max(0, nextAmount - paymentAppliedToPayable).toFixed(2));
-  const nextEntry: SupplierPaymentLedgerEntry = {
+  const nextEntry: SupplierPaymentLedgerEntry & { payableApplied?: number } = {
     ...existing,
     ...updates,
     amount: nextAmount,
