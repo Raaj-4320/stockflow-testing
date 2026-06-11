@@ -48,6 +48,440 @@ const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => 
   const shown = unique.slice(0, maxItems).join(', ');
   return unique.length > maxItems ? `${shown} +${unique.length - maxItems} more` : shown;
 };
+
+
+type FixedCustomerLedgerWarning = {
+  code: string;
+  message: string;
+  transactionId?: string;
+};
+
+type FixedCustomerLedgerRow = {
+  id: string;
+  date: string;
+  type: string;
+  ref: string;
+  description: string;
+  saleTotal: number;
+  paidNow: number;
+  creditDue: number;
+  paymentReceived: number;
+  storeCreditUsed: number;
+  storeCreditCreated: number;
+  receivableImpact: number;
+  runningDue: number;
+  runningStoreCredit: number;
+  netReceivable: number;
+  warnings: string[];
+};
+
+type FixedCustomerLedgerPreview = {
+  customer: Customer;
+  rows: FixedCustomerLedgerRow[];
+  summary: {
+    oldCurrentDue: number;
+    oldStoreCredit: number;
+    oldNetReceivable: number;
+    fixedCurrentDue: number;
+    fixedStoreCredit: number;
+    fixedNetReceivable: number;
+    difference: number;
+    totalSales: number;
+    totalPaidNow: number;
+    totalCreditDue: number;
+    totalPaymentsReceived: number;
+    totalStoreCreditUsed: number;
+    totalStoreCreditCreated: number;
+    possibleMisclassifiedPayments: number;
+  };
+  warnings: FixedCustomerLedgerWarning[];
+  differences: {
+    currentDue: number;
+    storeCredit: number;
+    netReceivable: number;
+  };
+};
+
+const roundFixedMoney = (value: unknown): number => {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+};
+
+const positiveFixedMoney = (value: unknown): number => Math.max(0, roundFixedMoney(value));
+
+const getFixedTxTime = (event: { date?: string; id?: string }): number => {
+  const parsed = event.date ? new Date(event.date).getTime() : Number.NaN;
+  if (Number.isFinite(parsed)) return parsed;
+  const idNum = Number(String(event.id || '').replace(/\D/g, '').slice(0, 13));
+  return Number.isFinite(idNum) ? idNum : 0;
+};
+
+const getExplicitHistoricalDue = (tx: Transaction): number | null => {
+  const candidates = [
+    (tx as any)?.creditDue,
+    (tx as any)?.creditAmount,
+    (tx as any)?.balance,
+    (tx as any)?.Balance,
+    (tx as any)?.['Credit Due'],
+    (tx as any)?.['Due'],
+    (tx as any)?.saleSettlement?.creditDue,
+  ];
+  const value = candidates.map(Number).find((n) => Number.isFinite(n) && n > 0);
+  return Number.isFinite(value) ? positiveFixedMoney(value) : null;
+};
+
+const isHistoricalPreviewRow = (tx: Transaction): boolean => (
+  tx.type === 'historical_reference'
+  || tx.isHistorical === true
+  || tx.source === 'historical_import'
+  || Boolean((tx as any).legacyRef || (tx as any).sourceRef || (tx as any).billRef)
+);
+
+const isCashPaidHistoricalSale = (tx: Transaction, settlement: { cashPaid: number; onlinePaid: number; creditDue: number }, amount: number): boolean => {
+  if (!isHistoricalPreviewRow(tx)) return false;
+  const paidNow = positiveFixedMoney(settlement.cashPaid + settlement.onlinePaid);
+  return amount > 0 && paidNow >= amount - 0.01 && positiveFixedMoney(settlement.creditDue) <= 0.01;
+};
+
+const buildFixedCustomerLedgerPreview = (
+  customer: Customer,
+  transactions: Transaction[],
+  upfrontOrders: UpfrontOrder[] = []
+): FixedCustomerLedgerPreview => {
+  const customerName = normalizeName(customer.name);
+  const customerPhone = normalizePhone(customer.phone);
+  const warnings: FixedCustomerLedgerWarning[] = [];
+  const customerTx = transactions.filter((tx) => {
+    if (tx.customerId === customer.id) return true;
+    const missingId = !tx.customerId;
+    const samePhone = customerPhone && normalizePhone(tx.customerPhone) === customerPhone;
+    const sameName = customerName && normalizeName(tx.customerName) === customerName;
+    return missingId && (samePhone || sameName);
+  });
+
+  customerTx.forEach((tx) => {
+    if (!tx.customerId && (normalizePhone(tx.customerPhone) === customerPhone || normalizeName(tx.customerName) === customerName)) {
+      warnings.push({
+        code: 'missing_customer_id_name_match',
+        transactionId: tx.id,
+        message: `Transaction ${tx.id.slice(-6)} has no customerId but matches ${customer.name} by name/phone; included only in this preview.`,
+      });
+    }
+  });
+
+  const duplicateKeys = new Map<string, Transaction[]>();
+  customerTx.forEach((tx) => {
+    const day = tx.date ? new Date(tx.date).toISOString().slice(0, 10) : 'unknown-date';
+    const key = `${day}|${Math.abs(Number(tx.total || 0)).toFixed(2)}|${normalizeTransactionItems((tx as any).items).length}`;
+    duplicateKeys.set(key, [...(duplicateKeys.get(key) || []), tx]);
+  });
+  const duplicateIds = new Set<string>();
+  duplicateKeys.forEach((group) => {
+    const hasHistorical = group.some(isHistoricalPreviewRow);
+    const hasLive = group.some((tx) => !isHistoricalPreviewRow(tx));
+    if (group.length > 1 && hasHistorical && hasLive) {
+      group.forEach((tx) => duplicateIds.add(tx.id));
+    }
+  });
+
+  const upfrontEffects = buildUpfrontOrderLedgerEffects(upfrontOrders.filter((order) => order.customerId === customer.id), [customer])
+    .filter((effect) => effect.type !== 'legacy_custom_order_info');
+  const events = [
+    ...customerTx.map((tx) => ({ kind: 'transaction' as const, id: tx.id, date: tx.date, priority: tx.type === 'sale' || tx.type === 'historical_reference' ? 2 : tx.type === 'return' ? 3 : 4, tx })),
+    ...upfrontEffects.map((effect) => ({ kind: 'upfront' as const, id: effect.id, date: effect.date, priority: effect.type === 'custom_order_receivable' ? 0 : 1, effect })),
+  ].sort((a, b) => getFixedTxTime(a) - getFixedTxTime(b) || a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
+
+  let runningDue = 0;
+  let runningStoreCredit = 0;
+  let totalSales = 0;
+  let totalPaidNow = 0;
+  let totalCreditDue = 0;
+  let totalPaymentsReceived = 0;
+  let totalStoreCreditUsed = 0;
+  let totalStoreCreditCreated = 0;
+  let possibleMisclassifiedPayments = 0;
+  const processed: Transaction[] = [];
+  const rows: FixedCustomerLedgerRow[] = [];
+
+  const addWarning = (code: string, message: string, transactionId?: string) => {
+    warnings.push({ code, message, transactionId });
+    return message;
+  };
+
+  events.forEach((event) => {
+    const rowWarnings: string[] = [];
+    if (event.kind === 'upfront') {
+      const effect = event.effect;
+      const increase = positiveFixedMoney(effect.receivableIncrease);
+      const decrease = positiveFixedMoney(effect.receivableDecrease);
+      const impact = effect.type === 'custom_order_receivable' ? increase : -Math.min(runningDue, decrease);
+      if (effect.type === 'custom_order_receivable') {
+        runningDue = roundFixedMoney(runningDue + increase);
+        totalCreditDue = roundFixedMoney(totalCreditDue + increase);
+      } else {
+        const applied = Math.min(runningDue, decrease);
+        runningDue = roundFixedMoney(Math.max(0, runningDue - applied));
+        totalPaymentsReceived = roundFixedMoney(totalPaymentsReceived + decrease);
+        if (decrease > applied) {
+          const created = roundFixedMoney(decrease - applied);
+          runningStoreCredit = roundFixedMoney(runningStoreCredit + created);
+          totalStoreCreditCreated = roundFixedMoney(totalStoreCreditCreated + created);
+        }
+      }
+      rows.push({
+        id: effect.id,
+        date: effect.date,
+        type: effect.type === 'custom_order_receivable' ? 'Custom Order' : 'Order Payment',
+        ref: effect.orderId.slice(-6),
+        description: effect.description || effect.productName || 'Custom order ledger effect',
+        saleTotal: effect.type === 'custom_order_receivable' ? increase : 0,
+        paidNow: 0,
+        creditDue: effect.type === 'custom_order_receivable' ? increase : 0,
+        paymentReceived: effect.type === 'custom_order_payment' ? decrease : 0,
+        storeCreditUsed: 0,
+        storeCreditCreated: effect.type === 'custom_order_payment' ? Math.max(0, decrease - Math.max(0, -impact)) : 0,
+        receivableImpact: impact,
+        runningDue: roundFixedMoney(runningDue),
+        runningStoreCredit: roundFixedMoney(runningStoreCredit),
+        netReceivable: roundFixedMoney(Math.max(0, runningDue - runningStoreCredit)),
+        warnings: rowWarnings,
+      });
+      return;
+    }
+
+    const tx = event.tx;
+    const txKind = detectHistoricalTransactionType(tx);
+    const amount = positiveFixedMoney(Math.abs(Number(tx.total || 0)));
+    const ref = (tx as any).invoiceNo || (tx as any).receiptNo || (tx as any).creditNoteNo || tx.id.slice(-6);
+    const historical = isHistoricalPreviewRow(tx);
+    if (duplicateIds.has(tx.id)) {
+      rowWarnings.push(addWarning('possible_duplicate_historical_live_transaction', `Possible duplicate historical/live transaction for ${formatINRPrecise(amount)} on ${new Date(tx.date).toLocaleDateString()}.`, tx.id));
+    }
+
+    if (txKind === 'sale') {
+      const settlement = historical ? getHistoricalAwareSaleSettlement(tx) : getSaleSettlementBreakdown(tx);
+      const explicitHistoricalDue = historical ? getExplicitHistoricalDue(tx) : null;
+      const saleTotal = amount;
+      const paidNow = positiveFixedMoney(settlement.cashPaid + settlement.onlinePaid);
+      const cashPaidHistorical = isCashPaidHistoricalSale(tx, settlement, amount);
+      const matchingOpenDue = cashPaidHistorical && Math.abs(runningDue - amount) <= 1;
+      const storeCreditRequested = positiveFixedMoney(tx.storeCreditUsed);
+      const storeCreditUsed = Math.min(storeCreditRequested, runningStoreCredit, amount);
+      if (storeCreditRequested > runningStoreCredit + 0.01) {
+        rowWarnings.push(addWarning('store_credit_used_more_than_available', `Store credit used ${formatINRPrecise(storeCreditRequested)} is more than available ${formatINRPrecise(runningStoreCredit)} at this point.`, tx.id));
+      }
+
+      if (historical && cashPaidHistorical && runningDue > 0.01) {
+        const message = matchingOpenDue
+          ? `Possible payment misclassified as sale: historical cash-paid sale ${formatINRPrecise(amount)} matches previous open due and is treated as payment in this preview only.`
+          : `Historical cash-paid sale ${formatINRPrecise(amount)} may actually be payment; due impact remains 0 because it does not exactly match the previous open due.`;
+        rowWarnings.push(addWarning('historical_cash_paid_sale_may_be_payment', message, tx.id));
+      }
+
+      if (matchingOpenDue) {
+        possibleMisclassifiedPayments += 1;
+        const applied = Math.min(runningDue, amount);
+        runningDue = roundFixedMoney(Math.max(0, runningDue - applied));
+        totalPaymentsReceived = roundFixedMoney(totalPaymentsReceived + amount);
+        rows.push({
+          id: tx.id,
+          date: tx.date,
+          type: 'Payment Preview',
+          ref,
+          description: `Preview reclassified historical cash-paid sale as credit received/payment. Original type is unchanged.`,
+          saleTotal,
+          paidNow,
+          creditDue: 0,
+          paymentReceived: amount,
+          storeCreditUsed: 0,
+          storeCreditCreated: Math.max(0, amount - applied),
+          receivableImpact: -applied,
+          runningDue: roundFixedMoney(runningDue),
+          runningStoreCredit: roundFixedMoney(runningStoreCredit),
+          netReceivable: roundFixedMoney(Math.max(0, runningDue - runningStoreCredit)),
+          warnings: rowWarnings,
+        });
+        processed.push(tx);
+        return;
+      }
+
+      const creditDue = historical
+        ? positiveFixedMoney(explicitHistoricalDue ?? settlement.creditDue)
+        : positiveFixedMoney(settlement.creditDue);
+      if (historical && amount > 0 && creditDue <= 0.01 && paidNow <= 0.01) {
+        rowWarnings.push(addWarning('historical_sale_total_without_due_fields', `Historical sale has total ${formatINRPrecise(amount)} but no due/cash/online fields; receivable impact is 0 in this preview.`, tx.id));
+      }
+      runningStoreCredit = roundFixedMoney(Math.max(0, runningStoreCredit - storeCreditUsed));
+      runningDue = roundFixedMoney(runningDue + creditDue);
+      totalSales = roundFixedMoney(totalSales + saleTotal);
+      totalPaidNow = roundFixedMoney(totalPaidNow + paidNow);
+      totalCreditDue = roundFixedMoney(totalCreditDue + creditDue);
+      totalStoreCreditUsed = roundFixedMoney(totalStoreCreditUsed + storeCreditUsed);
+      rows.push({
+        id: tx.id,
+        date: tx.date,
+        type: historical ? 'Historical Sale' : 'Sale',
+        ref,
+        description: `${getTransactionProductSummary(tx)} • Receivable impact is credit due only.`,
+        saleTotal,
+        paidNow,
+        creditDue,
+        paymentReceived: 0,
+        storeCreditUsed,
+        storeCreditCreated: 0,
+        receivableImpact: creditDue,
+        runningDue: roundFixedMoney(runningDue),
+        runningStoreCredit: roundFixedMoney(runningStoreCredit),
+        netReceivable: roundFixedMoney(Math.max(0, runningDue - runningStoreCredit)),
+        warnings: rowWarnings,
+      });
+      processed.push(tx);
+      return;
+    }
+
+    if (txKind === 'payment') {
+      const applied = Math.min(runningDue, amount);
+      const creditCreated = roundFixedMoney(Math.max(0, amount - applied));
+      const savedApplied = positiveFixedMoney((tx as any).paymentAppliedToReceivable);
+      if (savedApplied > runningDue + 0.01) {
+        rowWarnings.push(addWarning('payment_applied_more_than_running_due', `Saved payment applied ${formatINRPrecise(savedApplied)} is more than running due ${formatINRPrecise(runningDue)} before this row; preview caps to available due.`, tx.id));
+      }
+      runningDue = roundFixedMoney(Math.max(0, runningDue - applied));
+      runningStoreCredit = roundFixedMoney(runningStoreCredit + creditCreated);
+      totalPaymentsReceived = roundFixedMoney(totalPaymentsReceived + amount);
+      totalStoreCreditCreated = roundFixedMoney(totalStoreCreditCreated + creditCreated);
+      rows.push({
+        id: tx.id,
+        date: tx.date,
+        type: historical ? 'Historical Payment' : 'Payment',
+        ref,
+        description: `${tx.paymentMethod || 'Cash'} payment; excess becomes store credit.`,
+        saleTotal: 0,
+        paidNow: 0,
+        creditDue: 0,
+        paymentReceived: amount,
+        storeCreditUsed: 0,
+        storeCreditCreated: creditCreated,
+        receivableImpact: -applied,
+        runningDue: roundFixedMoney(runningDue),
+        runningStoreCredit: roundFixedMoney(runningStoreCredit),
+        netReceivable: roundFixedMoney(Math.max(0, runningDue - runningStoreCredit)),
+        warnings: rowWarnings,
+      });
+      processed.push(tx);
+      return;
+    }
+
+    if (txKind === 'return') {
+      const allocation = getCanonicalReturnAllocation(tx, processed, runningDue);
+      const dueReduction = Math.min(runningDue, positiveFixedMoney(allocation.dueReduction));
+      const storeCreditCreated = positiveFixedMoney(allocation.storeCreditIncrease);
+      runningDue = roundFixedMoney(Math.max(0, runningDue - dueReduction));
+      runningStoreCredit = roundFixedMoney(runningStoreCredit + storeCreditCreated);
+      totalStoreCreditCreated = roundFixedMoney(totalStoreCreditCreated + storeCreditCreated);
+      rows.push({
+        id: tx.id,
+        date: tx.date,
+        type: 'Return',
+        ref,
+        description: `${getTransactionProductSummary(tx)} • Return reduces receivable by due-reduction only.`,
+        saleTotal: 0,
+        paidNow: 0,
+        creditDue: 0,
+        paymentReceived: 0,
+        storeCreditUsed: 0,
+        storeCreditCreated,
+        receivableImpact: -dueReduction,
+        runningDue: roundFixedMoney(runningDue),
+        runningStoreCredit: roundFixedMoney(runningStoreCredit),
+        netReceivable: roundFixedMoney(Math.max(0, runningDue - runningStoreCredit)),
+        warnings: rowWarnings,
+      });
+      processed.push(tx);
+      return;
+    }
+
+    if (txKind === 'customer_credit' || txKind === 'customer_cash_out') {
+      const storeCreditUsed = txKind === 'customer_cash_out' ? Math.min(positiveFixedMoney((tx as any).storeCreditUsed || amount), runningStoreCredit, amount) : 0;
+      const impact = txKind === 'customer_credit' ? amount : Math.max(0, amount - storeCreditUsed);
+      if (txKind === 'customer_cash_out' && positiveFixedMoney((tx as any).storeCreditUsed || amount) > runningStoreCredit + 0.01) {
+        rowWarnings.push(addWarning('store_credit_used_more_than_available', `Cash-out store credit use is more than available ${formatINRPrecise(runningStoreCredit)}; uncovered amount becomes receivable.`, tx.id));
+      }
+      runningStoreCredit = roundFixedMoney(Math.max(0, runningStoreCredit - storeCreditUsed));
+      runningDue = roundFixedMoney(runningDue + impact);
+      rows.push({
+        id: tx.id,
+        date: tx.date,
+        type: txKind === 'customer_credit' ? 'Credit Adjustment' : 'Customer Cash Out',
+        ref,
+        description: txKind === 'customer_credit' ? 'Manual receivable increase.' : 'Cash given to customer; store credit used first.',
+        saleTotal: 0,
+        paidNow: 0,
+        creditDue: txKind === 'customer_credit' ? amount : 0,
+        paymentReceived: 0,
+        storeCreditUsed,
+        storeCreditCreated: 0,
+        receivableImpact: impact,
+        runningDue: roundFixedMoney(runningDue),
+        runningStoreCredit: roundFixedMoney(runningStoreCredit),
+        netReceivable: roundFixedMoney(Math.max(0, runningDue - runningStoreCredit)),
+        warnings: rowWarnings,
+      });
+    }
+  });
+
+  const oldCurrentDue = positiveFixedMoney(customer.totalDue);
+  const oldStoreCredit = positiveFixedMoney(customer.storeCredit);
+  const oldNetReceivable = roundFixedMoney(Math.max(0, oldCurrentDue - oldStoreCredit));
+  const fixedCurrentDue = roundFixedMoney(Math.max(0, runningDue));
+  const fixedStoreCredit = roundFixedMoney(Math.max(0, runningStoreCredit));
+  const fixedNetReceivable = roundFixedMoney(Math.max(0, fixedCurrentDue - fixedStoreCredit));
+  const dueDifference = roundFixedMoney(fixedCurrentDue - oldCurrentDue);
+  const storeCreditDifference = roundFixedMoney(fixedStoreCredit - oldStoreCredit);
+  const netDifference = roundFixedMoney(fixedNetReceivable - oldNetReceivable);
+
+  if (Math.abs(dueDifference) > 0.01) {
+    warnings.push({
+      code: 'stored_customer_total_due_differs',
+      message: `Stored current dues ${formatINRPrecise(oldCurrentDue)} differ from fixed recalculated due ${formatINRPrecise(fixedCurrentDue)}.`,
+    });
+  }
+  if (Math.abs(storeCreditDifference) > 0.01) {
+    warnings.push({
+      code: 'stored_customer_store_credit_differs',
+      message: `Stored store credit ${formatINRPrecise(oldStoreCredit)} differs from fixed recalculated store credit ${formatINRPrecise(fixedStoreCredit)}.`,
+    });
+  }
+
+  return {
+    customer,
+    rows,
+    summary: {
+      oldCurrentDue,
+      oldStoreCredit,
+      oldNetReceivable,
+      fixedCurrentDue,
+      fixedStoreCredit,
+      fixedNetReceivable,
+      difference: netDifference,
+      totalSales,
+      totalPaidNow,
+      totalCreditDue,
+      totalPaymentsReceived,
+      totalStoreCreditUsed,
+      totalStoreCreditCreated,
+      possibleMisclassifiedPayments,
+    },
+    warnings,
+    differences: {
+      currentDue: dueDifference,
+      storeCredit: storeCreditDifference,
+      netReceivable: netDifference,
+    },
+  };
+};
+
 export default function Customers() {
   const CUSTOMERS_PAGE_SIZE = 15;
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -128,6 +562,8 @@ export default function Customers() {
   const [paymentAuditResult, setPaymentAuditResult] = useState<ReturnType<typeof auditCustomerPaymentAllocations> | null>(null);
   const [updatedViewOpen, setUpdatedViewOpen] = useState(false);
   const [updatedViewPreview, setUpdatedViewPreview] = useState<ReturnType<typeof previewCustomerRepairedAllocationView> | null>(null);
+  const [showFixedButtonView, setShowFixedButtonView] = useState(false);
+  const [expandedFixedCustomerIds, setExpandedFixedCustomerIds] = useState<string[]>([]);
   const [customerActionType, setCustomerActionType] = useState<'payment' | 'customer_cash_out' | 'customer_credit'>('payment');
   const [customerActionDateTime, setCustomerActionDateTime] = useState('');
   const [customerActionAmount, setCustomerActionAmount] = useState('');
@@ -231,6 +667,35 @@ export default function Customers() {
     () => filteredData.displayCustomers.slice((customerPage - 1) * CUSTOMERS_PAGE_SIZE, customerPage * CUSTOMERS_PAGE_SIZE),
     [filteredData.displayCustomers, customerPage]
   );
+
+  const fixedCustomerLedgerPreviews = useMemo(() => {
+    return canonicalCustomers.map((customer) => buildFixedCustomerLedgerPreview(customer, transactions, upfrontOrders));
+  }, [canonicalCustomers, transactions, upfrontOrders]);
+
+  const filteredFixedCustomerLedgerPreviews = useMemo(() => {
+    const lowerQ = searchQuery.trim().toLowerCase();
+    return fixedCustomerLedgerPreviews
+      .filter((preview) => {
+        const customer = preview.customer;
+        if (!lowerQ) return true;
+        return customer.name.toLowerCase().includes(lowerQ) || customer.phone.includes(lowerQ);
+      })
+      .sort((a, b) => Math.abs(b.summary.difference) - Math.abs(a.summary.difference) || b.warnings.length - a.warnings.length || a.customer.name.localeCompare(b.customer.name));
+  }, [fixedCustomerLedgerPreviews, searchQuery]);
+
+  const fixedButtonViewSummary = useMemo(() => {
+    return filteredFixedCustomerLedgerPreviews.reduce((summary, preview) => ({
+      totalOldReceivable: roundFixedMoney(summary.totalOldReceivable + preview.summary.oldNetReceivable),
+      totalFixedReceivable: roundFixedMoney(summary.totalFixedReceivable + preview.summary.fixedNetReceivable),
+      totalDifference: roundFixedMoney(summary.totalDifference + preview.summary.difference),
+      customersWithWarnings: summary.customersWithWarnings + (preview.warnings.length > 0 ? 1 : 0),
+      possibleMisclassifiedPayments: summary.possibleMisclassifiedPayments + preview.summary.possibleMisclassifiedPayments,
+    }), { totalOldReceivable: 0, totalFixedReceivable: 0, totalDifference: 0, customersWithWarnings: 0, possibleMisclassifiedPayments: 0 });
+  }, [filteredFixedCustomerLedgerPreviews]);
+
+  const toggleFixedCustomerExpanded = (customerId: string) => {
+    setExpandedFixedCustomerIds((prev) => prev.includes(customerId) ? prev.filter((id) => id !== customerId) : [...prev, customerId]);
+  };
 
   useEffect(() => {
     setCustomerPage(1);
@@ -850,6 +1315,14 @@ export default function Customers() {
                   <Button onClick={() => setIsAddModalOpen(true)} size="sm" className="h-8 md:h-9 bg-primary shadow-sm">
                       <Plus className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Add Customer</span>
                   </Button>
+                  <Button
+                      onClick={() => setShowFixedButtonView((prev) => !prev)}
+                      variant={showFixedButtonView ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-8 md:h-9 shadow-sm"
+                  >
+                      <Activity className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Fixed Button View</span>
+                  </Button>
                   <Button onClick={() => { setExportType('dues_report'); setIsExportModalOpen(true); }} variant="outline" size="sm" className="h-8 md:h-9 shadow-sm">
                       <FileText className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Dues Report</span>
                   </Button>
@@ -891,6 +1364,118 @@ export default function Customers() {
 
 
 
+      {showFixedButtonView ? (
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-4 shadow-sm">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Activity className="h-5 w-5 text-blue-700" />
+                  <h2 className="text-lg font-black text-blue-950">Fixed Button View</h2>
+                  <Badge className="bg-blue-100 text-blue-800">Read-only preview</Badge>
+                </div>
+                <p className="mt-1 text-xs text-blue-900/80">Uses a separate chronological receivable replay. It does not save, repair, migrate, or update customer data.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Old Receivable</div><div className="font-black">₹{formatMoneyWhole(fixedButtonViewSummary.totalOldReceivable)}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Fixed Receivable</div><div className="font-black text-blue-700">₹{formatMoneyWhole(fixedButtonViewSummary.totalFixedReceivable)}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${fixedButtonViewSummary.totalDifference === 0 ? 'text-slate-700' : fixedButtonViewSummary.totalDifference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(fixedButtonViewSummary.totalDifference)}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-amber-700">{fixedButtonViewSummary.customersWithWarnings}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Possible Payments</div><div className="font-black text-purple-700">{fixedButtonViewSummary.possibleMisclassifiedPayments}</div></div>
+              </div>
+            </div>
+          </div>
+
+          {filteredFixedCustomerLedgerPreviews.length === 0 ? (
+            <div className="rounded-xl border bg-white p-6 text-center text-sm text-muted-foreground">No customers match the current search.</div>
+          ) : filteredFixedCustomerLedgerPreviews.map((preview) => {
+            const expanded = expandedFixedCustomerIds.includes(preview.customer.id);
+            return (
+              <Card key={preview.customer.id} className="overflow-hidden border-slate-200 shadow-sm">
+                <CardHeader className="bg-white pb-3">
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="min-w-0">
+                      <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+                        <span>{preview.customer.name}</span>
+                        {preview.warnings.length > 0 && <Badge className="bg-amber-100 text-amber-800">{preview.warnings.length} warning{preview.warnings.length === 1 ? '' : 's'}</Badge>}
+                      </CardTitle>
+                      <div className="mt-1 text-xs text-muted-foreground">{preview.customer.phone || 'No phone'} • Difference: <span className={preview.summary.difference === 0 ? 'text-slate-700' : preview.summary.difference > 0 ? 'text-red-700 font-bold' : 'text-emerald-700 font-bold'}>₹{formatMoneyWhole(preview.summary.difference)}</span></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-8">
+                      <div className="rounded-lg border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Old Due</div><b>₹{formatMoneyWhole(preview.summary.oldCurrentDue)}</b></div>
+                      <div className="rounded-lg border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Old SC</div><b>₹{formatMoneyWhole(preview.summary.oldStoreCredit)}</b></div>
+                      <div className="rounded-lg border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Old Net</div><b>₹{formatMoneyWhole(preview.summary.oldNetReceivable)}</b></div>
+                      <div className="rounded-lg border bg-blue-50 p-2"><div className="text-[10px] uppercase text-blue-700">Fixed Due</div><b className="text-blue-800">₹{formatMoneyWhole(preview.summary.fixedCurrentDue)}</b></div>
+                      <div className="rounded-lg border bg-emerald-50 p-2"><div className="text-[10px] uppercase text-emerald-700">Fixed SC</div><b className="text-emerald-800">₹{formatMoneyWhole(preview.summary.fixedStoreCredit)}</b></div>
+                      <div className="rounded-lg border bg-indigo-50 p-2"><div className="text-[10px] uppercase text-indigo-700">Fixed Net</div><b className="text-indigo-800">₹{formatMoneyWhole(preview.summary.fixedNetReceivable)}</b></div>
+                      <div className="rounded-lg border bg-amber-50 p-2"><div className="text-[10px] uppercase text-amber-700">Warnings</div><b className="text-amber-800">{preview.warnings.length}</b></div>
+                      <Button size="sm" variant="outline" className="h-full min-h-12" onClick={() => toggleFixedCustomerExpanded(preview.customer.id)}>{expanded ? 'Hide Ledger' : 'Show Ledger'}</Button>
+                    </div>
+                  </div>
+                  {preview.warnings.length > 0 && (
+                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                      <div className="font-black uppercase tracking-wide">Review notes</div>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {preview.warnings.slice(0, 4).map((warning, idx) => <li key={`${warning.code}-${warning.transactionId || idx}`}>{warning.message}</li>)}
+                        {preview.warnings.length > 4 && <li>{preview.warnings.length - 4} more warning(s) in expanded ledger.</li>}
+                      </ul>
+                    </div>
+                  )}
+                </CardHeader>
+                {expanded && (
+                  <CardContent className="border-t bg-slate-50/50 p-0">
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1380px] text-xs">
+                        <thead className="bg-slate-100 text-slate-700">
+                          <tr>
+                            <th className="p-2 text-left">Date</th>
+                            <th className="p-2 text-left">Type</th>
+                            <th className="p-2 text-left">Ref</th>
+                            <th className="p-2 text-left">Description</th>
+                            <th className="p-2 text-right">Sale Total</th>
+                            <th className="p-2 text-right">Paid Now</th>
+                            <th className="p-2 text-right">Credit Due</th>
+                            <th className="p-2 text-right">Payment Received</th>
+                            <th className="p-2 text-right">Store Credit Used</th>
+                            <th className="p-2 text-right">Store Credit Created</th>
+                            <th className="p-2 text-right">Receivable Impact</th>
+                            <th className="p-2 text-right">Running Due</th>
+                            <th className="p-2 text-right">Running Store Credit</th>
+                            <th className="p-2 text-right">Net Receivable</th>
+                            <th className="p-2 text-left">Warnings</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white">
+                          {preview.rows.map((row) => (
+                            <tr key={row.id} className={`border-t align-top ${row.warnings.length ? 'bg-amber-50/50' : ''}`}>
+                              <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td>
+                              <td className="p-2 whitespace-nowrap"><Badge className="bg-slate-100 text-slate-700">{row.type}</Badge></td>
+                              <td className="p-2 whitespace-nowrap">{row.ref}</td>
+                              <td className="p-2 min-w-[220px]">{row.description}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.saleTotal ? `₹${formatMoneyWhole(row.saleTotal)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.paidNow ? `₹${formatMoneyWhole(row.paidNow)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.creditDue ? `₹${formatMoneyWhole(row.creditDue)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.paymentReceived ? `₹${formatMoneyWhole(row.paymentReceived)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.storeCreditUsed ? `₹${formatMoneyWhole(row.storeCreditUsed)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.storeCreditCreated ? `₹${formatMoneyWhole(row.storeCreditCreated)}` : '—'}</td>
+                              <td className={`p-2 text-right whitespace-nowrap font-bold ${row.receivableImpact < 0 ? 'text-emerald-700' : row.receivableImpact > 0 ? 'text-orange-700' : 'text-slate-500'}`}>{row.receivableImpact ? `₹${formatMoneyWhole(row.receivableImpact)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap font-semibold">₹{formatMoneyWhole(row.runningDue)}</td>
+                              <td className="p-2 text-right whitespace-nowrap font-semibold text-emerald-700">₹{formatMoneyWhole(row.runningStoreCredit)}</td>
+                              <td className="p-2 text-right whitespace-nowrap font-black text-blue-700">₹{formatMoneyWhole(row.netReceivable)}</td>
+                              <td className="p-2 min-w-[220px] text-amber-800">{row.warnings.length ? row.warnings.map((warning) => <div key={warning}>• {warning}</div>) : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      ) : (
+        <>
       <div className="border rounded-xl overflow-x-auto bg-white">
         <table className="w-full text-sm">
           <thead className="bg-muted/40">
@@ -965,6 +1550,8 @@ export default function Customers() {
           <span className="text-xs text-muted-foreground">Page {customerPage} of {customerTotalPages}</span>
           <Button variant="outline" size="sm" onClick={() => setCustomerPage((prev) => Math.min(customerTotalPages, prev + 1))} disabled={customerPage === customerTotalPages}>Next</Button>
         </div>
+      )}
+        </>
       )}
 
       {isAddModalOpen && (
