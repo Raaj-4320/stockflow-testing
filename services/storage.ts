@@ -193,6 +193,71 @@ const writeAuditEvent = async (operation: AuditOperation, payload: Record<string
 const STOCKFLOW_DATA_AUDIT_PREFIX = '[StockFlowDataAudit]';
 let legacyRootProductsCache: Product[] = [];
 let subcollectionProductsCache: Product[] = [];
+let legacyRootPurchaseOrdersCache: PurchaseOrder[] = [];
+let subcollectionPurchaseOrdersCache: PurchaseOrder[] = [];
+let legacyRootPurchasePartiesCache: PurchaseParty[] = [];
+let subcollectionPurchasePartiesCache: PurchaseParty[] = [];
+let legacyRootSupplierPaymentsCache: SupplierPaymentLedgerEntry[] = [];
+let subcollectionSupplierPaymentsCache: SupplierPaymentLedgerEntry[] = [];
+let legacyRootPartyCreditLedgerCache: PartyCreditLedgerEntry[] = [];
+let subcollectionPartyCreditLedgerCache: PartyCreditLedgerEntry[] = [];
+let legacyRootPurchaseReceiptPostingsCache: PurchaseReceiptPosting[] = [];
+let subcollectionPurchaseReceiptPostingsCache: PurchaseReceiptPosting[] = [];
+
+export const mergeByIdPreferPrimary = <T extends { id?: string }>(primaryRows: T[] = [], fallbackRows: T[] = []): T[] => {
+  const primaryIds = new Set(primaryRows.map((row) => row?.id).filter((id): id is string => Boolean(id)));
+  const fallbackMissingFromPrimary = fallbackRows.filter((row) => !row?.id || !primaryIds.has(row.id));
+  return [...primaryRows, ...fallbackMissingFromPrimary];
+};
+
+const countFallbackRowsMissingFromPrimary = <T extends { id?: string }>(primaryRows: T[] = [], fallbackRows: T[] = []) => {
+  const primaryIds = new Set(primaryRows.map((row) => row?.id).filter((id): id is string => Boolean(id)));
+  return fallbackRows.filter((row) => !row?.id || !primaryIds.has(row.id)).length;
+};
+
+const sortPurchaseOrdersDesc = (orders: PurchaseOrder[] = []) => [...orders]
+  .sort((a, b) => new Date(b.orderDate || b.createdAt || '').getTime() - new Date(a.orderDate || a.createdAt || '').getTime());
+
+const sortSupplierPaymentsDesc = (payments: SupplierPaymentLedgerEntry[] = []) => [...payments]
+  .sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime());
+
+const sortPartyCreditLedgerDesc = (credits: PartyCreditLedgerEntry[] = []) => [...credits]
+  .sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime());
+
+const sortPurchaseReceiptPostingsDesc = (postings: PurchaseReceiptPosting[] = []) => [...postings]
+  .sort((a, b) => new Date(b.postedAt || '').getTime() - new Date(a.postedAt || '').getTime());
+
+const logEmergencyPurchaseFallbackIfNeeded = (uid: string, source: string) => {
+  const missingRootOrders = countFallbackRowsMissingFromPrimary(subcollectionPurchaseOrdersCache, legacyRootPurchaseOrdersCache);
+  if (legacyRootPurchaseOrdersCache.length > subcollectionPurchaseOrdersCache.length && missingRootOrders > 0) {
+    console.info(`Emergency purchase fallback active: using ${missingRootOrders} root purchase orders missing from subcollection.`);
+    logStockFlowDataAudit('purchaseOrders.emergency_root_fallback', {
+      uid,
+      source,
+      rootPurchaseOrdersCount: legacyRootPurchaseOrdersCache.length,
+      subcollectionPurchaseOrdersCount: subcollectionPurchaseOrdersCache.length,
+      rootOnlyPurchaseOrdersCount: missingRootOrders,
+    });
+  }
+};
+
+const buildMergedPurchaseHydrationState = (uid: string, source: string) => {
+  const purchaseOrders = sortPurchaseOrdersDesc(mergeByIdPreferPrimary(subcollectionPurchaseOrdersCache, legacyRootPurchaseOrdersCache));
+  const purchaseParties = mergeByIdPreferPrimary(subcollectionPurchasePartiesCache, legacyRootPurchasePartiesCache)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const supplierPayments = sortSupplierPaymentsDesc(mergeByIdPreferPrimary(subcollectionSupplierPaymentsCache, legacyRootSupplierPaymentsCache));
+  const partyCreditLedger = sortPartyCreditLedgerDesc(mergeByIdPreferPrimary(subcollectionPartyCreditLedgerCache, legacyRootPartyCreditLedgerCache));
+  const purchaseReceiptPostings = sortPurchaseReceiptPostingsDesc(mergeByIdPreferPrimary(subcollectionPurchaseReceiptPostingsCache, legacyRootPurchaseReceiptPostingsCache));
+  logEmergencyPurchaseFallbackIfNeeded(uid, source);
+  return { purchaseOrders, purchaseParties, supplierPayments, partyCreditLedger, purchaseReceiptPostings };
+};
+
+const applyMergedPurchaseHydrationToMemory = (uid: string, source: string) => {
+  const mergedPurchaseState = buildMergedPurchaseHydrationState(uid, source);
+  memoryState = { ...memoryState, ...mergedPurchaseState };
+  emitLocalStorageUpdate();
+  return mergedPurchaseState;
+};
 
 const getProductAuditSample = (products: Product[] = []) => products.slice(0, 3).map((product) => ({
   id: product.id,
@@ -243,6 +308,7 @@ const getPurchaseOrdersCollectionRef = (uid: string) => collection(db!, 'stores'
 const getPurchasePartiesCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseParties');
 const getSupplierPaymentsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'supplierPayments');
 const getPartyCreditLedgerCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'partyCreditLedger');
+const getPurchaseReceiptPostingsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseReceiptPostings');
 
 const ROOT_STORE_BLOCKED_ARRAY_FIELDS = [
   'products',
@@ -2290,6 +2356,7 @@ let unsubscribePurchaseOrdersSnapshot: any = null;
 let unsubscribePurchasePartiesSnapshot: any = null;
 let unsubscribeSupplierPaymentsSnapshot: any = null;
 let unsubscribePartyCreditLedgerSnapshot: any = null;
+let unsubscribePurchaseReceiptPostingsSnapshot: any = null;
 
 
 const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
@@ -2330,6 +2397,10 @@ const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
     unsubscribePartyCreditLedgerSnapshot();
     unsubscribePartyCreditLedgerSnapshot = null;
   }
+  if (unsubscribePurchaseReceiptPostingsSnapshot) {
+    unsubscribePurchaseReceiptPostingsSnapshot();
+    unsubscribePurchaseReceiptPostingsSnapshot = null;
+  }
 };
 
 const resetCloudStateForUser = (uid: string | null, reason: string) => {
@@ -2341,6 +2412,16 @@ const resetCloudStateForUser = (uid: string | null, reason: string) => {
   isCustomerProductStatsBackfillComplete = false;
   legacyRootProductsCache = [];
   subcollectionProductsCache = [];
+  legacyRootPurchaseOrdersCache = [];
+  subcollectionPurchaseOrdersCache = [];
+  legacyRootPurchasePartiesCache = [];
+  subcollectionPurchasePartiesCache = [];
+  legacyRootSupplierPaymentsCache = [];
+  subcollectionSupplierPaymentsCache = [];
+  legacyRootPartyCreditLedgerCache = [];
+  subcollectionPartyCreditLedgerCache = [];
+  legacyRootPurchaseReceiptPostingsCache = [];
+  subcollectionPurchaseReceiptPostingsCache = [];
   activeSyncUid = uid;
   syncGeneration += 1;
   syncInitInFlight = false;
@@ -2494,61 +2575,52 @@ const syncFromCloud = async (): Promise<void> => {
             logStockFlowError('deletedTransactions.listener_error', error, { uid: user.uid });
         });
         unsubscribePurchaseOrdersSnapshot = onSnapshot(getPurchaseOrdersCollectionRef(user.uid), (purchaseOrdersSnap) => {
-            const subcollectionOrders = purchaseOrdersSnap.docs
+            subcollectionPurchaseOrdersCache = purchaseOrdersSnap.docs
               .map(docItem => ({ ...(docItem.data() as PurchaseOrder), id: docItem.id }));
-            const legacyRootOrders = Array.isArray(memoryState.purchaseOrders) ? memoryState.purchaseOrders : [];
-            const merged = new Map<string, PurchaseOrder>();
-            legacyRootOrders.forEach((order) => merged.set(order.id, order));
-            subcollectionOrders.forEach((order) => merged.set(order.id, order));
-            const purchaseOrders = Array.from(merged.values())
-              .sort((a, b) => new Date(b.orderDate || b.createdAt || '').getTime() - new Date(a.orderDate || a.createdAt || '').getTime());
-            memoryState = { ...memoryState, purchaseOrders };
-            emitLocalStorageUpdate();
+            applyMergedPurchaseHydrationToMemory(user.uid, 'purchaseOrders_subcollection_listener');
         }, (error) => {
             logStockFlowError('purchaseOrders.listener_error', error, { uid: user.uid });
         });
         unsubscribePurchasePartiesSnapshot = onSnapshot(getPurchasePartiesCollectionRef(user.uid), (purchasePartiesSnap) => {
-            const subcollectionParties = purchasePartiesSnap.docs
+            subcollectionPurchasePartiesCache = purchasePartiesSnap.docs
               .map(docItem => ({ ...(docItem.data() as PurchaseParty), id: docItem.id }));
-            const legacyRootParties = Array.isArray(memoryState.purchaseParties) ? memoryState.purchaseParties : [];
-            const merged = new Map<string, PurchaseParty>();
-            legacyRootParties.forEach((party) => merged.set(party.id, party));
-            subcollectionParties.forEach((party) => merged.set(party.id, party));
-            memoryState = { ...memoryState, purchaseParties: Array.from(merged.values()).sort((a, b) => (a.name || '').localeCompare(b.name || '')) };
-            emitLocalStorageUpdate();
+            applyMergedPurchaseHydrationToMemory(user.uid, 'purchaseParties_subcollection_listener');
         }, (error) => {
             logStockFlowError('purchaseParties.listener_error', error, { uid: user.uid });
         });
         unsubscribeSupplierPaymentsSnapshot = onSnapshot(getSupplierPaymentsCollectionRef(user.uid), (supplierPaymentsSnap) => {
-            const subcollectionPayments = supplierPaymentsSnap.docs
+            subcollectionSupplierPaymentsCache = supplierPaymentsSnap.docs
               .map(docItem => ({ ...(docItem.data() as SupplierPaymentLedgerEntry), id: docItem.id }));
-            const legacyRootPayments = Array.isArray(memoryState.supplierPayments) ? memoryState.supplierPayments : [];
-            const merged = new Map<string, SupplierPaymentLedgerEntry>();
-            legacyRootPayments.forEach((payment) => merged.set(payment.id, payment));
-            subcollectionPayments.forEach((payment) => merged.set(payment.id, payment));
-            memoryState = { ...memoryState, supplierPayments: Array.from(merged.values()).sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime()) };
-            emitLocalStorageUpdate();
+            applyMergedPurchaseHydrationToMemory(user.uid, 'supplierPayments_subcollection_listener');
         }, (error) => {
             logStockFlowError('supplierPayments.listener_error', error, { uid: user.uid });
         });
         unsubscribePartyCreditLedgerSnapshot = onSnapshot(getPartyCreditLedgerCollectionRef(user.uid), (partyCreditSnap) => {
-            const subcollectionCredits = partyCreditSnap.docs
+            subcollectionPartyCreditLedgerCache = partyCreditSnap.docs
               .map(docItem => ({ ...(docItem.data() as PartyCreditLedgerEntry), id: docItem.id }));
-            const legacyRootCredits = Array.isArray(memoryState.partyCreditLedger) ? memoryState.partyCreditLedger : [];
-            const merged = new Map<string, PartyCreditLedgerEntry>();
-            legacyRootCredits.forEach((entry) => merged.set(entry.id, entry));
-            subcollectionCredits.forEach((entry) => merged.set(entry.id, entry));
-            memoryState = { ...memoryState, partyCreditLedger: Array.from(merged.values()).sort((a, b) => new Date(b.paidAt || b.createdAt || '').getTime() - new Date(a.paidAt || a.createdAt || '').getTime()) };
-            emitLocalStorageUpdate();
+            applyMergedPurchaseHydrationToMemory(user.uid, 'partyCreditLedger_subcollection_listener');
         }, (error) => {
             logStockFlowError('partyCreditLedger.listener_error', error, { uid: user.uid });
+        });
+        unsubscribePurchaseReceiptPostingsSnapshot = onSnapshot(getPurchaseReceiptPostingsCollectionRef(user.uid), (purchaseReceiptPostingsSnap) => {
+            subcollectionPurchaseReceiptPostingsCache = purchaseReceiptPostingsSnap.docs
+              .map(docItem => ({ ...(docItem.data() as PurchaseReceiptPosting), id: docItem.id }));
+            applyMergedPurchaseHydrationToMemory(user.uid, 'purchaseReceiptPostings_subcollection_listener');
+        }, (error) => {
+            logStockFlowError('purchaseReceiptPostings.listener_error', error, { uid: user.uid });
         });
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
             if (docSnap.exists()) {
                 storeDocumentExists = true;
                 const cloudData = docSnap.data() as AppState;
                 legacyRootProductsCache = Array.isArray(cloudData.products) ? cloudData.products.filter(p => !((p as any).isDeleted)) : [];
+                legacyRootPurchaseOrdersCache = Array.isArray(cloudData.purchaseOrders) ? cloudData.purchaseOrders : [];
+                legacyRootPurchasePartiesCache = Array.isArray(cloudData.purchaseParties) ? cloudData.purchaseParties : [];
+                legacyRootSupplierPaymentsCache = Array.isArray(cloudData.supplierPayments) ? cloudData.supplierPayments : [];
+                legacyRootPartyCreditLedgerCache = Array.isArray(cloudData.partyCreditLedger) ? cloudData.partyCreditLedger : [];
+                legacyRootPurchaseReceiptPostingsCache = Array.isArray(cloudData.purchaseReceiptPostings) ? cloudData.purchaseReceiptPostings : [];
                 const mergedProducts = mergeProductsForTransition(legacyRootProductsCache, subcollectionProductsCache);
+                const mergedPurchaseState = buildMergedPurchaseHydrationState(user.uid, 'root_snapshot');
                 logStockFlowDataAudit('root.snapshot.load', {
                   uid: user.uid,
                   rootProductsCount: legacyRootProductsCache.length,
@@ -2589,12 +2661,12 @@ const syncFromCloud = async (): Promise<void> => {
                     freightInquiries: cloudData.freightInquiries ?? fallbackFreightInquiries,
                     freightConfirmedOrders: cloudData.freightConfirmedOrders ?? fallbackFreightConfirmedOrders,
                     freightPurchases: cloudData.freightPurchases ?? fallbackFreightPurchases,
-                    purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
+                    purchaseReceiptPostings: mergedPurchaseState.purchaseReceiptPostings,
                     freightBrokers: cloudData.freightBrokers || [],
-                    purchaseParties: Array.isArray(memoryState.purchaseParties) && memoryState.purchaseParties.length > 0 ? memoryState.purchaseParties : (cloudData.purchaseParties || []),
-                    purchaseOrders: Array.isArray(memoryState.purchaseOrders) && memoryState.purchaseOrders.length > 0 ? memoryState.purchaseOrders : (cloudData.purchaseOrders || []),
-                    supplierPayments: Array.isArray(memoryState.supplierPayments) && memoryState.supplierPayments.length > 0 ? memoryState.supplierPayments : (cloudData.supplierPayments || []),
-                    partyCreditLedger: Array.isArray(memoryState.partyCreditLedger) && memoryState.partyCreditLedger.length > 0 ? memoryState.partyCreditLedger : (cloudData.partyCreditLedger || []),
+                    purchaseParties: mergedPurchaseState.purchaseParties,
+                    purchaseOrders: mergedPurchaseState.purchaseOrders,
+                    supplierPayments: mergedPurchaseState.supplierPayments,
+                    partyCreditLedger: mergedPurchaseState.partyCreditLedger,
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
@@ -2617,6 +2689,8 @@ const syncFromCloud = async (): Promise<void> => {
                   customersCount: memoryState.customers.length,
                   transactionsCount: memoryState.transactions.length,
                   purchaseOrdersCount: (memoryState.purchaseOrders || []).length,
+                  rootPurchaseOrdersCount: legacyRootPurchaseOrdersCache.length,
+                  subcollectionPurchaseOrdersCount: subcollectionPurchaseOrdersCache.length,
                   purchasePartiesCount: (memoryState.purchaseParties || []).length,
                   supplierPaymentsCount: (memoryState.supplierPayments || []).length,
                 });
@@ -2648,6 +2722,16 @@ const syncFromCloud = async (): Promise<void> => {
                 storeDocumentExists = false;
                 legacyRootProductsCache = [];
                 subcollectionProductsCache = [];
+                legacyRootPurchaseOrdersCache = [];
+                subcollectionPurchaseOrdersCache = [];
+                legacyRootPurchasePartiesCache = [];
+                subcollectionPurchasePartiesCache = [];
+                legacyRootSupplierPaymentsCache = [];
+                subcollectionSupplierPaymentsCache = [];
+                legacyRootPartyCreditLedgerCache = [];
+                subcollectionPartyCreditLedgerCache = [];
+                legacyRootPurchaseReceiptPostingsCache = [];
+                subcollectionPurchaseReceiptPostingsCache = [];
                 logStockFlowDataAudit('root.snapshot.missing_store', { uid: user.uid, rootProductsCount: 0, subcollectionProductsCount: 0, mergedProductsCount: 0 });
                 isCustomerProductStatsBackfillComplete = false;
                 hasCompletedInitialCloudLoad = true;
@@ -3405,6 +3489,187 @@ export const getNextBarcode = (category: string): string => {
   const nextNum = maxNum + 1;
   const formattedNum = nextNum.toString().padStart(3, '0');
   return `GEN-${formattedNum}`;
+};
+
+
+const FINANCE_ROOT_ALLOWED_FIELDS = [
+  'expenses',
+  'expenseCategories',
+  'expenseActivities',
+  'cashSessions',
+  'cashAdjustments',
+  'manualCashbookEntries',
+  'financeSettings',
+] as const;
+
+type FinanceRootAllowedField = (typeof FINANCE_ROOT_ALLOWED_FIELDS)[number];
+type FinancePersistPatch = Partial<Record<FinanceRootAllowedField, unknown>> & Partial<AppState> & Record<string, unknown>;
+
+const FINANCE_ROOT_ALLOWED_FIELD_SET = new Set<string>(FINANCE_ROOT_ALLOWED_FIELDS);
+const FINANCE_ROOT_BLOCKED_FIELDS = [
+  'purchaseOrders',
+  'supplierPayments',
+  'partyCreditLedger',
+  'purchaseParties',
+  'products',
+  'customers',
+  'transactions',
+  'auditEvents',
+  'operationCommits',
+] as const;
+
+const isPlainSerializableObject = (value: unknown) => {
+  if (!value || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const isTimestampLike = (value: unknown): value is { toDate: () => Date } => (
+  !!value
+  && typeof value === 'object'
+  && typeof (value as { toDate?: unknown }).toDate === 'function'
+);
+
+const sanitizeFinancePersistValue = (value: unknown, path: string, droppedPaths: string[]): unknown => {
+  if (value === undefined) {
+    droppedPaths.push(path);
+    return undefined;
+  }
+  if (value === null) return null;
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return value;
+    droppedPaths.push(`${path} (non-finite number)`);
+    return 0;
+  }
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+    droppedPaths.push(`${path} (${typeof value})`);
+    return undefined;
+  }
+  if (value instanceof Date) {
+    if (Number.isFinite(value.getTime())) return value.toISOString();
+    droppedPaths.push(`${path} (invalid Date)`);
+    return null;
+  }
+  if (isTimestampLike(value)) {
+    const date = value.toDate();
+    if (date instanceof Date && Number.isFinite(date.getTime())) return date.toISOString();
+    droppedPaths.push(`${path} (invalid Timestamp)`);
+    return null;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry, index) => sanitizeFinancePersistValue(entry, `${path}[${index}]`, droppedPaths))
+      .filter((entry) => entry !== undefined);
+  }
+  if (!isPlainSerializableObject(value)) {
+    droppedPaths.push(`${path} (${Object.prototype.toString.call(value)})`);
+    return undefined;
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  Object.entries(value as Record<string, unknown>).forEach(([key, nestedValue]) => {
+    const sanitizedValue = sanitizeFinancePersistValue(nestedValue, `${path}.${key}`, droppedPaths);
+    if (sanitizedValue !== undefined) sanitized[key] = sanitizedValue;
+  });
+  return sanitized;
+};
+
+const buildSafeFinanceRootPayload = (patch: FinancePersistPatch) => {
+  const rawKeys = Object.keys(patch || {});
+  const ignoredKeys = rawKeys.filter((key) => !FINANCE_ROOT_ALLOWED_FIELD_SET.has(key));
+  const blockedKeys = rawKeys.filter((key) => (FINANCE_ROOT_BLOCKED_FIELDS as readonly string[]).includes(key));
+  const droppedPaths: string[] = [];
+  const payload: Record<string, unknown> = {};
+
+  FINANCE_ROOT_ALLOWED_FIELDS.forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) return;
+    const sanitizedValue = sanitizeFinancePersistValue(patch[key], key, droppedPaths);
+    if (sanitizedValue !== undefined) payload[key] = sanitizedValue;
+  });
+
+  return { payload, ignoredKeys, blockedKeys, droppedPaths };
+};
+
+export const safeFinancePersistState = async (patch: FinancePersistPatch, options?: { reason?: string }) => {
+  const reason = options?.reason || 'finance.persistState';
+  const previousState = memoryState;
+  const { payload, ignoredKeys, blockedKeys, droppedPaths } = buildSafeFinanceRootPayload(patch);
+  const writeKeys = Object.keys(payload);
+
+  console.info('finance.persistState writing keys:', writeKeys, {
+    reason,
+    ignoredNonFinanceKeys: ignoredKeys,
+    blockedKeysPresentInInput: blockedKeys,
+    droppedUnsafePaths: droppedPaths,
+  });
+
+  if (!writeKeys.length) {
+    const err = new Error('No finance fields were provided to save.');
+    emitDataOpStatus({ phase: DATA_OP_PHASES.ERROR, op: reason, entity: 'finance', error: err.message });
+    throw err;
+  }
+
+  const nextState = { ...memoryState, ...payload } as AppState;
+  emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: reason, entity: 'finance', message: 'Saving finance changes…' });
+
+  if (!db) {
+    memoryState = nextState;
+    logLoadedState(memoryState);
+    emitLocalStorageUpdate();
+    emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: reason, entity: 'finance', message: 'Saved.' });
+    emitFinanceSnapshot(`after ${reason}`, memoryState, { type: reason, source: 'safeFinancePersistState', writeKeys });
+    return;
+  }
+
+  const user = auth?.currentUser;
+  if (!isCloudSynced || !auth || !user) {
+    memoryState = nextState;
+    logLoadedState(memoryState);
+    emitLocalStorageUpdate();
+    emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: reason, entity: 'finance', message: 'Saved locally.' });
+    emitFinanceSnapshot(`after ${reason}`, memoryState, { type: reason, source: 'safeFinancePersistState', writeKeys, cloudReady: false });
+    return;
+  }
+
+  try {
+    if (!user.emailVerified) throw new Error('Email verification required before cloud writes.');
+    if (!navigator.onLine) {
+      emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required for writes.');
+      throw new Error('Offline mode: business data writes are blocked.');
+    }
+    if (!hasCompletedInitialCloudLoad) throw new Error('Cloud state not hydrated. Blocking write to prevent bootstrap corruption.');
+    if (!storeDocumentExists) throw new Error('Store document missing. Automatic store bootstrap is disabled for data safety.');
+
+    await setDoc(doc(db, 'stores', user.uid), payload, { merge: true });
+    memoryState = nextState;
+    logLoadedState(memoryState);
+    emitLocalStorageUpdate();
+    await writeAuditEvent('UPDATE', {
+      routeContext: reason,
+      persistedRootKeys: writeKeys,
+      ignoredNonFinanceKeys: ignoredKeys,
+      blockedKeysPresentInInput: blockedKeys,
+    });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: reason, entity: 'finance', message: 'Saved.' });
+    emitFinanceSnapshot(`after ${reason}`, memoryState, { type: reason, source: 'safeFinancePersistState', writeKeys });
+  } catch (error) {
+    memoryState = previousState;
+    emitLocalStorageUpdate();
+    console.error('[finance.persistState] Firestore finance-only write failed', {
+      reason,
+      writeKeys,
+      droppedUnsafePaths: droppedPaths,
+      error,
+    });
+    emitDataOpStatus({
+      phase: DATA_OP_PHASES.ERROR,
+      op: reason,
+      entity: 'finance',
+      error: getFriendlyErrorMessage(error, reason),
+    });
+    throw error;
+  }
 };
 
 export const saveData = async (data: AppState, options?: { throwOnError?: boolean; allowDestructive?: boolean; reason?: string; auditOperation?: AuditOperation }) => {
@@ -5018,8 +5283,14 @@ export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerE
   const now = new Date().toISOString();
   const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const amount = Math.max(0, Number(payload.amount) || 0);
-  const payableApplied = Math.max(0, Math.min(amount, Number(payload.payableApplied ?? amount) || 0));
-  const partyCreditCreated = Math.max(0, Number(payload.partyCreditCreated ?? Math.max(0, amount - payableApplied)) || 0);
+  // Supplier payment accounting is service-owned. The UI may send preview values,
+  // but create must recompute from the current persisted open payable to avoid
+  // stale payableApplied / creditCreated values.
+  const actualOpenPayable = (data.purchaseOrders || [])
+    .filter((order) => order.partyId === payload.partyId && order.status !== 'cancelled')
+    .reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
+  const payableApplied = Number(Math.min(amount, Math.max(0, actualOpenPayable)).toFixed(2));
+  const partyCreditCreated = Number(Math.max(0, amount - payableApplied).toFixed(2));
   const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, payableApplied, payload.method, payload.note, payload.paidAt || now);
   let voucherNo = payload.voucherNo;
   if (!voucherNo) {
@@ -5049,10 +5320,12 @@ export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerE
     nextPartyCredits.unshift(creditEntry);
   }
   const nextSupplierPayments = [payment, ...(data.supplierPayments || [])];
+  const allocatedOrderIds = new Set(allocations.map((allocation) => allocation.orderId));
+  const allocatedOrders = nextOrders.filter((order) => allocatedOrderIds.has(order.id));
   if (db) {
     await Promise.all([
       upsertSupplierPaymentInSubcollection(payment, 'createSupplierPayment'),
-      ...nextOrders.map((order) => upsertPurchaseOrderInSubcollection(order, 'createSupplierPayment_allocate_order')),
+      ...allocatedOrders.map((order) => upsertPurchaseOrderInSubcollection(order, 'createSupplierPayment_allocate_order')),
       ...nextPartyCredits
         .filter((entry) => entry.sourcePaymentId === paymentId)
         .map((entry) => upsertPartyCreditLedgerEntryInSubcollection(entry, 'createSupplierPayment_party_credit')),
@@ -5153,7 +5426,7 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
     .reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
   const paymentAppliedToPayable = Number(Math.max(0, Math.min(nextAmount, payableBeforeThisPayment)).toFixed(2));
   const partyCreditCreated = Number(Math.max(0, nextAmount - paymentAppliedToPayable).toFixed(2));
-  const nextEntry: SupplierPaymentLedgerEntry = {
+  const nextEntry: SupplierPaymentLedgerEntry & { payableApplied?: number } = {
     ...existing,
     ...updates,
     amount: nextAmount,
