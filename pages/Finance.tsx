@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
 import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, ManualCashbookEntry, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
@@ -10,6 +10,7 @@ import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 
 type Expense = {
   id: string;
@@ -832,8 +833,9 @@ export default function Finance() {
   const expenseCategories: string[] = useMemo(() => {
     const defaults = ['General'];
     const existing = Array.isArray(data.expenseCategories) ? data.expenseCategories : [];
-    return Array.from(new Set([...defaults, ...existing]));
-  }, [data]);
+    const usedByExpenses = expenses.map(expense => expense.category).filter(Boolean);
+    return Array.from(new Set([...defaults, ...existing, ...usedByExpenses]));
+  }, [data.expenseCategories, expenses]);
   const productsById = useMemo(() => new Map(data.products.map(product => [product.id, product])), [data.products]);
   const resolveBuyPriceForFinanceItem = (item: CartItem, txDate: string) => {
     const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
@@ -1933,13 +1935,14 @@ export default function Finance() {
     XLSX.writeFile(workbook, `Cashbook_Export_${new Date().toISOString().split('T')[0]}.${ext}`);
   };
 
-  const persistState = async (newState: AppState) => {
+  const persistState = async (newState: Partial<AppState>) => {
     try {
-      await saveData(newState, { throwOnError: true, reason: 'finance.persistState' });
+      await safeFinancePersistState(newState, { reason: 'finance.persistState' });
       refreshData();
       setErrors(null);
     } catch (error) {
-      setErrors('Unable to save finance data. Please try again.');
+      console.error('[finance.persistState] Unable to save finance data', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.persistState'));
     }
   };
 
@@ -2000,7 +2003,7 @@ export default function Finance() {
     });
     const session: CashSession = { id: buildCashSessionId(freshCashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
     financeLog.shift('START', { openingCash: value });
-    await persistState({ ...fresh, cashSessions: [session, ...freshCashSessions] });
+    await persistState({ cashSessions: [session, ...freshCashSessions] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
@@ -2050,7 +2053,7 @@ export default function Finance() {
       status: 'closed' as const
     } : session);
 
-    await persistState({ ...fresh, cashSessions: updated });
+    await persistState({ cashSessions: updated });
     setClosingBalance('');
     resetClosingCounts();
     setOpeningUnlocked(false);
@@ -2081,7 +2084,7 @@ export default function Finance() {
         closingEditNote: editingClosingNote.trim() || undefined,
       };
     });
-    await persistState({ ...fresh, cashSessions: updatedSessions });
+    await persistState({ cashSessions: updatedSessions });
     setEditingClosingSessionId(null);
     setEditingClosingAmount('');
     setEditingClosingNote('');
@@ -2119,7 +2122,7 @@ export default function Finance() {
       sessionEndTime: target.endTime ?? null,
       reason: deleteSessionReason.trim() || null,
     });
-    await persistState({ ...fresh, cashSessions: updatedSessions });
+    await persistState({ cashSessions: updatedSessions });
     if (activeHistoryDetailSessionId === target.id) setActiveHistoryDetailSessionId(null);
     if (editingClosingSessionId === target.id) {
       setEditingClosingSessionId(null);
@@ -2187,7 +2190,7 @@ export default function Finance() {
     });
 
     const updated = freshCashSessions.map(session => session.id === freshOpenSession.id ? { ...session, openingBalance: value } : session);
-    await persistState({ ...fresh, cashSessions: updated });
+    await persistState({ cashSessions: updated });
     setEditingOpeningBalance(false);
     setOpeningBalanceEditValue('');
     setOpeningUnlocked(false);
@@ -2212,11 +2215,8 @@ export default function Finance() {
     financeLog.expense('CREATE', { amount, category: expense.category, affectsCash: true });
     financeLog.cash('OUTFLOW', { txId: expense.id, amount, reason: expense.title, paymentMode: 'Cash', source: 'expense' });
 
-    const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
     await persistState({
-      ...data,
       expenses: [expense, ...expenses],
-      expenseCategories: categories,
       expenseActivities: appendExpenseActivity(expenseActivities, 'add_expense', `Added ${expense.title} (${formatINR(expense.amount)}) in ${expense.category}`)
     });
 
@@ -2248,7 +2248,6 @@ export default function Finance() {
       source: 'manual_cash_adjustment',
     });
     await persistState({
-      ...data,
       cashAdjustments: [entry, ...(data.cashAdjustments || [])],
       expenseActivities: appendExpenseActivity(
         expenseActivities,
@@ -2263,7 +2262,6 @@ export default function Finance() {
   const removeExpense = async (id: string) => {
     const item = expenses.find(e => e.id === id);
     await persistState({
-      ...data,
       expenses: expenses.filter(e => e.id !== id),
       expenseActivities: item
         ? appendExpenseActivity(expenseActivities, 'delete_expense', `Deleted ${item.title} (${formatINR(item.amount)})`)
@@ -2276,7 +2274,7 @@ export default function Finance() {
     if (!name) return;
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), name]));
-    await persistState({ ...data, expenseCategories: categories, expenseActivities: appendExpenseActivity(expenseActivities, 'add_category', `Added category ${name}`) });
+    await persistState({ expenseCategories: categories, expenseActivities: appendExpenseActivity(expenseActivities, 'add_category', `Added category ${name}`) });
     setNewCategory('');
   };
 
@@ -2284,7 +2282,7 @@ export default function Finance() {
     const isUsed = expenses.some(e => e.category === name);
     if (isUsed) return setErrors('Cannot delete category that is used by expenses.');
 
-    await persistState({ ...data, expenseCategories: expenseCategories.filter(c => c !== name), expenseActivities: appendExpenseActivity(expenseActivities, 'delete_category', `Removed category ${name}`) });
+    await persistState({ expenseCategories: expenseCategories.filter(c => c !== name), expenseActivities: appendExpenseActivity(expenseActivities, 'delete_category', `Removed category ${name}`) });
   };
 
   const exportExpensePDF = () => {
@@ -2374,7 +2372,7 @@ export default function Finance() {
     const changed = corrected.some((session, idx) => session !== (data.cashSessions || [])[idx]);
     if (!changed) return;
 
-    persistState({ ...data, cashSessions: corrected });
+    persistState({ cashSessions: corrected });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.transactions, data.expenses, data.cashSessions]);
 
