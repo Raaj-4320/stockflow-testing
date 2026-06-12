@@ -67,6 +67,9 @@ export interface Customer {
   totalSpend: number;
   totalDue: number;
   storeCredit?: number;
+  customerLedgerRecalculatedAt?: string;
+  customerLedgerRecalculationVersion?: string;
+  customerLedgerRecalculationSource?: string;
   lastVisit: string;
   visitCount: number;
 }
@@ -90,6 +93,7 @@ export interface Transaction {
   };
   date: string;
   type: 'sale' | 'return' | 'payment' | 'historical_reference' | 'customer_credit' | 'customer_cash_out';
+  referenceTransactionType?: string;
   customerId?: string;
   customerName?: string;
   customerPhone?: string;
@@ -144,6 +148,17 @@ export interface StoreProfile {
   invoiceFormat?: 'standard' | 'thermal';
   autoSendInvoiceAfterCreation?: boolean;
   adminPin?: string;
+}
+
+
+export interface OperatorUser {
+  id: string;
+  name: string;
+  password: string;
+  active: boolean;
+  permissions?: Record<string, boolean>;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface AdminUser {
@@ -233,6 +248,12 @@ export interface CashSession {
   systemCashTotal?: number;
   sessionExpenseTotal?: number;
   difference?: number;
+  closedWithDifference?: boolean;
+  differenceAmount?: number;
+  approvedBy?: 'operator' | 'admin';
+  approvedByOperatorId?: string;
+  approvedByOperatorName?: string;
+  adminOverrideAt?: string;
   closingDenominationCounts?: Record<string, number>;
   closingEditedAt?: string;
   closingEditNote?: string;
@@ -483,6 +504,9 @@ export interface PurchaseParty {
   notes?: string;
   createdAt: string;
   updatedAt: string;
+  isDeleted?: boolean;
+  mergedIntoPartyId?: string;
+  mergedAt?: string;
 }
 
 export interface PurchaseOrderLine {
@@ -739,6 +763,7 @@ export interface AppState {
   supplierPayments?: SupplierPaymentLedgerEntry[];
   partyCreditLedger?: PartyCreditLedgerEntry[];
   manualCashbookEntries?: ManualCashbookEntry[];
+  operatorUsers?: OperatorUser[];
   variantsMaster?: string[];
   colorsMaster?: string[];
   migrationMarkers?: MigrationMarkers;
