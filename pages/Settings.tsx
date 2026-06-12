@@ -1,14 +1,14 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
-import { StoreProfile, TAX_OPTIONS } from '../types';
-import { loadData, updateStoreProfile, uploadImageFileToCloudinary } from '../services/storage';
+import { OperatorUser, StoreProfile, TAX_OPTIONS } from '../types';
+import { loadData, updateOperatorUsers, updateStoreProfile, uploadImageFileToCloudinary } from '../services/storage';
 import { logout, getCurrentUser } from '../services/auth';
 import { auth } from '../services/firebase';
 import { getConfiguredWhatsAppServerUrl, getWhatsAppHealth, getWhatsAppQr, getWhatsAppStatus, getWhatsAppMetrics, createWhatsAppSession, restartWhatsAppSession, logoutWhatsAppSession, sendInvoiceViaWhatsApp, sendCustomerLedgerViaWhatsApp } from '../services/whatsappStatus';
 import { appendWhatsAppLog, getWhatsAppLogStats } from '../services/whatsappLogs';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
-import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText } from 'lucide-react';
+import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText, UserPlus } from 'lucide-react';
 
 export default function Settings() {
   const [profile, setProfile] = useState<StoreProfile>({
@@ -49,6 +49,10 @@ export default function Settings() {
   const [waFailedSends, setWaFailedSends] = useState<number>(0);
   const [waPendingSends, setWaPendingSends] = useState<number>(0);
   const [waLast10, setWaLast10] = useState<any[]>([]);
+  const [operatorUsers, setOperatorUsers] = useState<OperatorUser[]>([]);
+  const [operatorNameInput, setOperatorNameInput] = useState('');
+  const [operatorPasswordInput, setOperatorPasswordInput] = useState('');
+  const [operatorMessage, setOperatorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const refreshData = () => {
@@ -60,6 +64,7 @@ export default function Settings() {
         customerCatalogFirstPageMimeType: typeof data.profile?.customerCatalogFirstPageMimeType === 'string' ? data.profile.customerCatalogFirstPageMimeType : '',
       });
       setUserEmail(getCurrentUser());
+      setOperatorUsers(Array.isArray(data.operatorUsers) ? data.operatorUsers : []);
     };
     refreshData();
     refreshWhatsAppResolutionDebug();
@@ -113,6 +118,37 @@ export default function Settings() {
     setConfirmPinInput('');
     setPinMessage('PIN updated successfully.');
   };
+
+  const handleAddOperator = () => {
+    const name = operatorNameInput.trim();
+    const password = operatorPasswordInput.trim();
+    if (!name) return setOperatorMessage('Operator name is required.');
+    if (!password) return setOperatorMessage('Operator password is required.');
+    const now = new Date().toISOString();
+    const next = updateOperatorUsers([
+      ...operatorUsers,
+      { id: `operator-${Date.now()}`, name, password, active: true, createdAt: now, updatedAt: now },
+    ]);
+    setOperatorUsers(next);
+    setOperatorNameInput('');
+    setOperatorPasswordInput('');
+    setOperatorMessage('Operator added.');
+  };
+
+  const handleToggleOperator = (operatorId: string) => {
+    const next = updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, active: operator.active === false } : operator));
+    setOperatorUsers(next);
+    setOperatorMessage('Operator updated.');
+  };
+
+  const handleResetOperatorPassword = (operatorId: string) => {
+    const nextPassword = window.prompt('Enter new operator password');
+    if (!nextPassword) return;
+    const next = updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, password: nextPassword } : operator));
+    setOperatorUsers(next);
+    setOperatorMessage('Operator password updated.');
+  };
+
   const handleSignatureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !file.type.startsWith('image/')) return;
@@ -497,6 +533,30 @@ export default function Settings() {
             <div className="space-y-1"><Label>Confirm New PIN</Label><Input type="password" inputMode="numeric" value={confirmPinInput} onChange={e => setConfirmPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
             {pinMessage && <p className="text-xs text-muted-foreground">{pinMessage}</p>}
             <Button type="button" variant="outline" onClick={handleChangePin}>Update PIN</Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><UserPlus className="w-5 h-5 text-primary" /> Operator Users</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">Operators can use POS, customer payments, expenses, and shifts with restricted access to purchases, cashbook, profit, and settings.</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
+              <Input value={operatorNameInput} onChange={(e) => setOperatorNameInput(e.target.value)} placeholder="Operator name" />
+              <Input type="password" value={operatorPasswordInput} onChange={(e) => setOperatorPasswordInput(e.target.value)} placeholder="Operator password" />
+              <Button type="button" onClick={handleAddOperator}>Add</Button>
+            </div>
+            {operatorMessage && <p className="text-xs text-muted-foreground">{operatorMessage}</p>}
+            <div className="space-y-2">
+              {operatorUsers.length === 0 ? <p className="text-xs text-muted-foreground">No operators added yet.</p> : operatorUsers.map((operator) => (
+                <div key={operator.id} className="flex items-center justify-between gap-2 rounded-lg border p-2 text-sm">
+                  <div><div className="font-semibold">{operator.name}</div><div className="text-xs text-muted-foreground">{operator.active === false ? 'Disabled' : 'Active'}</div></div>
+                  <div className="flex gap-2">
+                    <Button type="button" size="sm" variant="outline" onClick={() => handleResetOperatorPassword(operator.id)}>Password</Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => handleToggleOperator(operator.id)}>{operator.active === false ? 'Enable' : 'Disable'}</Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </CardContent>
         </Card>
         <Card className="md:col-span-2">

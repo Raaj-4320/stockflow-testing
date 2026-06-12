@@ -15,6 +15,8 @@ import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
+import { useRoleSession } from '../src/auth/roleSession';
+import { can } from '../src/auth/permissions';
 
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   if (!open) return null;
@@ -22,6 +24,7 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel
 }
 
 export default function Admin() {
+  const { session: roleSession } = useRoleSession();
   const INVENTORY_PAGE_SIZE = 25;
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
@@ -1705,6 +1708,31 @@ export default function Admin() {
           }
       }
   };
+
+  if (!can(roleSession, 'viewBuyPrice')) {
+    return (
+      <div className="space-y-6 max-w-[1200px] mx-auto pb-20 md:pb-0">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div><h1 className="text-3xl font-bold tracking-tight">Inventory</h1><p className="text-muted-foreground">Operator view: stock and sell price only. Buy price, valuation, purchase controls, and margin analytics are hidden.</p></div>
+          <Input className="max-w-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search products" />
+        </div>
+        <Card>
+          <CardContent className="p-0">
+            <div className="grid grid-cols-[minmax(0,1fr)_100px_110px_110px] gap-2 border-b bg-slate-50 p-3 text-xs font-black uppercase tracking-wider text-slate-500"><div>Product</div><div>Category</div><div className="text-right">Stock</div><div className="text-right">Sell Price</div></div>
+            {paginatedProducts.map((product) => (
+              <div key={product.id} className="grid grid-cols-[minmax(0,1fr)_100px_110px_110px] gap-2 border-b p-3 text-sm">
+                <div className="min-w-0"><div className="truncate font-semibold">{getProductName(product)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(product)}</div></div>
+                <div className="truncate text-xs text-muted-foreground">{getProductCategory(product) || '—'}</div>
+                <div className="text-right font-bold">{product.stock}</div>
+                <div className="text-right font-bold">₹{product.sellPrice}</div>
+              </div>
+            ))}
+            {paginatedProducts.length === 0 && <div className="p-10 text-center text-sm text-muted-foreground">No products found.</div>}
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-[1600px] mx-auto pb-20 md:pb-0">
