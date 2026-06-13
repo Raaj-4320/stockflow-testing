@@ -8,7 +8,7 @@ import { auth } from '../services/firebase';
 import { getConfiguredWhatsAppServerUrl, getWhatsAppHealth, getWhatsAppQr, getWhatsAppStatus, getWhatsAppMetrics, createWhatsAppSession, restartWhatsAppSession, logoutWhatsAppSession, sendInvoiceViaWhatsApp, sendCustomerLedgerViaWhatsApp } from '../services/whatsappStatus';
 import { appendWhatsAppLog, getWhatsAppLogStats } from '../services/whatsappLogs';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
-import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText, UserPlus } from 'lucide-react';
+import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText, UserPlus, Edit } from 'lucide-react';
 
 export default function Settings() {
   const [profile, setProfile] = useState<StoreProfile>({
@@ -53,6 +53,9 @@ export default function Settings() {
   const [operatorNameInput, setOperatorNameInput] = useState('');
   const [operatorPasswordInput, setOperatorPasswordInput] = useState('');
   const [operatorMessage, setOperatorMessage] = useState<string | null>(null);
+  const [editingOperatorId, setEditingOperatorId] = useState<string | null>(null);
+  const [editingOperatorName, setEditingOperatorName] = useState('');
+  const [editingOperatorPassword, setEditingOperatorPassword] = useState('');
 
   useEffect(() => {
     const refreshData = () => {
@@ -133,6 +136,33 @@ export default function Settings() {
     setOperatorNameInput('');
     setOperatorPasswordInput('');
     setOperatorMessage('Operator added.');
+  };
+
+
+  const handleStartEditOperator = (operator: OperatorUser) => {
+    setEditingOperatorId(operator.id);
+    setEditingOperatorName(operator.name || '');
+    setEditingOperatorPassword(operator.password || '');
+  };
+
+  const handleSaveOperator = (operatorId: string) => {
+    const name = editingOperatorName.trim();
+    const password = editingOperatorPassword.trim();
+    if (!name) return setOperatorMessage('Operator name is required.');
+    if (!password) return setOperatorMessage('Operator password is required.');
+    const next = updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, name, password } : operator));
+    setOperatorUsers(next);
+    setEditingOperatorId(null);
+    setEditingOperatorName('');
+    setEditingOperatorPassword('');
+    setOperatorMessage('Operator updated.');
+  };
+
+  const handleRemoveOperator = (operatorId: string) => {
+    if (!window.confirm('Remove this operator?\nThis will not delete sales, transactions, or reports.')) return;
+    const next = updateOperatorUsers(operatorUsers.filter((operator) => operator.id !== operatorId));
+    setOperatorUsers(next);
+    setOperatorMessage('Operator removed. Historical records were not changed.');
   };
 
   const handleToggleOperator = (operatorId: string) => {
@@ -548,12 +578,26 @@ export default function Settings() {
             {operatorMessage && <p className="text-xs text-muted-foreground">{operatorMessage}</p>}
             <div className="space-y-2">
               {operatorUsers.length === 0 ? <p className="text-xs text-muted-foreground">No operators added yet.</p> : operatorUsers.map((operator) => (
-                <div key={operator.id} className="flex items-center justify-between gap-2 rounded-lg border p-2 text-sm">
-                  <div><div className="font-semibold">{operator.name}</div><div className="text-xs text-muted-foreground">{operator.active === false ? 'Disabled' : 'Active'}</div></div>
-                  <div className="flex gap-2">
+                <div key={operator.id} className="rounded-lg border p-3 text-sm space-y-2">
+                  {editingOperatorId === operator.id ? (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto_auto]">
+                      <Input value={editingOperatorName} onChange={(e) => setEditingOperatorName(e.target.value)} placeholder="Operator name" />
+                      <Input type="password" value={editingOperatorPassword} onChange={(e) => setEditingOperatorPassword(e.target.value)} placeholder="Operator password" />
+                      <Button type="button" size="sm" onClick={() => handleSaveOperator(operator.id)}>Save</Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => setEditingOperatorId(null)}>Cancel</Button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2">
+                      <div><div className="font-semibold">{operator.name}</div><div className="text-xs text-muted-foreground">Created: {operator.createdAt ? new Date(operator.createdAt).toLocaleString() : '—'} · Updated: {operator.updatedAt ? new Date(operator.updatedAt).toLocaleString() : '—'}</div></div>
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${operator.active === false ? 'bg-slate-100 text-slate-600' : 'bg-emerald-100 text-emerald-700'}`}>{operator.active === false ? 'Inactive' : 'Active'}</span>
+                    </div>
+                  )}
+                  {editingOperatorId !== operator.id && <div className="flex flex-wrap gap-2">
+                    <Button type="button" size="sm" variant="outline" onClick={() => handleStartEditOperator(operator)}><Edit className="w-3 h-3 mr-1" /> Edit</Button>
                     <Button type="button" size="sm" variant="outline" onClick={() => handleResetOperatorPassword(operator.id)}>Password</Button>
                     <Button type="button" size="sm" variant="outline" onClick={() => handleToggleOperator(operator.id)}>{operator.active === false ? 'Enable' : 'Disable'}</Button>
-                  </div>
+                    <Button type="button" size="sm" variant="outline" className="text-red-600" onClick={() => handleRemoveOperator(operator.id)}><Trash2 className="w-3 h-3 mr-1" /> Remove</Button>
+                  </div>}
                 </div>
               ))}
             </div>
