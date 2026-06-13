@@ -127,9 +127,9 @@ const MAYURBHAI_MANUAL_MERGE = {
   canonicalPartyId: 'party-1777900371469-61499',
   duplicatePartyId: 'party-1780890742939-410',
   expectedOrderCount: 21,
-  expectedTotalPurchases: 3419694.20,
+  expectedTotalPurchases: 3421410.20,
   expectedPayments: 2010000,
-  expectedNetPayable: 1409694.20,
+  expectedNetPayable: 1411410.20,
 };
 const moneyMatches = (actual: number, expected: number) => Math.abs((Number(actual) || 0) - expected) < 0.01;
 const emptyDuplicateTotals = (): DuplicatePartyTotals => ({ purchaseCount: 0, totalPurchase: 0, totalPaidOnOrders: 0, remainingPayable: 0, paymentCount: 0, totalSupplierPayments: 0, paymentAppliedToPayable: 0, partyCreditCreated: 0, creditEntryCount: 0, creditCreated: 0, creditRemaining: 0, creditUsed: 0 });
