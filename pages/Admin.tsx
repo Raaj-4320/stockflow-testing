@@ -47,6 +47,10 @@ export default function Admin() {
   const [sortOption, setSortOption] = useState('name-asc');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [inventoryPage, setInventoryPage] = useState(1);
+  const OPERATOR_INVENTORY_PAGE_SIZE = 20;
+  const [operatorInventoryPage, setOperatorInventoryPage] = useState(1);
+  const [operatorSortOption, setOperatorSortOption] = useState<'name' | 'stock-desc' | 'stock-asc' | 'sell-desc' | 'sell-asc' | 'category'>('name');
+  const [operatorStockFilter, setOperatorStockFilter] = useState<'all' | 'low' | 'in' | 'out'>('all');
 
   // Low Stock Modal Filters
   const [lowStockCategoryFilter, setLowStockCategoryFilter] = useState('all');
@@ -1510,6 +1514,39 @@ export default function Admin() {
     () => filteredProducts.slice((inventoryPage - 1) * INVENTORY_PAGE_SIZE, inventoryPage * INVENTORY_PAGE_SIZE),
     [filteredProducts, inventoryPage]
   );
+
+  const operatorFilteredProducts = useMemo(() => {
+    const term = safeLower(searchTerm);
+    const result = products.filter((product) => {
+      const matchesSearch = !term || safeLower([getProductName(product), getProductCategory(product), getProductBarcode(product)].join(' ')).includes(term);
+      const stock = Math.max(0, Number(product.stock || 0));
+      const matchesFilter = operatorStockFilter === 'all'
+        || (operatorStockFilter === 'low' && stock > 0 && stock <= 10)
+        || (operatorStockFilter === 'in' && stock > 0)
+        || (operatorStockFilter === 'out' && stock <= 0);
+      return matchesSearch && matchesFilter;
+    });
+
+    result.sort((a, b) => {
+      switch (operatorSortOption) {
+        case 'stock-desc': return Math.max(0, Number(b.stock || 0)) - Math.max(0, Number(a.stock || 0));
+        case 'stock-asc': return Math.max(0, Number(a.stock || 0)) - Math.max(0, Number(b.stock || 0));
+        case 'sell-desc': return Math.max(0, Number(b.sellPrice || 0)) - Math.max(0, Number(a.sellPrice || 0));
+        case 'sell-asc': return Math.max(0, Number(a.sellPrice || 0)) - Math.max(0, Number(b.sellPrice || 0));
+        case 'category': return getProductCategory(a).localeCompare(getProductCategory(b)) || getProductName(a).localeCompare(getProductName(b));
+        case 'name':
+        default: return getProductName(a).localeCompare(getProductName(b));
+      }
+    });
+
+    return result;
+  }, [products, searchTerm, operatorSortOption, operatorStockFilter]);
+  const operatorInventoryTotalPages = Math.max(1, Math.ceil(operatorFilteredProducts.length / OPERATOR_INVENTORY_PAGE_SIZE));
+  const operatorPaginatedProducts = useMemo(
+    () => operatorFilteredProducts.slice((operatorInventoryPage - 1) * OPERATOR_INVENTORY_PAGE_SIZE, operatorInventoryPage * OPERATOR_INVENTORY_PAGE_SIZE),
+    [operatorFilteredProducts, operatorInventoryPage]
+  );
+
   const allFilteredProductsSelected = filteredProducts.length > 0 && filteredProducts.every(product => selectedProductIds.includes(product.id));
   const lostDamageProducts = useMemo(() => products.filter(p => Math.max(0, Number(p.lostDamageQty || 0)) > 0), [products]);
   const lostDamageStats = useMemo(() => {
@@ -1524,8 +1561,16 @@ export default function Admin() {
   }, [searchTerm, categoryFilter, sortOption]);
 
   useEffect(() => {
+    setOperatorInventoryPage(1);
+  }, [searchTerm, operatorSortOption, operatorStockFilter]);
+
+  useEffect(() => {
     setInventoryPage((prev) => Math.min(prev, inventoryTotalPages));
   }, [inventoryTotalPages]);
+
+  useEffect(() => {
+    setOperatorInventoryPage((prev) => Math.min(prev, operatorInventoryTotalPages));
+  }, [operatorInventoryTotalPages]);
 
   // Calculate Dashboard Stats
   const stats = useMemo(() => {
@@ -1710,24 +1755,54 @@ export default function Admin() {
   if (!can('inventoryBuyPrice')) {
     return (
       <div className="space-y-6 max-w-[1200px] mx-auto pb-20 md:pb-0">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div><h1 className="text-3xl font-bold tracking-tight">Inventory</h1><p className="text-muted-foreground">Operator view: stock and sell price only. Buy price, valuation, purchase controls, and margin analytics are hidden.</p></div>
-          <Input className="max-w-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search products" />
+        <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+          <Input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search products" />
+          <Select value={operatorSortOption} onChange={(e) => setOperatorSortOption(e.target.value as any)}>
+            <option value="name">Product Name</option>
+            <option value="stock-desc">Stock High → Low</option>
+            <option value="stock-asc">Stock Low → High</option>
+            <option value="sell-desc">Sell Price High → Low</option>
+            <option value="sell-asc">Sell Price Low → High</option>
+            <option value="category">Category</option>
+          </Select>
+          <Select value={operatorStockFilter} onChange={(e) => setOperatorStockFilter(e.target.value as any)}>
+            <option value="all">All</option>
+            <option value="low">Low Stock</option>
+            <option value="in">In Stock</option>
+            <option value="out">Out of Stock</option>
+          </Select>
         </div>
+        <div><h1 className="text-3xl font-bold tracking-tight">Inventory</h1><p className="text-muted-foreground">Operator view: stock and sell price only. Buy price, valuation, purchase controls, and margin analytics are hidden.</p></div>
+        <Card className="bg-amber-50/50 border-amber-100 cursor-pointer hover:bg-amber-100/50 transition-colors" onClick={() => setIsLowStockModalOpen(true)}>
+          <CardContent className="p-4 flex items-center justify-between">
+            <div><p className="text-xs font-bold text-amber-600 uppercase tracking-widest">Low Stock Alerts</p><p className="text-2xl font-bold text-amber-900">{stats.lowStockCount}</p></div>
+            {stats.outOfStockCount > 0 && <Badge variant="destructive">{stats.outOfStockCount} Out</Badge>}
+          </CardContent>
+        </Card>
         <Card>
           <CardContent className="p-0">
-            <div className="grid grid-cols-[minmax(0,1fr)_100px_110px_110px] gap-2 border-b bg-slate-50 p-3 text-xs font-black uppercase tracking-wider text-slate-500"><div>Product</div><div>Category</div><div className="text-right">Stock</div><div className="text-right">Sell Price</div></div>
-            {paginatedProducts.map((product) => (
-              <div key={product.id} className="grid grid-cols-[minmax(0,1fr)_100px_110px_110px] gap-2 border-b p-3 text-sm">
+            <div className="grid grid-cols-[64px_minmax(0,1fr)_100px_110px_110px] gap-2 border-b bg-slate-50 p-3 text-xs font-black uppercase tracking-wider text-slate-500"><div>Image</div><div>Product</div><div>Category</div><div className="text-right">Stock</div><div className="text-right">Sell Price</div></div>
+            {operatorPaginatedProducts.map((product) => (
+              <div key={product.id} className="grid grid-cols-[64px_minmax(0,1fr)_100px_110px_110px] items-center gap-2 border-b p-3 text-sm">
+                <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={getProductName(product)} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div>
                 <div className="min-w-0"><div className="truncate font-semibold">{getProductName(product)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(product)}</div></div>
                 <div className="truncate text-xs text-muted-foreground">{getProductCategory(product) || '—'}</div>
                 <div className="text-right font-bold">{product.stock}</div>
                 <div className="text-right font-bold">₹{product.sellPrice}</div>
               </div>
             ))}
-            {paginatedProducts.length === 0 && <div className="p-10 text-center text-sm text-muted-foreground">No products found.</div>}
+            {operatorPaginatedProducts.length === 0 && <div className="p-10 text-center text-sm text-muted-foreground">No products found.</div>}
+            {operatorFilteredProducts.length > OPERATOR_INVENTORY_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-2 p-3 text-sm">
+                <Button variant="outline" size="sm" onClick={() => setOperatorInventoryPage((prev) => Math.max(1, prev - 1))} disabled={operatorInventoryPage === 1}>Previous</Button>
+                <span className="text-xs text-muted-foreground">Showing {operatorPaginatedProducts.length} of {operatorFilteredProducts.length} products · Page {operatorInventoryPage} of {operatorInventoryTotalPages}</span>
+                <Button variant="outline" size="sm" onClick={() => setOperatorInventoryPage((prev) => Math.min(operatorInventoryTotalPages, prev + 1))} disabled={operatorInventoryPage === operatorInventoryTotalPages}>Next</Button>
+              </div>
+            )}
           </CardContent>
         </Card>
+        {isLowStockModalOpen && <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"><Card className="w-full max-w-4xl max-h-[85vh] overflow-y-auto"><CardHeader className="flex flex-row items-center justify-between"><CardTitle>Low Stock Inventory</CardTitle><Button variant="ghost" onClick={() => setIsLowStockModalOpen(false)}>Close</Button></CardHeader><CardContent><div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">{lowStockProducts.map((p) => <div key={p.id} className="flex flex-col border rounded-xl bg-card overflow-hidden"><div className="aspect-square w-full bg-white flex items-center justify-center overflow-hidden border-b">{getProductImageUrl(p) ? <img src={getProductImageUrl(p)} alt={getProductName(p)} className="w-full h-full object-contain" /> : <Package className="w-8 h-8 opacity-20" />}</div><div className="p-3 min-w-0"><h4 className="font-bold text-xs truncate" title={getProductName(p)}>{getProductName(p)}</h4><p className="text-[10px] text-muted-foreground truncate">{getProductCategory(p) || '—'}</p><div className="flex items-center justify-between mt-2"><span className="text-xs font-bold">₹{p.sellPrice}</span><Badge variant={p.stock === 0 ? 'destructive' : 'secondary'} className="h-5 px-1.5 text-[10px]">Stock: {p.stock}</Badge></div></div></div>)}</div>{lowStockProducts.length === 0 && <p className="text-sm text-muted-foreground">No low stock items match your filters.</p>}</CardContent></Card></div>}
+
       </div>
     );
   }
