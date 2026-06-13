@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
 import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, ManualCashbookEntry, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
@@ -10,6 +10,9 @@ import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
+import { useRoleSession } from '../src/auth/roleSession';
+import { can, getCurrentRole } from '../src/auth/simplePermissions';
 
 type Expense = {
   id: string;
@@ -735,6 +738,7 @@ function MoneyTile({ label, value, tone = 'neutral' }: { label: string; value: s
 }
 
 export default function Finance() {
+  const { session: roleSession, requestAdminOverride } = useRoleSession();
   const formatExpenseLoggedDate = (expense: Expense) => {
     const rawExpense = expense as Expense & { date?: unknown; timestamp?: unknown; expenseDate?: unknown };
     const pick = rawExpense.createdAt ?? rawExpense.date ?? rawExpense.timestamp ?? rawExpense.expenseDate;
@@ -832,8 +836,9 @@ export default function Finance() {
   const expenseCategories: string[] = useMemo(() => {
     const defaults = ['General'];
     const existing = Array.isArray(data.expenseCategories) ? data.expenseCategories : [];
-    return Array.from(new Set([...defaults, ...existing]));
-  }, [data]);
+    const usedByExpenses = expenses.map(expense => expense.category).filter(Boolean);
+    return Array.from(new Set([...defaults, ...existing, ...usedByExpenses]));
+  }, [data.expenseCategories, expenses]);
   const productsById = useMemo(() => new Map(data.products.map(product => [product.id, product])), [data.products]);
   const resolveBuyPriceForFinanceItem = (item: CartItem, txDate: string) => {
     const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
@@ -1933,13 +1938,14 @@ export default function Finance() {
     XLSX.writeFile(workbook, `Cashbook_Export_${new Date().toISOString().split('T')[0]}.${ext}`);
   };
 
-  const persistState = async (newState: AppState) => {
+  const persistState = async (newState: Partial<AppState>) => {
     try {
-      await saveData(newState, { throwOnError: true, reason: 'finance.persistState' });
+      await safeFinancePersistState(newState, { reason: 'finance.persistState' });
       refreshData();
       setErrors(null);
     } catch (error) {
-      setErrors('Unable to save finance data. Please try again.');
+      console.error('[finance.persistState] Unable to save finance data', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.persistState'));
     }
   };
 
@@ -2000,7 +2006,7 @@ export default function Finance() {
     });
     const session: CashSession = { id: buildCashSessionId(freshCashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
     financeLog.shift('START', { openingCash: value });
-    await persistState({ ...fresh, cashSessions: [session, ...freshCashSessions] });
+    await persistState({ cashSessions: [session, ...freshCashSessions] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
@@ -2022,6 +2028,18 @@ export default function Finance() {
     const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, freshCashAdjustments, fresh.deleteCompensations || [], fresh.deletedTransactions || [], fresh.purchaseOrders || [], fresh.manualCashbookEntries || [], freshOpenSession.startTime, closedAt, freshOpenSession.id, Array.isArray(fresh.upfrontOrders) ? fresh.upfrontOrders : [], fresh.supplierPayments || []);
     const expectedClosing = freshOpenSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
+    const currentRole = getCurrentRole();
+    let shiftApprovedBy: 'operator' | 'admin' = currentRole === 'operator' ? 'operator' : 'admin';
+    let adminOverrideAt: string | undefined;
+    if (currentRole === 'operator' && Math.abs(difference) > 100) {
+      const approved = await requestAdminOverride('Difference exceeds allowed limit. Admin approval required to close this shift.');
+      if (!approved) {
+        setErrors('Difference exceeds allowed limit. Admin approval required.');
+        return;
+      }
+      shiftApprovedBy = 'admin';
+      adminOverrideAt = new Date().toISOString();
+    }
     financeLog.shift('CLOSE', {
       opening: freshOpenSession.openingBalance,
       inflow: systemCashTotal + expenseTotal,
@@ -2046,11 +2064,17 @@ export default function Finance() {
       systemCashTotal,
       sessionExpenseTotal: expenseTotal,
       difference,
+      closedWithDifference: Math.abs(difference) > 0.01,
+      differenceAmount: difference,
+      approvedBy: shiftApprovedBy,
+      approvedByOperatorId: roleSession?.operatorId,
+      approvedByOperatorName: roleSession?.operatorName,
+      adminOverrideAt,
       closingDenominationCounts: Object.fromEntries(CLOSING_DENOMS.map(denom => [String(denom), closingCounts[denom] || 0])),
       status: 'closed' as const
     } : session);
 
-    await persistState({ ...fresh, cashSessions: updated });
+    await persistState({ cashSessions: updated });
     setClosingBalance('');
     resetClosingCounts();
     setOpeningUnlocked(false);
@@ -2081,7 +2105,7 @@ export default function Finance() {
         closingEditNote: editingClosingNote.trim() || undefined,
       };
     });
-    await persistState({ ...fresh, cashSessions: updatedSessions });
+    await persistState({ cashSessions: updatedSessions });
     setEditingClosingSessionId(null);
     setEditingClosingAmount('');
     setEditingClosingNote('');
@@ -2119,7 +2143,7 @@ export default function Finance() {
       sessionEndTime: target.endTime ?? null,
       reason: deleteSessionReason.trim() || null,
     });
-    await persistState({ ...fresh, cashSessions: updatedSessions });
+    await persistState({ cashSessions: updatedSessions });
     if (activeHistoryDetailSessionId === target.id) setActiveHistoryDetailSessionId(null);
     if (editingClosingSessionId === target.id) {
       setEditingClosingSessionId(null);
@@ -2187,15 +2211,19 @@ export default function Finance() {
     });
 
     const updated = freshCashSessions.map(session => session.id === freshOpenSession.id ? { ...session, openingBalance: value } : session);
-    await persistState({ ...fresh, cashSessions: updated });
+    await persistState({ cashSessions: updated });
     setEditingOpeningBalance(false);
     setOpeningBalanceEditValue('');
     setOpeningUnlocked(false);
   };
 
-  const appendExpenseActivity = (items: ExpenseActivity[], action: ExpenseActivity['action'], message: string) => {
-    return [{ id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`, action, message, createdAt: new Date().toISOString() }, ...items].slice(0, 500);
-  };
+  const createExpenseActivity = (action: ExpenseActivity['action'], message: string): ExpenseActivity => ({
+    id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    action,
+    message,
+    createdAt: new Date().toISOString(),
+  });
+
 
   const addExpense = async () => {
     const amount = Number(expenseAmount);
@@ -2212,17 +2240,26 @@ export default function Finance() {
     financeLog.expense('CREATE', { amount, category: expense.category, affectsCash: true });
     financeLog.cash('OUTFLOW', { txId: expense.id, amount, reason: expense.title, paymentMode: 'Cash', source: 'expense' });
 
-    const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
-    await persistState({
+    const activity = createExpenseActivity('add_expense', `Added ${expense.title} (${formatINR(expense.amount)}) in ${expense.category}`);
+    const optimisticState = {
       ...data,
       expenses: [expense, ...expenses],
-      expenseCategories: categories,
-      expenseActivities: appendExpenseActivity(expenseActivities, 'add_expense', `Added ${expense.title} (${formatINR(expense.amount)}) in ${expense.category}`)
-    });
+      expenseActivities: [activity, ...expenseActivities].slice(0, 500),
+    };
+    setData(optimisticState);
 
-    setExpenseTitle('');
-    setExpenseAmount('');
-    setExpenseNote('');
+    try {
+      await saveExpenseToSubcollection(expense);
+      await saveExpenseActivityToSubcollection(activity);
+      setExpenseTitle('');
+      setExpenseAmount('');
+      setExpenseNote('');
+      setErrors(null);
+    } catch (error) {
+      setData(data);
+      console.error('[finance.addExpense] Failed to save expense subcollection docs', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.add_expense'));
+    }
   };
 
   const addCashAdjustment = async (type: 'cash_addition' | 'cash_withdrawal') => {
@@ -2230,6 +2267,10 @@ export default function Finance() {
     const rawNote = type === 'cash_addition' ? cashAddNote : cashWithdrawNote;
     const amount = Number(rawAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setErrors('Please enter a valid adjustment amount.');
+    if (type === 'cash_withdrawal' && !can('cashWithdrawal')) {
+      const approved = await requestAdminOverride('Admin password required to withdraw cash.');
+      if (!approved) return;
+    }
     const liveCash = Number(openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : dailyCashTotals.systemCashTotal) || 0;
     if (type === 'cash_withdrawal' && amount > liveCash) return setErrors('Withdrawal cannot exceed current available cash.');
     const entry: CashAdjustment = {
@@ -2247,28 +2288,45 @@ export default function Finance() {
       paymentMode: 'Cash',
       source: 'manual_cash_adjustment',
     });
-    await persistState({
-      ...data,
-      cashAdjustments: [entry, ...(data.cashAdjustments || [])],
-      expenseActivities: appendExpenseActivity(
-        expenseActivities,
-        type,
-        `${type === 'cash_addition' ? 'Cash Added' : 'Cash Withdrawn'} (${formatINR(entry.amount)})${entry.note ? ` • ${entry.note}` : ''}`
-      ),
-    });
+    const activity = createExpenseActivity(
+      type,
+      `${type === 'cash_addition' ? 'Cash Added' : 'Cash Withdrawn'} (${formatINR(entry.amount)})${entry.note ? ` • ${entry.note}` : ''}`
+    );
+    await persistState({ cashAdjustments: [entry, ...(data.cashAdjustments || [])] });
+    try {
+      await saveExpenseActivityToSubcollection(activity);
+    } catch (error) {
+      console.error('[finance.cashAdjustment] Failed to save activity subcollection doc', error);
+    }
     if (type === 'cash_addition') { setCashAddAmount(''); setCashAddNote(''); }
     else { setCashWithdrawAmount(''); setCashWithdrawNote(''); }
   };
 
   const removeExpense = async (id: string) => {
     const item = expenses.find(e => e.id === id);
-    await persistState({
+    if (!item) return;
+    if (!isExpenseStoredInSubcollection(id)) {
+      setErrors('Old expense needs migration before it can be deleted.');
+      return;
+    }
+
+    const activity = createExpenseActivity('delete_expense', `Deleted ${item.title} (${formatINR(item.amount)})`);
+    const optimisticState = {
       ...data,
       expenses: expenses.filter(e => e.id !== id),
-      expenseActivities: item
-        ? appendExpenseActivity(expenseActivities, 'delete_expense', `Deleted ${item.title} (${formatINR(item.amount)})`)
-        : expenseActivities
-    });
+      expenseActivities: [activity, ...expenseActivities].slice(0, 500),
+    };
+    setData(optimisticState);
+
+    try {
+      await deleteExpenseFromSubcollection(item);
+      await saveExpenseActivityToSubcollection(activity);
+      setErrors(null);
+    } catch (error) {
+      setData(data);
+      console.error('[finance.removeExpense] Failed to delete expense subcollection doc', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.delete_expense'));
+    }
   };
 
   const addExpenseCategory = async () => {
@@ -2276,7 +2334,13 @@ export default function Finance() {
     if (!name) return;
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), name]));
-    await persistState({ ...data, expenseCategories: categories, expenseActivities: appendExpenseActivity(expenseActivities, 'add_category', `Added category ${name}`) });
+    const activity = createExpenseActivity('add_category', `Added category ${name}`);
+    await persistState({ expenseCategories: categories });
+    try {
+      await saveExpenseActivityToSubcollection(activity);
+    } catch (error) {
+      console.error('[finance.addExpenseCategory] Failed to save activity subcollection doc', error);
+    }
     setNewCategory('');
   };
 
@@ -2284,7 +2348,13 @@ export default function Finance() {
     const isUsed = expenses.some(e => e.category === name);
     if (isUsed) return setErrors('Cannot delete category that is used by expenses.');
 
-    await persistState({ ...data, expenseCategories: expenseCategories.filter(c => c !== name), expenseActivities: appendExpenseActivity(expenseActivities, 'delete_category', `Removed category ${name}`) });
+    const activity = createExpenseActivity('delete_category', `Removed category ${name}`);
+    await persistState({ expenseCategories: expenseCategories.filter(c => c !== name) });
+    try {
+      await saveExpenseActivityToSubcollection(activity);
+    } catch (error) {
+      console.error('[finance.deleteExpenseCategory] Failed to save activity subcollection doc', error);
+    }
   };
 
   const exportExpensePDF = () => {
@@ -2374,7 +2444,7 @@ export default function Finance() {
     const changed = corrected.some((session, idx) => session !== (data.cashSessions || [])[idx]);
     if (!changed) return;
 
-    persistState({ ...data, cashSessions: corrected });
+    persistState({ cashSessions: corrected });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.transactions, data.expenses, data.cashSessions]);
 
@@ -2402,7 +2472,7 @@ export default function Finance() {
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
-          <p className="text-sm text-slate-600">Track sale-time KPIs, live balances, cash movement, profitability, and transaction-level cashbook effects.</p>
+          <p className="text-sm text-slate-600">Track cash movement, expenses, shifts, and transaction-level operating effects.</p>
         </div>
 
         {errors && (
@@ -2469,6 +2539,7 @@ export default function Finance() {
                     ? 'Cashbook scope: Full history (complete accounting view).'
                     : 'Cashbook scope: Recent 90 days (performance mode). Switch to Full History Scope for complete accounting view/export.'}
                 </div>
+                {can('analytics') && (
                 <div className="rounded-md border p-2.5 bg-muted/20">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Removed Download Center</div>
                   <div className="flex flex-wrap gap-2">
@@ -2481,6 +2552,7 @@ export default function Finance() {
                     Exports use current Cashbook filters and include metadata summary + detailed audit columns for accountant review.
                   </p>
                 </div>
+                )}
               </CardContent>
             </Card>
 
@@ -2511,10 +2583,10 @@ export default function Finance() {
                         <th className="p-2 text-right">Cash In</th>
                         <th className="p-2 text-right">Cash Out</th>
                         <th className="p-2 text-right">Net Cash Effect</th>
-                        <th className="p-2 text-right">Net Profit Effect</th>
+                        {can('analytics') && <th className="p-2 text-right">Net Profit Effect</th>}
                         <th className="p-2 text-left">Effect Summary</th>
                         <th className="p-2 text-left">Flags / Risk</th>
-                        {showFullCashbookColumns && (
+                        {showFullCashbookColumns && can('analytics') && (
                           <>
                             <th className="p-2 text-right">Gross Sales</th>
                             <th className="p-2 text-right">Sales Return</th>
@@ -2548,7 +2620,7 @@ export default function Finance() {
                           <td className="p-2 text-right">{formatINR(row.cashIn)}</td>
                           <td className="p-2 text-right">{formatINR(row.cashOut)}</td>
                           <td className="p-2 text-right">{formatINR(row.netCashEffect)}</td>
-                          <td className="p-2 text-right">{formatINR(row.netProfitEffect)}</td>
+                          {can('analytics') && <td className="p-2 text-right">{formatINR(row.netProfitEffect)}</td>}
                           <td className="p-2">{row.effectSummary}</td>
                           <td className="p-2">
                             <div className="flex flex-wrap gap-1 items-center">
@@ -2563,7 +2635,7 @@ export default function Finance() {
                               )}
                             </div>
                           </td>
-                          {showFullCashbookColumns && (
+                          {showFullCashbookColumns && can('analytics') && (
                             <>
                               <td className="p-2 text-right">{formatINR(row.grossSales)}</td>
                               <td className="p-2 text-right">{formatINR(row.salesReturn)}</td>
@@ -2579,7 +2651,7 @@ export default function Finance() {
                       ))}
                       {!filteredCashbookRows.length && (
                         <tr>
-                          <td className="p-4 text-center text-muted-foreground" colSpan={showFullCashbookColumns ? 24 : 16}>No cashbook rows for selected filters.</td>
+                          <td className="p-4 text-center text-muted-foreground" colSpan={can('analytics') ? (showFullCashbookColumns ? 24 : 16) : 15}>No cashbook rows for selected filters.</td>
                         </tr>
                       )}
                     </tbody>
@@ -2623,6 +2695,7 @@ export default function Finance() {
                       <StatCard label="Online Sales (at sale)" value={formatINRSummary(todayFinanceBreakdown.onlineSalesAtSale)} />
                     </div>
                   </div>
+                  {can('analytics') && (
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -2630,6 +2703,7 @@ export default function Finance() {
                       <StatCard label="Gross Profit" value={formatINRSummary(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
                     </div>
                   </div>
+                  )}
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -3252,6 +3326,7 @@ export default function Finance() {
                         </div>
 
                         <Button className="w-full rounded-2xl py-3 text-base" onClick={addExpense} disabled={!(expenseTitle.trim().length > 0 && Number(expenseAmount) > 0)}>Add Expense</Button>
+                        {can('cashWithdrawal') && (
                         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 space-y-2">
                           <div className="text-sm font-semibold text-amber-900">Withdraw Cash</div>
                           <div className="text-xs text-amber-800">Current available: {formatINR(openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : dailyCashTotals.systemCashTotal)}</div>
@@ -3259,6 +3334,7 @@ export default function Finance() {
                           <Input value={cashWithdrawNote} onChange={e => setCashWithdrawNote(e.target.value)} placeholder="Reason / note (optional)" />
                           <Button variant="outline" className="w-full" onClick={() => addCashAdjustment('cash_withdrawal')} disabled={!(Number(cashWithdrawAmount) > 0)}>Withdraw Cash</Button>
                         </div>
+                        )}
 
                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                           <div className="flex items-center justify-between">

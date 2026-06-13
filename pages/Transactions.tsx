@@ -20,6 +20,8 @@ import { downloadTransactionsData, downloadTransactionsTemplate, importHistorica
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { useRoleSession } from '../src/auth/roleSession';
+import { can } from '../src/auth/simplePermissions';
 
 function ConfirmDialog({ open, title, message, onCancel, onConfirm }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void }) {
   if (!open) return null;
@@ -40,6 +42,7 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm }: { open: bo
 }
 
 export default function Transactions() {
+  const { requestAdminOverride } = useRoleSession();
   const getTransactionReference = (tx: Transaction) => tx.type === 'sale'
     ? (tx.invoiceNo || tx.id.slice(-6))
     : tx.type === 'return'
@@ -628,7 +631,11 @@ export default function Transactions() {
     setRecentlyAddedProductId(null);
   };
 
-  const openTransactionEditor = (tx: Transaction) => {
+  const openTransactionEditor = async (tx: Transaction) => {
+    if (!can('transactionEdit')) {
+      const approved = await requestAdminOverride('Admin password required to edit transaction history.');
+      if (!approved) return;
+    }
     const settlement = getSaleSettlementBreakdown(tx);
     setEditingTx(tx);
     setEditingAmount(String(Math.abs(tx.total || 0)));
@@ -679,11 +686,15 @@ export default function Transactions() {
     setBatchEditTransactionIds(queue);
     setBatchEditTransactionIndex(0);
     const firstTx = transactions.find(tx => tx.id === queue[0]);
-    if (firstTx) openTransactionEditor(firstTx);
+    if (firstTx) void openTransactionEditor(firstTx);
   };
 
-  const handleBatchDeleteTransactions = () => {
+  const handleBatchDeleteTransactions = async () => {
     if (!selectedTransactions.length) return;
+    if (!can('transactionDelete')) {
+      const approved = await requestAdminOverride('Admin password required to delete transaction history.');
+      if (!approved) return;
+    }
     setIsBatchDeleteConfirmOpen(true);
   };
   const confirmBatchDeleteTransactions = () => {
@@ -761,7 +772,11 @@ export default function Transactions() {
     [deleteTargetTx]
   );
 
-  const openDeleteModal = (tx: Transaction) => {
+  const openDeleteModal = async (tx: Transaction) => {
+    if (!can('transactionDelete')) {
+      const approved = await requestAdminOverride('Admin password required to delete transaction history.');
+      if (!approved) return;
+    }
     setDeleteTargetTx(tx);
     setDeleteReason('customer_cancelled');
     setDeleteReasonOther('');
@@ -949,7 +964,7 @@ export default function Transactions() {
           const nextTx = nextTransactions.find(tx => tx.id === nextTransactionId);
           if (nextTx) {
             setBatchEditTransactionIndex(nextIndex);
-            openTransactionEditor(nextTx);
+            void openTransactionEditor(nextTx);
             return;
           }
         }
@@ -1394,8 +1409,8 @@ export default function Transactions() {
             {selectedTransactionIds.length > 0 && (
               <>
                 <Button variant="outline" onClick={() => downloadTransactionsData(selectedTransactions)} className="h-9 text-sm">Download Selected</Button>
-                <Button variant="outline" onClick={handleBatchEditTransactions} className="h-9 text-sm">Batch Edit ({selectedTransactionIds.length})</Button>
-                <Button variant="destructive" onClick={handleBatchDeleteTransactions} className="h-9 text-sm">Batch Delete</Button>
+                {can('transactionEdit') && <Button variant="outline" onClick={handleBatchEditTransactions} className="h-9 text-sm">Batch Edit ({selectedTransactionIds.length})</Button>}
+                {can('transactionDelete') && <Button variant="destructive" onClick={() => void handleBatchDeleteTransactions()} className="h-9 text-sm">Batch Delete</Button>}
               </>
             )}
             <Button variant="outline" onClick={() => setIsImportModalOpen(true)} className="h-9 text-sm">Upload Existing File</Button>
@@ -1487,21 +1502,22 @@ export default function Transactions() {
               </CardContent>
           </Card>
 
-          {/* Gross Profit */}
-          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-amber-50 to-orange-100/50">
+          {can('analytics') && (
+            <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-amber-50 to-orange-100/50">
               <div className="absolute right-0 top-0 p-3 opacity-10">
-                  <TrendingUp className="w-16 h-16 text-amber-600" />
+                <TrendingUp className="w-16 h-16 text-amber-600" />
               </div>
               <CardContent className="p-4 relative z-10">
-                   <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Gross Profit</p>
-                   <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-amber-700">₹</span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(stats.grossProfit)}>
-                          {formatMoneyWhole(stats.grossProfit)}
-                      </span>
-                   </div>
+                <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Gross Profit</p>
+                <div className="mt-2 flex items-baseline gap-1">
+                  <span className="text-sm md:text-lg font-bold text-amber-700">₹</span>
+                  <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(stats.grossProfit)}>
+                    {formatMoneyWhole(stats.grossProfit)}
+                  </span>
+                </div>
               </CardContent>
-          </Card>
+            </Card>
+          )}
       </div>
 
       {/* Responsive Transaction Grid */}
@@ -1661,8 +1677,8 @@ export default function Transactions() {
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedTx(tx)}><Eye className="w-3.5 h-3.5" /></Button>
-                                                {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
-                                                {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
+                                                {can('transactionEdit') && !tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
+                                                {can('transactionDelete') && !tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => void openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleShareInvoiceWhatsApp(tx)}><Download className="w-3.5 h-3.5" /></Button>
                                             </div>
