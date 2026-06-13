@@ -7,10 +7,11 @@ import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, Lock } from 'lucide-react';
 import { Button } from './components/ui';
+import RoleLoginModal from './components/auth/RoleLoginModal';
 import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
-import { can as simpleCan, getCurrentRole, installRoleTestHelpers, SimplePermission } from './src/auth/simplePermissions';
+import { can as simpleCan, clearAccessSession, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
 import { RestrictedPage } from './components/auth/PermissionGuard';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
@@ -90,7 +91,8 @@ function AppContent() {
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
   const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
   const [salesCartCount, setSalesCartCount] = useState(0);
-  const { logoutRole } = useRoleSession();
+  const { logoutRole, setSession } = useRoleSession();
+  const [accessUnlocked, setAccessUnlocked] = useState(() => isAccessUnlocked());
 
   useEffect(() => {
     installRoleTestHelpers();
@@ -106,6 +108,8 @@ function AppContent() {
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!user) {
+        clearAccessSession();
+        setAccessUnlocked(false);
         setCurrentEmail(null);
         setAuthStatus('unauthenticated');
         return;
@@ -116,6 +120,18 @@ function AppContent() {
     });
 
     return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const refreshAccess = () => setAccessUnlocked(isAccessUnlocked());
+    window.addEventListener('storage', refreshAccess);
+    window.addEventListener('stockflow-access-lock', refreshAccess);
+    window.addEventListener('stockflow-role-change', refreshAccess);
+    return () => {
+      window.removeEventListener('storage', refreshAccess);
+      window.removeEventListener('stockflow-access-lock', refreshAccess);
+      window.removeEventListener('stockflow-role-change', refreshAccess);
+    };
   }, []);
 
 
@@ -205,8 +221,22 @@ function AppContent() {
     '/purchase-panel': 'purchases',
   };
   const showNav = (path: string) => !routePermissions[path] || simpleCan(routePermissions[path]);
+  const handleAccessLogin = (session: Parameters<typeof setSession>[0]) => {
+    if (!session) return;
+    setSession(session);
+    setAccessSession({ role: session.role, operatorId: session.operatorId, operatorName: session.operatorName });
+    setAccessUnlocked(true);
+  };
+
+  const handleLockAccess = () => {
+    logoutRole();
+    lockAccess();
+    setAccessUnlocked(false);
+  };
+
   const handleFullLogout = () => {
     logoutRole();
+    clearAccessSession();
     logout();
   };
 
@@ -221,6 +251,12 @@ function AppContent() {
   if (authStatus === 'unverified') {
       return <VerificationRequired email={currentEmail || undefined} />;
   }
+
+  if (authStatus === 'authenticated' && !accessUnlocked) {
+    return <RoleLoginModal onLogin={handleAccessLogin} />;
+  }
+
+  const operatorName = getCurrentOperatorName();
 
   return (
     <Router>
@@ -308,8 +344,11 @@ function AppContent() {
           
           <div className="p-4 border-t flex flex-col gap-2">
              <div className="text-xs text-muted-foreground mt-2">
-                <p>User: {currentEmail}</p><p>Access: {getCurrentRole() === 'operator' ? 'Operator' : 'Admin'}</p>
+                <p>User: {currentEmail}</p><p>Access: {getCurrentRole() === 'operator' ? `Operator${operatorName ? ` (${operatorName})` : ''}` : 'Admin'}</p>
              </div>
+             <Button variant="ghost" size="sm" onClick={handleLockAccess} className="w-full text-muted-foreground hover:text-foreground justify-start px-2">
+                <Lock className="w-4 h-4 mr-2" /> Lock Access
+             </Button>
              <Button variant="ghost" size="sm" onClick={handleFullLogout} className="w-full text-muted-foreground hover:text-destructive justify-start px-2">
                 <LogOut className="w-4 h-4 mr-2" /> Logout
              </Button>

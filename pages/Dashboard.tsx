@@ -14,6 +14,7 @@ import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView
 import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { auth } from '../services/firebase';
+import { can } from '../src/auth/simplePermissions';
 
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
@@ -387,6 +388,16 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const payablePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable > 0), [allPartyDashboardRows]);
   const creditPartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [allPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
+
+  const operatorRevenueBreakdown = useMemo(() => transactions.filter((tx) => tx.type === 'sale').reduce((acc, tx) => {
+    const settlement = getSaleSettlementBreakdown(tx);
+    acc.cash += Math.max(0, Number(settlement.cashPaid || 0));
+    acc.online += Math.max(0, Number(settlement.onlinePaid || 0));
+    acc.credit += Math.max(0, Number(settlement.creditDue || 0));
+    return acc;
+  }, { cash: 0, online: 0, credit: 0 }), [transactions]);
+  const operatorTotalSettledRevenue = operatorRevenueBreakdown.cash + operatorRevenueBreakdown.online + operatorRevenueBreakdown.credit;
+
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
   const totalPayable = useMemo(() => payablePartyRows.reduce((sum, party) => sum + party.payable, 0), [payablePartyRows]);
   const isPayableTraceEnabled = useMemo(() => {
@@ -1061,6 +1072,17 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="text-sm text-muted-foreground">Receivable and payable overview.</p>
         </div>
+        {!can('reports') && (
+          <Card className="min-h-[92px] border-emerald-100 bg-emerald-50/50">
+            <CardHeader className="pb-2"><CardTitle className="text-xs text-emerald-700">Revenue Breakdown</CardTitle></CardHeader>
+            <CardContent className="grid grid-cols-2 gap-2 text-sm">
+              <div><div className="text-[11px] text-muted-foreground">Cash</div><div className="font-bold text-emerald-800">{formatINRPrecise(operatorRevenueBreakdown.cash)}</div></div>
+              <div><div className="text-[11px] text-muted-foreground">Online</div><div className="font-bold text-emerald-800">{formatINRPrecise(operatorRevenueBreakdown.online)}</div></div>
+              <div><div className="text-[11px] text-muted-foreground">Credit</div><div className="font-bold text-emerald-800">{formatINRPrecise(operatorRevenueBreakdown.credit)}</div></div>
+              <div><div className="text-[11px] text-muted-foreground">Total settled/revenue</div><div className="font-bold text-emerald-900">{formatINRPrecise(operatorTotalSettledRevenue)}</div></div>
+            </CardContent>
+          </Card>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Card className="min-h-[92px]">
             <CardHeader className="pb-2"><CardTitle className="text-xs text-blue-700">Total Receivable</CardTitle></CardHeader>
