@@ -335,130 +335,60 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const storeCreditCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) > 0), [allCustomerDashboardRows]);
   const zeroDueCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) <= 0), [allCustomerDashboardRows]);
 
-  const partyPayables = useMemo<PartyPayableRow[]>(() => {
-    const dueOrders = orders
-      .filter((order) => Math.max(0, Number(order.remainingAmount || 0)) > 0)
-      .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
-
-    return parties
-      .map((party) => {
-        const partyDueOrders = dueOrders.filter((order) => order.partyId === party.id);
-        const payable = partyDueOrders.reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
-        return { ...party, payable, dueOrders: partyDueOrders };
-      })
-      .filter((party) => party.payable > 0)
-      .sort((a, b) => b.payable - a.payable);
-  }, [parties, orders]);
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => {
     const partyMap = new Map<string, PartyPayableRow>();
-    const activeSupplierEntries = (supplierPayments || []).filter((sp) => !sp.deletedAt);
-    const activeSupplierPaymentIds = new Set(activeSupplierEntries.map((sp) => sp.id));
-    const activeSupplierVouchers = new Set(activeSupplierEntries.filter((sp) => !!sp.voucherNo).map((sp) => String(sp.voucherNo)));
-    parties.forEach((p) => partyMap.set(p.id, { ...p, payable: 0, dueOrders: [], partyCredit: 0 }));
-    orders.forEach((o) => {
-      if (!partyMap.has(o.partyId)) {
-        partyMap.set(o.partyId, { id: o.partyId, name: o.partyName || 'Unknown Party', phone: o.partyPhone || '', gst: o.partyGst || '', location: o.partyLocation || '', payable: 0, dueOrders: [], partyCredit: 0 });
+    parties.forEach((party) => partyMap.set(party.id, { ...party, payable: 0, dueOrders: [], partyCredit: 0 }));
+    orders.forEach((order) => {
+      if (!partyMap.has(order.partyId)) {
+        partyMap.set(order.partyId, {
+          id: order.partyId,
+          name: order.partyName || 'Unknown Party',
+          phone: order.partyPhone || '',
+          gst: order.partyGst || '',
+          location: order.partyLocation || '',
+          createdAt: order.createdAt || order.orderDate || new Date().toISOString(),
+          updatedAt: order.updatedAt || order.createdAt || order.orderDate || new Date().toISOString(),
+          payable: 0,
+          dueOrders: [],
+          partyCredit: 0,
+        });
       }
     });
-    supplierPayments.forEach((sp) => {
-      if (!partyMap.has(sp.partyId)) {
-        partyMap.set(sp.partyId, { id: sp.partyId, name: sp.partyName || 'Unknown Party', phone: '', gst: '', location: '', payable: 0, dueOrders: [], partyCredit: 0 });
+    supplierPayments.forEach((payment) => {
+      if (!partyMap.has(payment.partyId)) {
+        partyMap.set(payment.partyId, {
+          id: payment.partyId,
+          name: payment.partyName || 'Unknown Party',
+          phone: '',
+          gst: '',
+          location: '',
+          createdAt: payment.createdAt || payment.paidAt || new Date().toISOString(),
+          updatedAt: payment.updatedAt || payment.createdAt || payment.paidAt || new Date().toISOString(),
+          payable: 0,
+          dueOrders: [],
+          partyCredit: 0,
+        });
       }
     });
-    const dueOrders = orders.filter((o) => Math.max(0, Number(o.remainingAmount || 0)) > 0);
+
     partyMap.forEach((party, id) => {
-      const partyDueOrders = dueOrders.filter((o) => o.partyId === id);
-      const payable = partyDueOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
-      const partyOrders = orders.filter((o) => o.partyId === id);
-      const partyTotalPurchase = partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.totalAmount || 0)), 0);
-      const partySupplierPayments = activeSupplierEntries.filter((payment) => (
-        payment.partyId
-          ? payment.partyId === id
-          : String(payment.partyName || '').trim().toLowerCase() === String(party.name || '').trim().toLowerCase()
-      ));
-      const partyTotalPaid = partySupplierPayments.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount || 0)), 0);
-      const partyLevelCreditCap = Math.max(0, Number((partyTotalPaid - partyTotalPurchase).toFixed(2)));
-      const ledgerCredit = (partyCreditLedger || []).filter((entry) => {
-        if (entry.partyId !== id) return false;
-        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
-        const linkedActivePayment = (entry.sourcePaymentId && activeSupplierPaymentIds.has(entry.sourcePaymentId))
-          || (entry.sourceVoucherNo && activeSupplierVouchers.has(String(entry.sourceVoucherNo)));
-        if (linkedActivePayment) return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
-        const usedAmount = (entry.usageHistory || []).reduce((acc, usage) => acc + Math.max(0, Number(usage.amount) || 0), 0);
-        return usedAmount > 0;
-      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
-      const rawDerivedFallback = partySupplierPayments.reduce((sum, payment) => {
-        const fullAmount = Math.max(0, Number(payment.amount || 0));
-        const explicitCredit = Math.max(0, Number(payment.partyCreditCreated || 0));
-        const appliedToPayable = Math.max(0, Number(payment.paymentAppliedToPayable || 0));
-        const allocationTotal = Array.isArray(payment.allocations)
-          ? payment.allocations.reduce((acc, allocation) => acc + Math.max(0, Number(allocation.amount || 0)), 0)
-          : 0;
-        const derivedCreditFromApplied = (fullAmount > appliedToPayable) ? Number((fullAmount - appliedToPayable).toFixed(2)) : 0;
-        const derivedCreditFromAllocations = (fullAmount > allocationTotal) ? Number((fullAmount - allocationTotal).toFixed(2)) : 0;
-        const derivedCredit = explicitCredit > 0
-          ? explicitCredit
-          : (appliedToPayable > 0 && fullAmount > appliedToPayable)
-            ? derivedCreditFromApplied
-            : (fullAmount > allocationTotal)
-              ? derivedCreditFromAllocations
-              : 0;
-        if (derivedCredit <= 0) return sum;
-        const linkedLedgerExists = (partyCreditLedger || []).some((entry) => (
-          entry.partyId === id
-          && (
-            (entry.sourcePaymentId && entry.sourcePaymentId === payment.id)
-            || (entry.sourceVoucherNo && payment.voucherNo && String(entry.sourceVoucherNo) === String(payment.voucherNo))
-          )
-          && Math.max(0, Number(entry.remainingAmount || 0)) > 0
-        ));
-        const linkedLedgerCredit = linkedLedgerExists
-          ? (partyCreditLedger || []).filter((entry) => (
-            entry.partyId === id
-            && (
-              (entry.sourcePaymentId && entry.sourcePaymentId === payment.id)
-              || (entry.sourceVoucherNo && payment.voucherNo && String(entry.sourceVoucherNo) === String(payment.voucherNo))
-            )
-            && Math.max(0, Number(entry.remainingAmount || 0)) > 0
-          )).reduce((acc, entry) => acc + Math.max(0, Number(entry.remainingAmount || 0)), 0)
-          : 0;
-        const fallbackCreditUsed = !linkedLedgerExists && derivedCredit > 0 ? derivedCredit : 0;
-        const shouldTrace = (String(payment.partyName || '').trim().toLowerCase() === 'k') || fullAmount > 0;
-        if ((import.meta as any).env?.DEV && shouldTrace) {
-        }
-        if (linkedLedgerExists) return sum;
-        if ((import.meta as any).env?.DEV) {
-        }
-        return sum + derivedCredit;
-      }, 0);
-      const availableFallbackCap = Math.max(0, Number((partyLevelCreditCap - ledgerCredit).toFixed(2)));
-      const fallbackCredit = Math.min(rawDerivedFallback, availableFallbackCap);
-      const partyCredit = ledgerCredit + fallbackCredit;
-      if ((import.meta as any).env?.DEV) {
-        const reconPayload: Record<string, unknown> = {
-          partyId: id,
-          partyName: party.name,
-          partyTotalPurchase,
-          partyTotalPaid,
-          partyLevelCreditCap,
-          ledgerCredit,
-          rawDerivedFallback,
-          cappedFallbackCredit: fallbackCredit,
-          finalPartyCredit: partyCredit,
-        };
-        if (rawDerivedFallback > fallbackCredit) {
-          reconPayload.reason = 'fallback capped by party-level overpayment to avoid stale allocation inflation';
-        }
-      }
-      partyMap.set(id, { ...party, payable, dueOrders: partyDueOrders, partyCredit });
+      const ledger = buildPurchasePartyLedger({ partyId: id, purchaseOrders: orders, supplierPayments, partyCreditLedger });
+      const dueOrders = orders.filter((order) => order.partyId === id && Math.max(0, Number(order.remainingAmount || 0)) > 0);
+      partyMap.set(id, {
+        ...party,
+        payable: Math.max(0, Number(ledger.summary.currentPayable || ledger.summary.netPayable || 0)),
+        dueOrders,
+        partyCredit: Math.max(0, Number(ledger.summary.currentCredit || ledger.summary.ourCredit || 0)),
+      });
     });
+
     return Array.from(partyMap.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [parties, orders, supplierPayments, partyCreditLedger]);
   const payablePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable > 0), [allPartyDashboardRows]);
   const creditPartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [allPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
-  const totalPayable = useMemo(() => partyPayables.reduce((sum, party) => sum + party.payable, 0), [partyPayables]);
+  const totalPayable = useMemo(() => payablePartyRows.reduce((sum, party) => sum + party.payable, 0), [payablePartyRows]);
   const isPayableTraceEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -502,8 +432,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         purchaseParties: parties.length,
       },
       chains: {
-        totalPayable: 'Total Payable <- sum payableRows.payable <- allPartyDashboardRows <- orders.remainingAmount <- loadData()',
-        partyCredit: 'Party Credit <- row.partyCredit <- ledgerCredit + fallbackCredit <- partyCreditLedger + supplierPayments fallback <- loadData()',
+        totalPayable: 'Total Payable <- sum payableRows.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay',
+        partyCredit: 'Party Credit <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay',
         creditTabCount: 'Parties with Credit (N) <- creditPartyRows.length <- allPartyDashboardRows.filter(payable <= 0 && partyCredit > 0)',
       },
     };
@@ -516,6 +446,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       ));
       const matchingPartyCreditLedgerEntries = partyCreditLedger.filter((entry) => entry.partyId === row.id);
       const matchedPurchaseParties = parties.filter((p) => p.id === row.id || normalize(p.name) === normalize(row.name));
+      const canonicalLedger = buildPurchasePartyLedger({ partyId: row.id, purchaseOrders: orders, supplierPayments, partyCreditLedger });
       const sourceOrders = matchingPurchaseOrders.filter((o) => Math.max(0, Number(o.remainingAmount || 0)) > 0).map((o) => ({
         id: o.id,
         billNumber: o.billNumber,
@@ -523,14 +454,11 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         totalPaid: Number(o.totalPaid || 0),
         remainingAmount: Number(o.remainingAmount || 0),
       }));
-      const payableResult = sourceOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
+      const payableResult = Math.max(0, Number(canonicalLedger.summary.currentPayable || canonicalLedger.summary.netPayable || 0));
       const partyTotalPurchase = matchingPurchaseOrders.reduce((sum, o) => sum + Math.max(0, Number(o.totalAmount || 0)), 0);
       const partyTotalPaid = matchingSupplierPayments.reduce((sum, p) => sum + Math.max(0, Number(p.amount || 0)), 0);
       const partyLevelCreditCap = Math.max(0, Number((partyTotalPaid - partyTotalPurchase).toFixed(2)));
-      const ledgerCreditResult = matchingPartyCreditLedgerEntries.filter((entry) => {
-        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
-        return Math.max(0, Number(entry.remainingAmount || 0)) > 0 || (entry.usageHistory || []).some((usage) => Math.max(0, Number(usage.amount || 0)) > 0);
-      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const ledgerCreditResult = Math.max(0, Number(canonicalLedger.summary.currentCredit || canonicalLedger.summary.ourCredit || 0));
       const rawDerivedFallback = matchingSupplierPayments.reduce((sum, payment) => {
         const fullAmount = Math.max(0, Number(payment.amount || 0));
         const explicitCredit = Math.max(0, Number(payment.partyCreditCreated || 0));
@@ -547,7 +475,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       }, 0);
       const availableFallbackCap = Math.max(0, Number((partyLevelCreditCap - ledgerCreditResult).toFixed(2)));
       const fallbackCreditResult = Math.min(rawDerivedFallback, availableFallbackCap);
-      const finalPartyCredit = ledgerCreditResult + fallbackCreditResult;
+      const finalPartyCredit = ledgerCreditResult;
       const tab = row.payable > 0 ? 'Payables' : (Math.max(0, Number(row.partyCredit || 0)) > 0 ? 'Parties with Credit' : 'Parties Without Due');
       const payload = {
         traceType: 'PARTY_VALUE_CHAIN',
@@ -607,8 +535,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           matchedPurchaseParty: matchedPurchaseParties[0] || null,
         },
         calculations: {
-          payable: { formula: 'sum matching purchaseOrders.remainingAmount', result: payableResult },
-          ledgerCredit: { formula: 'sum matching partyCreditLedger.remainingAmount', result: ledgerCreditResult },
+          payable: { formula: 'buildPurchasePartyLedger.summary.currentPayable', result: payableResult },
+          ledgerCredit: { formula: 'buildPurchasePartyLedger.summary.currentCredit', result: ledgerCreditResult },
           fallbackCredit: {
             formula: 'supplier payment derived fallback capped by party-level overpayment',
             partyTotalPurchase,
@@ -618,15 +546,15 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
             cappedFallbackCredit: fallbackCreditResult,
             result: fallbackCreditResult,
           },
-          finalPartyCredit: { formula: 'ledgerCredit + fallbackCredit', result: finalPartyCredit },
+          finalPartyCredit: { formula: 'canonical currentCredit', result: finalPartyCredit },
           tabDecision: {
             formula: 'payable > 0 ? Payables : partyCredit > 0 ? Parties with Credit : Parties Without Due',
             result: tab,
           },
         },
         chain: {
-          payableChain: `Payable ₹${Number(row.payable || 0)} <- row.payable <- sum purchaseOrders.remainingAmount <- allPartyDashboardRows <- loadData() <- memoryState/cloud store`,
-          partyCreditChain: `Party Credit ₹${Number(row.partyCredit || 0)} <- row.partyCredit <- ledgerCredit + fallbackCredit <- partyCreditLedger.remainingAmount + supplierPayments derived fallback <- allPartyDashboardRows <- loadData() <- memoryState/cloud store`,
+          payableChain: `Payable ₹${Number(row.payable || 0)} <- row.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay`,
+          partyCreditChain: `Party Credit ₹${Number(row.partyCredit || 0)} <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay`,
         },
       };
       console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify(payload, null, 2));
