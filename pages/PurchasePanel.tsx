@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { applyPartyCreditToPurchaseOrder, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
+import { PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, SupplierPaymentLedgerEntry } from '../types';
+import { applyConfirmedPurchasePartyOrderOnlyMerge, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -59,6 +59,260 @@ const isPlaceholder = (v?: string) => {
   const t = normalizeText(v).toLowerCase();
   return !t || t === 'no variant' || t === 'no color' || t === '-';
 };
+
+
+type DuplicatePartyTotals = {
+  purchaseCount: number;
+  totalPurchase: number;
+  totalPaidOnOrders: number;
+  remainingPayable: number;
+  paymentCount: number;
+  totalSupplierPayments: number;
+  paymentAppliedToPayable: number;
+  partyCreditCreated: number;
+  creditEntryCount: number;
+  creditCreated: number;
+  creditRemaining: number;
+  creditUsed: number;
+};
+
+type DuplicatePartyGroup = {
+  id: string;
+  reasons: string[];
+  canonicalPartyId: string;
+  canonicalReason: string;
+  safeToMerge: boolean;
+  parties: PurchaseParty[];
+  totalsByParty: Record<string, DuplicatePartyTotals>;
+  purchaseOrdersByParty: Record<string, Array<{ id: string; ref: string; date: string; totalAmount: number; remainingAmount: number }>>;
+  supplierPaymentsByParty: Record<string, Array<{ id: string; ref: string; date: string; amount: number; paymentAppliedToPayable: number; partyCreditCreated: number }>>;
+  partyCreditsByParty: Record<string, Array<{ id: string; ref: string; amountCreated: number; remainingAmount: number; usedAmount: number }>>;
+  overlapRisks: string[];
+  patchCounts: { purchaseOrders: number; supplierPayments: number; partyCreditLedger: number; purchasePartiesArchive: number };
+  mergedTotals: DuplicatePartyTotals;
+};
+
+type DuplicatePartyReport = {
+  generatedAt: string;
+  summary: { duplicateGroups: number; safeGroups: number; unsafeGroups: number; partiesInDuplicateGroups: number; purchaseOrderPatches: number; supplierPaymentPatches: number; creditLedgerPatches: number; archiveCandidates: number };
+  groups: DuplicatePartyGroup[];
+};
+
+type SupplierMergeApplyStatus = { applied: number; skipped: number; failed: number; message?: string };
+type ManualMayurbhaiMergePreview = {
+  canonicalParty?: PurchaseParty;
+  duplicateParty?: PurchaseParty;
+  currentCanonicalPayable: number;
+  duplicatePayable: number;
+  mergedTotalPurchases: number;
+  mergedPayments: number;
+  mergedCreditCreated: number;
+  mergedCreditApplied: number;
+  mergedPayable: number;
+  purchaseOrdersToReassign: PurchaseOrder[];
+  matchesExpected: boolean;
+  validationMessages: string[];
+};
+
+const normalizeSupplierNameForMatch = (value?: string) => normalizePartyName(value).replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+const normalizeSupplierPhoneForMatch = (value?: string) => String(value || '').replace(/\D/g, '');
+const normalizeSupplierGstForMatch = (value?: string) => String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+const isMissingSupplierPhone = (value?: string) => {
+  const raw = String(value || '').trim().toLowerCase();
+  return !raw || raw === '-' || raw === '—' || raw === 'na' || raw === 'n/a' || raw === 'none' || raw === 'null' || raw === 'undefined';
+};
+const MAYURBHAI_MANUAL_MERGE = {
+  canonicalPartyId: 'party-1777900371469-61499',
+  duplicatePartyId: 'party-1780890742939-410',
+  expectedOrderCount: 21,
+  expectedTotalPurchases: 3419694.20,
+  expectedPayments: 2010000,
+  expectedNetPayable: 1409694.20,
+};
+const moneyMatches = (actual: number, expected: number) => Math.abs((Number(actual) || 0) - expected) < 0.01;
+const emptyDuplicateTotals = (): DuplicatePartyTotals => ({ purchaseCount: 0, totalPurchase: 0, totalPaidOnOrders: 0, remainingPayable: 0, paymentCount: 0, totalSupplierPayments: 0, paymentAppliedToPayable: 0, partyCreditCreated: 0, creditEntryCount: 0, creditCreated: 0, creditRemaining: 0, creditUsed: 0 });
+const addDuplicateTotals = (a: DuplicatePartyTotals, b: DuplicatePartyTotals): DuplicatePartyTotals => ({
+  purchaseCount: a.purchaseCount + b.purchaseCount,
+  totalPurchase: a.totalPurchase + b.totalPurchase,
+  totalPaidOnOrders: a.totalPaidOnOrders + b.totalPaidOnOrders,
+  remainingPayable: a.remainingPayable + b.remainingPayable,
+  paymentCount: a.paymentCount + b.paymentCount,
+  totalSupplierPayments: a.totalSupplierPayments + b.totalSupplierPayments,
+  paymentAppliedToPayable: a.paymentAppliedToPayable + b.paymentAppliedToPayable,
+  partyCreditCreated: a.partyCreditCreated + b.partyCreditCreated,
+  creditEntryCount: a.creditEntryCount + b.creditEntryCount,
+  creditCreated: a.creditCreated + b.creditCreated,
+  creditRemaining: a.creditRemaining + b.creditRemaining,
+  creditUsed: a.creditUsed + b.creditUsed,
+});
+
+const buildDuplicatePurchasePartyReport = ({ parties, orders, supplierPayments, partyCreditLedger }: { parties: PurchaseParty[]; orders: PurchaseOrder[]; supplierPayments: SupplierPaymentLedgerEntry[]; partyCreditLedger: PartyCreditLedgerEntry[] }): DuplicatePartyReport => {
+  const candidateGroups: Array<{ ids: Set<string>; reason: string }> = [];
+  const addCandidate = (items: PurchaseParty[], reason: string) => {
+    const ids = new Set(items.map((p) => p.id).filter(Boolean));
+    if (ids.size > 1) candidateGroups.push({ ids, reason });
+  };
+  const byName = new Map<string, PurchaseParty[]>();
+  const byPhone = new Map<string, PurchaseParty[]>();
+  const byGst = new Map<string, PurchaseParty[]>();
+  parties.forEach((party) => {
+    const name = normalizeSupplierNameForMatch(party.name);
+    const phone = normalizeSupplierPhoneForMatch(party.phone);
+    const gst = normalizeSupplierGstForMatch(party.gst);
+    if (name) byName.set(name, [...(byName.get(name) || []), party]);
+    if (phone) byPhone.set(phone, [...(byPhone.get(phone) || []), party]);
+    if (gst) byGst.set(gst, [...(byGst.get(gst) || []), party]);
+  });
+  byName.forEach((items) => {
+    if (items.length > 1) addCandidate(items, items.some((p) => isMissingSupplierPhone(p.phone)) && items.some((p) => !isMissingSupplierPhone(p.phone)) ? 'same normalized name with missing/present phone' : 'same normalized name');
+  });
+  byPhone.forEach((items) => {
+    if (items.length > 1) addCandidate(items, 'same phone number');
+  });
+  byGst.forEach((items) => {
+    if (items.length > 1) addCandidate(items, 'same GST number');
+  });
+
+  const merged: Array<{ ids: Set<string>; reasons: Set<string> }> = [];
+  candidateGroups.forEach((candidate) => {
+    const overlapping = merged.filter((group) => [...candidate.ids].some((id) => group.ids.has(id)));
+    if (!overlapping.length) {
+      merged.push({ ids: new Set(candidate.ids), reasons: new Set([candidate.reason]) });
+      return;
+    }
+    const target = overlapping[0];
+    candidate.ids.forEach((id) => target.ids.add(id));
+    target.reasons.add(candidate.reason);
+    overlapping.slice(1).forEach((extra) => {
+      extra.ids.forEach((id) => target.ids.add(id));
+      extra.reasons.forEach((reason) => target.reasons.add(reason));
+      const idx = merged.indexOf(extra);
+      if (idx >= 0) merged.splice(idx, 1);
+    });
+  });
+
+  const groups = merged.map((candidate, index): DuplicatePartyGroup | null => {
+    const groupParties = parties.filter((party) => candidate.ids.has(party.id));
+    if (groupParties.length < 2) return null;
+    const totalsByParty: Record<string, DuplicatePartyTotals> = {};
+    const purchaseOrdersByParty: DuplicatePartyGroup['purchaseOrdersByParty'] = {};
+    const supplierPaymentsByParty: DuplicatePartyGroup['supplierPaymentsByParty'] = {};
+    const partyCreditsByParty: DuplicatePartyGroup['partyCreditsByParty'] = {};
+    const groupIds = new Set(groupParties.map((p) => p.id));
+    const risks: string[] = [];
+
+    groupParties.forEach((party) => {
+      const partyOrders = orders.filter((order) => order.partyId === party.id);
+      const partyPayments = supplierPayments.filter((payment) => payment.partyId === party.id && !payment.deletedAt);
+      const partyCredits = partyCreditLedger.filter((entry) => entry.partyId === party.id);
+      const creditUsed = partyCredits.reduce((sum, entry) => sum + (entry.usageHistory || []).reduce((inner, usage) => inner + Math.max(0, Number(usage.amount || 0)), 0), 0);
+      totalsByParty[party.id] = {
+        purchaseCount: partyOrders.length,
+        totalPurchase: partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.totalAmount || 0)), 0),
+        totalPaidOnOrders: partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.totalPaid || 0)), 0),
+        remainingPayable: partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0),
+        paymentCount: partyPayments.length,
+        totalSupplierPayments: partyPayments.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount || 0)), 0),
+        paymentAppliedToPayable: partyPayments.reduce((sum, payment) => sum + Math.max(0, Number(payment.paymentAppliedToPayable || 0)), 0),
+        partyCreditCreated: partyPayments.reduce((sum, payment) => sum + Math.max(0, Number(payment.partyCreditCreated || 0)), 0),
+        creditEntryCount: partyCredits.length,
+        creditCreated: partyCredits.reduce((sum, entry) => sum + Math.max(0, Number(entry.amountCreated || 0)), 0),
+        creditRemaining: partyCredits.reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0),
+        creditUsed,
+      };
+      purchaseOrdersByParty[party.id] = partyOrders.map((order) => ({ id: order.id, ref: order.billNumber || order.id, date: order.orderDate || order.createdAt, totalAmount: Math.max(0, Number(order.totalAmount || 0)), remainingAmount: Math.max(0, Number(order.remainingAmount || 0)) }));
+      supplierPaymentsByParty[party.id] = partyPayments.map((payment) => ({ id: payment.id, ref: payment.voucherNo || payment.id, date: payment.paidAt || payment.createdAt, amount: Math.max(0, Number(payment.amount || 0)), paymentAppliedToPayable: Math.max(0, Number(payment.paymentAppliedToPayable || 0)), partyCreditCreated: Math.max(0, Number(payment.partyCreditCreated || 0)) }));
+      partyCreditsByParty[party.id] = partyCredits.map((entry) => ({ id: entry.id, ref: entry.sourceVoucherNo || entry.sourcePaymentId || entry.id, amountCreated: Math.max(0, Number(entry.amountCreated || 0)), remainingAmount: Math.max(0, Number(entry.remainingAmount || 0)), usedAmount: (entry.usageHistory || []).reduce((sum, usage) => sum + Math.max(0, Number(usage.amount || 0)), 0) }));
+    });
+
+    const orderRefs = new Map<string, string[]>();
+    orders.filter((order) => groupIds.has(order.partyId)).forEach((order) => {
+      const ref = String(order.billNumber || '').trim().toLowerCase();
+      const signature = ref ? `bill:${ref}` : `signature:${(order.orderDate || '').slice(0, 10)}:${Math.max(0, Number(order.totalAmount || 0)).toFixed(2)}`;
+      orderRefs.set(signature, [...(orderRefs.get(signature) || []), order.id]);
+    });
+    orderRefs.forEach((ids, key) => {
+      if (ids.length > 1) risks.push(`Possible overlapping purchase reference ${key}: ${ids.join(', ')}`);
+    });
+
+    supplierPayments.filter((payment) => groupIds.has(payment.partyId) && !payment.deletedAt).forEach((payment) => {
+      (payment.allocations || []).forEach((allocation) => {
+        const allocatedOrder = orders.find((order) => order.id === allocation.orderId);
+        if (!allocatedOrder) risks.push(`Supplier payment ${payment.voucherNo || payment.id} allocates to missing purchase order ${allocation.orderId}.`);
+        else if (!groupIds.has(allocatedOrder.partyId)) risks.push(`Supplier payment ${payment.voucherNo || payment.id} allocates to order ${allocatedOrder.id} outside this duplicate group.`);
+      });
+    });
+
+    const canonical = [...groupParties].sort((a, b) => {
+      const aTotals = totalsByParty[a.id] || emptyDuplicateTotals();
+      const bTotals = totalsByParty[b.id] || emptyDuplicateTotals();
+      const score = (party: PurchaseParty, totals: DuplicatePartyTotals) => (
+        (isMissingSupplierPhone(party.phone) ? 0 : 1000)
+        + (normalizeSupplierGstForMatch(party.gst) ? 500 : 0)
+        + (party.location ? 100 : 0)
+        + (party.contactPerson ? 50 : 0)
+        + totals.purchaseCount + totals.paymentCount + totals.creditEntryCount
+      );
+      const diff = score(b, bTotals) - score(a, aTotals);
+      if (diff !== 0) return diff;
+      return new Date(b.updatedAt || b.createdAt || '').getTime() - new Date(a.updatedAt || a.createdAt || '').getTime();
+    })[0];
+    const mergedTotals = groupParties.reduce((acc, party) => addDuplicateTotals(acc, totalsByParty[party.id] || emptyDuplicateTotals()), emptyDuplicateTotals());
+    const patchCounts = groupParties.reduce((acc, party) => {
+      if (party.id === canonical.id) return acc;
+      acc.purchaseOrders += purchaseOrdersByParty[party.id]?.length || 0;
+      acc.supplierPayments += supplierPaymentsByParty[party.id]?.length || 0;
+      acc.partyCreditLedger += partyCreditsByParty[party.id]?.length || 0;
+      acc.purchasePartiesArchive += 1;
+      return acc;
+    }, { purchaseOrders: 0, supplierPayments: 0, partyCreditLedger: 0, purchasePartiesArchive: 0 });
+
+    return {
+      id: `duplicate-party-group-${index + 1}`,
+      reasons: [...candidate.reasons],
+      canonicalPartyId: canonical.id,
+      canonicalReason: 'Most complete supplier profile: valid phone/GST/contact data and linked history count are preferred.',
+      safeToMerge: risks.length === 0,
+      parties: groupParties,
+      totalsByParty,
+      purchaseOrdersByParty,
+      supplierPaymentsByParty,
+      partyCreditsByParty,
+      overlapRisks: risks,
+      patchCounts,
+      mergedTotals,
+    };
+  }).filter((group): group is DuplicatePartyGroup => Boolean(group));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: {
+      duplicateGroups: groups.length,
+      safeGroups: groups.filter((group) => group.safeToMerge).length,
+      unsafeGroups: groups.filter((group) => !group.safeToMerge).length,
+      partiesInDuplicateGroups: groups.reduce((sum, group) => sum + group.parties.length, 0),
+      purchaseOrderPatches: groups.reduce((sum, group) => sum + group.patchCounts.purchaseOrders, 0),
+      supplierPaymentPatches: groups.reduce((sum, group) => sum + group.patchCounts.supplierPayments, 0),
+      creditLedgerPatches: groups.reduce((sum, group) => sum + group.patchCounts.partyCreditLedger, 0),
+      archiveCandidates: groups.reduce((sum, group) => sum + group.patchCounts.purchasePartiesArchive, 0),
+    },
+    groups,
+  };
+};
+
+const findExistingPurchasePartyMatch = (parties: PurchaseParty[], draft: { name: string; phone?: string; gst?: string }, excludeId?: string | null) => {
+  const name = normalizeSupplierNameForMatch(draft.name);
+  const phone = normalizeSupplierPhoneForMatch(draft.phone);
+  const gst = normalizeSupplierGstForMatch(draft.gst);
+  return parties.find((party) => {
+    if (excludeId && party.id === excludeId) return false;
+    const partyName = normalizeSupplierNameForMatch(party.name);
+    const partyPhone = normalizeSupplierPhoneForMatch(party.phone);
+    const partyGst = normalizeSupplierGstForMatch(party.gst);
+    return (!!name && !!partyName && name === partyName) || (!!phone && !!partyPhone && phone === partyPhone) || (!!gst && !!partyGst && gst === partyGst);
+  }) || null;
+};
+
 const buildPendingVariantRows = (variants: string[], colors: string[]): PendingVariantRow[] => {
   const cleanVariants = variants.map(v => v.trim()).filter(Boolean);
   const cleanColors = colors.map(c => c.trim()).filter(Boolean);
@@ -187,6 +441,11 @@ export default function PurchasePanel() {
   const [newPartyLocation, setNewPartyLocation] = useState('');
   const [newPartyContactPerson, setNewPartyContactPerson] = useState('');
   const [newPartyNotes, setNewPartyNotes] = useState('');
+  const [partyDuplicateWarning, setPartyDuplicateWarning] = useState<PurchaseParty | null>(null);
+  const [supplierMergeApplyStatus, setSupplierMergeApplyStatus] = useState<SupplierMergeApplyStatus | null>(null);
+  const [applyingSupplierMergeGroupId, setApplyingSupplierMergeGroupId] = useState<string | null>(null);
+  const [manualMayurbhaiMergeStatus, setManualMayurbhaiMergeStatus] = useState<SupplierMergeApplyStatus | null>(null);
+  const [isApplyingManualMayurbhaiMerge, setIsApplyingManualMayurbhaiMerge] = useState(false);
 
   const [showPartyPopup, setShowPartyPopup] = useState(false);
   const [editingPartyId, setEditingPartyId] = useState<string | null>(null);
@@ -481,10 +740,12 @@ export default function PurchasePanel() {
     setNewPartyLocation('');
     setNewPartyContactPerson('');
     setNewPartyNotes('');
+    setPartyDuplicateWarning(null);
   };
 
   const saveParty = async (closePopupAfterCreate = false) => {
     if (!newPartyName.trim()) return;
+    setPartyDuplicateWarning(null);
     if (editingPartyId) {
       const existing = parties.find(p => p.id === editingPartyId);
       if (!existing) return;
@@ -494,6 +755,11 @@ export default function PurchasePanel() {
       resetPartyDraft();
       if (closePopupAfterCreate) setShowPartyPopup(false);
       refresh();
+      return;
+    }
+    const existingMatch = findExistingPurchasePartyMatch(parties, { name: newPartyName, phone: newPartyPhone, gst: newPartyGst });
+    if (existingMatch) {
+      setPartyDuplicateWarning(existingMatch);
       return;
     }
     const party = await createPurchaseParty({
@@ -511,6 +777,7 @@ export default function PurchasePanel() {
   };
 
   const startEditingParty = (party: PurchaseParty, openPopup = true) => {
+    setPartyDuplicateWarning(null);
     setEditingPartyId(party.id);
     setNewPartyName(party.name || '');
     setNewPartyPhone(party.phone || '');
@@ -525,6 +792,16 @@ export default function PurchasePanel() {
     const party = parties.find(p => p.id === partyId);
     if (!party) return;
     setPurchaseCreditApplyError(null);
+
+    const existingOrderBeingEdited = editingOrderId ? orders.find((o) => o.id === editingOrderId) : null;
+    const hasExistingPaymentOrCreditHistory = Boolean(existingOrderBeingEdited?.paymentHistory?.some((entry) => Math.max(0, Number(entry.amount || 0)) > 0));
+    if (editingOrderId && hasExistingPaymentOrCreditHistory) {
+      // Purchase edits that touch an order with payment or party-credit history need
+      // a full accounting reversal/replay. Until that flow exists, block the edit
+      // instead of silently erasing supplier payment allocations or credit usage.
+      setPurchaseCreditApplyError('This purchase already has payment or supplier-credit history. Editing is blocked to protect the supplier ledger; reverse/recreate or add a supported recalculation flow first.');
+      return;
+    }
 
     const lines: PurchaseOrderLine[] = activeLines.map((line, idx) => ({
       id: `${line.key}-${idx}-${uid()}`,
@@ -736,6 +1013,207 @@ export default function PurchasePanel() {
     return map;
   }, [parties, orders, supplierPayments, partyCreditLedger]);
 
+  const duplicatePartyReport = useMemo(() => buildDuplicatePurchasePartyReport({ parties, orders, supplierPayments, partyCreditLedger }), [parties, orders, supplierPayments, partyCreditLedger]);
+
+  const manualMayurbhaiMergePreview = useMemo<ManualMayurbhaiMergePreview>(() => {
+    const canonicalParty = parties.find((party) => party.id === MAYURBHAI_MANUAL_MERGE.canonicalPartyId);
+    const duplicateParty = parties.find((party) => party.id === MAYURBHAI_MANUAL_MERGE.duplicatePartyId);
+    const currentCanonicalLedger = buildPurchasePartyLedger({ partyId: MAYURBHAI_MANUAL_MERGE.canonicalPartyId, purchaseOrders: orders, supplierPayments, partyCreditLedger });
+    const duplicateLedger = buildPurchasePartyLedger({ partyId: MAYURBHAI_MANUAL_MERGE.duplicatePartyId, purchaseOrders: orders, supplierPayments, partyCreditLedger });
+    const purchaseOrdersToReassign = orders
+      .filter((order) => order.partyId === MAYURBHAI_MANUAL_MERGE.duplicatePartyId)
+      .sort((a, b) => new Date(a.orderDate || a.createdAt || '').getTime() - new Date(b.orderDate || b.createdAt || '').getTime());
+    const simulatedOrders = orders.map((order) => {
+      if (order.partyId !== MAYURBHAI_MANUAL_MERGE.duplicatePartyId || !canonicalParty) return order;
+      return {
+        ...order,
+        partyId: canonicalParty.id,
+        partyName: canonicalParty.name,
+        partyPhone: canonicalParty.phone,
+        partyGst: canonicalParty.gst,
+        partyLocation: canonicalParty.location,
+      };
+    });
+    const mergedLedger = buildPurchasePartyLedger({ partyId: MAYURBHAI_MANUAL_MERGE.canonicalPartyId, purchaseOrders: simulatedOrders, supplierPayments, partyCreditLedger });
+    const validationMessages: string[] = [];
+    if (!canonicalParty) validationMessages.push('Canonical Mayurbhai supplier is not visible.');
+    if (!duplicateParty) validationMessages.push('Duplicate no-phone Mayurbhai supplier is not visible. It may already be archived.');
+    if (purchaseOrdersToReassign.length !== MAYURBHAI_MANUAL_MERGE.expectedOrderCount) validationMessages.push(`Expected ${MAYURBHAI_MANUAL_MERGE.expectedOrderCount} purchase orders to reassign, found ${purchaseOrdersToReassign.length}.`);
+    if (!moneyMatches(mergedLedger.summary.totalPurchase, MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)) validationMessages.push(`Merged purchases preview is ₹${formatNumber(mergedLedger.summary.totalPurchase)}, expected ₹${formatNumber(MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)}.`);
+    if (!moneyMatches(mergedLedger.summary.actualPayments, MAYURBHAI_MANUAL_MERGE.expectedPayments)) validationMessages.push(`Merged payments preview is ₹${formatNumber(mergedLedger.summary.actualPayments)}, expected ₹${formatNumber(MAYURBHAI_MANUAL_MERGE.expectedPayments)}.`);
+    if (!moneyMatches(mergedLedger.summary.netPayable, MAYURBHAI_MANUAL_MERGE.expectedNetPayable)) validationMessages.push(`Merged net payable preview is ₹${formatNumber(mergedLedger.summary.netPayable)}, expected ₹${formatNumber(MAYURBHAI_MANUAL_MERGE.expectedNetPayable)}.`);
+    return {
+      canonicalParty,
+      duplicateParty,
+      currentCanonicalPayable: currentCanonicalLedger.summary.netPayable,
+      duplicatePayable: duplicateLedger.summary.netPayable,
+      mergedTotalPurchases: mergedLedger.summary.totalPurchase,
+      mergedPayments: mergedLedger.summary.actualPayments,
+      mergedCreditCreated: mergedLedger.summary.creditCreated || mergedLedger.summary.partyCreditCreated || 0,
+      mergedCreditApplied: mergedLedger.summary.creditUsed || mergedLedger.summary.partyCreditUsed || 0,
+      mergedPayable: mergedLedger.summary.netPayable,
+      purchaseOrdersToReassign,
+      matchesExpected: validationMessages.length === 0,
+      validationMessages,
+    };
+  }, [parties, orders, supplierPayments, partyCreditLedger]);
+
+  const downloadDuplicatePartyDryRun = () => {
+    const payload = {
+      reportType: 'duplicate_purchase_party_dry_run',
+      generatedAt: duplicatePartyReport.generatedAt,
+      note: 'Read-only report. No supplier, purchase, payment, or credit rows were changed.',
+      summary: duplicatePartyReport.summary,
+      groups: duplicatePartyReport.groups,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `duplicate-purchase-parties-dry-run-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadManualMayurbhaiMergeRollback = (preview: ManualMayurbhaiMergePreview) => {
+    const affectedPartyIds = new Set([MAYURBHAI_MANUAL_MERGE.canonicalPartyId, MAYURBHAI_MANUAL_MERGE.duplicatePartyId]);
+    const rollback = {
+      reportType: 'manual_mayurbhai_order_only_merge_rollback_snapshot',
+      generatedAt: new Date().toISOString(),
+      note: 'Rollback snapshot captured before the manual confirmed Mayurbhai order-only merge. Only purchase order identity fields and the duplicate party archive marker are changed by the merge.',
+      expected: MAYURBHAI_MANUAL_MERGE,
+      preview: {
+        currentCanonicalPayable: preview.currentCanonicalPayable,
+        duplicatePayable: preview.duplicatePayable,
+        mergedTotalPurchases: preview.mergedTotalPurchases,
+        mergedPayments: preview.mergedPayments,
+        mergedCreditCreated: preview.mergedCreditCreated,
+        mergedCreditApplied: preview.mergedCreditApplied,
+        mergedPayable: preview.mergedPayable,
+        purchaseOrderCount: preview.purchaseOrdersToReassign.length,
+      },
+      purchaseParties: parties.filter((party) => affectedPartyIds.has(party.id)),
+      purchaseOrders: preview.purchaseOrdersToReassign,
+      supplierPayments: supplierPayments.filter((payment) => affectedPartyIds.has(payment.partyId)),
+      partyCreditLedger: partyCreditLedger.filter((entry) => entry.partyId && affectedPartyIds.has(entry.partyId)),
+    };
+    const blob = new Blob([JSON.stringify(rollback, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `mayurbhai-order-only-merge-rollback-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadSupplierMergeRollback = (groupsToApply: DuplicatePartyGroup[]) => {
+    const affectedPartyIds = new Set(groupsToApply.flatMap((group) => group.parties.map((party) => party.id)));
+    const duplicatePartyIds = new Set(groupsToApply.flatMap((group) => group.parties.filter((party) => party.id !== group.canonicalPartyId).map((party) => party.id)));
+    const rollback = {
+      reportType: 'supplier_merge_rollback_snapshot',
+      generatedAt: new Date().toISOString(),
+      note: 'Rollback snapshot captured before safe supplier merge. Amounts/payment histories are not changed by the merge.',
+      groups: groupsToApply.map((group) => ({ id: group.id, canonicalPartyId: group.canonicalPartyId, duplicatePartyIds: group.parties.filter((party) => party.id !== group.canonicalPartyId).map((party) => party.id) })),
+      purchaseParties: parties.filter((party) => affectedPartyIds.has(party.id)),
+      purchaseOrders: orders.filter((order) => duplicatePartyIds.has(order.partyId)),
+      supplierPayments: supplierPayments.filter((payment) => duplicatePartyIds.has(payment.partyId)),
+      partyCreditLedger: partyCreditLedger.filter((entry) => entry.partyId && duplicatePartyIds.has(entry.partyId)),
+    };
+    const blob = new Blob([JSON.stringify(rollback, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `supplier-merge-rollback-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const applySafeSupplierMergeGroups = async (groupsToApply: DuplicatePartyGroup[], statusGroupId: string) => {
+    const safeGroups = groupsToApply.filter((group) => group.safeToMerge);
+    const skipped = groupsToApply.length - safeGroups.length;
+    if (!safeGroups.length) {
+      setSupplierMergeApplyStatus({ applied: 0, skipped: groupsToApply.length, failed: 0, message: 'No safe supplier merge groups selected. Unsafe groups remain blocked.' });
+      return;
+    }
+    const affectedDuplicateCount = safeGroups.reduce((sum, group) => sum + group.parties.filter((party) => party.id !== group.canonicalPartyId).length, 0);
+    const ok = window.confirm(`This will merge ${safeGroups.length} safe supplier duplicate group(s) and archive ${affectedDuplicateCount} duplicate supplier profile(s). Only identity references will be updated; amounts, payment histories, and purchase totals will not be changed.`);
+    if (!ok) return;
+
+    setApplyingSupplierMergeGroupId(statusGroupId);
+    setSupplierMergeApplyStatus(null);
+    downloadSupplierMergeRollback(safeGroups);
+
+    let applied = 0;
+    let failed = 0;
+    for (const group of safeGroups) {
+      const canonical = group.parties.find((party) => party.id === group.canonicalPartyId);
+      if (!canonical) {
+        failed += 1;
+        continue;
+      }
+      try {
+        await applySafePurchasePartyMerge({
+          canonicalParty: { id: canonical.id, name: canonical.name, phone: canonical.phone, gst: canonical.gst, location: canonical.location },
+          duplicatePartyIds: group.parties.filter((party) => party.id !== canonical.id).map((party) => party.id),
+          mergeGroupId: group.id,
+        });
+        applied += 1;
+      } catch (error) {
+        console.error('Failed to apply safe supplier merge', error, group.id);
+        failed += 1;
+      }
+    }
+
+    refresh();
+    setApplyingSupplierMergeGroupId(null);
+    setSupplierMergeApplyStatus({ applied, skipped, failed, message: 'Analyzer refreshed after merge attempt. Unsafe groups remain blocked.' });
+  };
+
+  const applyManualMayurbhaiMerge = async () => {
+    if (!manualMayurbhaiMergePreview.matchesExpected || !manualMayurbhaiMergePreview.canonicalParty || !manualMayurbhaiMergePreview.duplicateParty) {
+      setManualMayurbhaiMergeStatus({ applied: 0, skipped: 1, failed: 0, message: 'Preview does not match the required Mayurbhai totals/order count. Confirm Merge remains blocked.' });
+      return;
+    }
+    const ok = window.confirm(`Confirm Mayurbhai order-only merge?\n\nThis will reassign exactly ${manualMayurbhaiMergePreview.purchaseOrdersToReassign.length} purchase orders from ${MAYURBHAI_MANUAL_MERGE.duplicatePartyId} to ${MAYURBHAI_MANUAL_MERGE.canonicalPartyId} and archive the duplicate supplier.\n\nIt will NOT change purchase amounts, remainingAmount, totalPaid, paymentHistory, supplierPayments, or partyCreditLedger.`);
+    if (!ok) return;
+
+    setIsApplyingManualMayurbhaiMerge(true);
+    setManualMayurbhaiMergeStatus(null);
+    downloadManualMayurbhaiMergeRollback(manualMayurbhaiMergePreview);
+    try {
+      const result = await applyConfirmedPurchasePartyOrderOnlyMerge({
+        canonicalParty: {
+          id: manualMayurbhaiMergePreview.canonicalParty.id,
+          name: manualMayurbhaiMergePreview.canonicalParty.name,
+          phone: manualMayurbhaiMergePreview.canonicalParty.phone,
+          gst: manualMayurbhaiMergePreview.canonicalParty.gst,
+          location: manualMayurbhaiMergePreview.canonicalParty.location,
+        },
+        duplicatePartyId: MAYURBHAI_MANUAL_MERGE.duplicatePartyId,
+        expectedPurchaseOrderIds: manualMayurbhaiMergePreview.purchaseOrdersToReassign.map((order) => order.id),
+        mergeReason: 'manual_confirmed_mayurbhai_order_only_merge',
+      });
+      refresh();
+      setManualMayurbhaiMergeStatus({
+        applied: result.purchasePartiesArchived,
+        skipped: result.skippedPurchaseOrders,
+        failed: 0,
+        message: `Reassigned ${result.purchaseOrdersUpdated} purchase orders and archived ${result.purchasePartiesArchived} duplicate Mayurbhai supplier. Analyzer refreshed.`,
+      });
+    } catch (error) {
+      console.error('Failed to apply manual Mayurbhai order-only merge', error);
+      setManualMayurbhaiMergeStatus({ applied: 0, skipped: 0, failed: 1, message: error instanceof Error ? error.message : 'Manual Mayurbhai merge failed.' });
+    } finally {
+      setIsApplyingManualMayurbhaiMerge(false);
+    }
+  };
+
 
   const partyCreditsByPartyId = useMemo(() => {
     const ledger = (loadData().partyCreditLedger || []) as Array<{ partyId?: string; partyName?: string; remainingAmount?: number }>;
@@ -924,6 +1402,159 @@ export default function PurchasePanel() {
 
       {true ? (
         <>
+        <Card className="border-amber-200 bg-amber-50/40">
+          <CardHeader className="flex flex-row items-start justify-between gap-3">
+            <div>
+              <CardTitle>Duplicate Supplier Analyzer</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">Admin duplicate merge tool. Detects split purchase parties by normalized name, phone, and GST; only safe groups can be applied.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={downloadDuplicatePartyDryRun} disabled={!duplicatePartyReport.groups.length}>Download Dry-run JSON</Button>
+              <Button
+                size="sm"
+                variant="default"
+                onClick={() => applySafeSupplierMergeGroups(duplicatePartyReport.groups, 'all')}
+                disabled={!duplicatePartyReport.summary.safeGroups || Boolean(applyingSupplierMergeGroupId)}
+              >
+                {applyingSupplierMergeGroupId === 'all' ? 'Applying...' : 'Apply All Safe'}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid gap-2 text-xs md:grid-cols-4">
+              <SummaryCard label="Duplicate Groups" value={String(duplicatePartyReport.summary.duplicateGroups)} />
+              <SummaryCard label="Safe Groups" value={String(duplicatePartyReport.summary.safeGroups)} />
+              <SummaryCard label="Unsafe Groups" value={String(duplicatePartyReport.summary.unsafeGroups)} />
+              <SummaryCard label="Patch Preview" value={`${duplicatePartyReport.summary.purchaseOrderPatches + duplicatePartyReport.summary.supplierPaymentPatches + duplicatePartyReport.summary.creditLedgerPatches} refs`} />
+            </div>
+            {supplierMergeApplyStatus && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
+                <div className="font-semibold">Supplier merge result</div>
+                <div className="mt-1">Applied: {supplierMergeApplyStatus.applied} · Skipped: {supplierMergeApplyStatus.skipped} · Failed: {supplierMergeApplyStatus.failed}</div>
+                {supplierMergeApplyStatus.message && <div className="mt-1 text-blue-700">{supplierMergeApplyStatus.message}</div>}
+              </div>
+            )}
+            {!duplicatePartyReport.groups.length ? (
+              <div className="rounded-xl border border-dashed border-amber-200 bg-white/70 p-4 text-sm text-muted-foreground">No likely duplicate purchase parties found.</div>
+            ) : (
+              <div className="space-y-3">
+                {duplicatePartyReport.groups.map((group) => {
+                  const canonical = group.parties.find((party) => party.id === group.canonicalPartyId);
+                  return (
+                    <div key={group.id} className="rounded-2xl border border-amber-200 bg-white p-4 text-sm">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <div className="font-semibold text-slate-900">Duplicate group: {group.parties.map((party) => party.name).join(' / ')}</div>
+                          <div className="mt-1 text-xs text-muted-foreground">Reasons: {group.reasons.join(', ')}</div>
+                          <div className="mt-1 text-xs text-slate-600">Canonical candidate: <span className="font-semibold">{canonical?.name || group.canonicalPartyId}</span> ({group.canonicalPartyId}) · {canonical?.phone || 'No phone'}</div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${group.safeToMerge ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>{group.safeToMerge ? 'Safe to merge' : 'Unsafe — review risks'}</span>
+                          <Button
+                            size="sm"
+                            variant={group.safeToMerge ? 'default' : 'outline'}
+                            onClick={() => applySafeSupplierMergeGroups([group], group.id)}
+                            disabled={!group.safeToMerge || Boolean(applyingSupplierMergeGroupId)}
+                            title={group.safeToMerge ? 'Apply identity-only merge for this safe group' : 'Unsafe duplicate groups cannot be applied'}
+                          >
+                            {applyingSupplierMergeGroupId === group.id ? 'Applying...' : 'Apply Safe Merge'}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
+                        <SummaryCard label="Merged Purchases" value={`₹${formatNumber(group.mergedTotals.totalPurchase)}`} />
+                        <SummaryCard label="Merged Payments" value={`₹${formatNumber(group.mergedTotals.totalSupplierPayments)}`} />
+                        <SummaryCard label="Merged Credit Remaining" value={`₹${formatNumber(group.mergedTotals.creditRemaining)}`} />
+                        <SummaryCard label="Dry-run Patches" value={`${group.patchCounts.purchaseOrders} PO / ${group.patchCounts.supplierPayments} Pay / ${group.patchCounts.partyCreditLedger} Credit`} />
+                      </div>
+                      <div className="mt-3 overflow-auto rounded-xl border">
+                        <table className="w-full min-w-[760px] text-xs">
+                          <thead className="bg-slate-50"><tr><th className="p-2 text-left">Party</th><th className="p-2 text-left">Phone</th><th className="p-2 text-left">ID</th><th className="p-2 text-right">Purchases</th><th className="p-2 text-right">Payments</th><th className="p-2 text-right">Credit Remaining</th></tr></thead>
+                          <tbody>
+                            {group.parties.map((party) => {
+                              const totals = group.totalsByParty[party.id] || emptyDuplicateTotals();
+                              return <tr key={party.id} className="border-t"><td className="p-2 font-medium">{party.name}</td><td className="p-2">{party.phone || '—'}</td><td className="p-2 font-mono text-[11px]">{party.id}</td><td className="p-2 text-right">₹{formatNumber(totals.totalPurchase)}</td><td className="p-2 text-right">₹{formatNumber(totals.totalSupplierPayments)}</td><td className="p-2 text-right">₹{formatNumber(totals.creditRemaining)}</td></tr>;
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {group.overlapRisks.length > 0 && <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700"><div className="font-semibold">Overlap risks</div><ul className="mt-1 list-disc pl-4">{group.overlapRisks.map((risk, idx) => <li key={`${group.id}-risk-${idx}`}>{risk}</li>)}</ul></div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        <Card className="border-blue-200 bg-blue-50/40">
+          <CardHeader className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <CardTitle>Manual Mayurbhai Confirmed Merge Simulation</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Order-only preview for canonical Mayurbhai ({MAYURBHAI_MANUAL_MERGE.canonicalPartyId}) and duplicate no-phone Mayurbhai ({MAYURBHAI_MANUAL_MERGE.duplicatePartyId}). Supplier payments, party credit, purchase amounts, totalPaid, remainingAmount, and paymentHistory are not changed.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant={manualMayurbhaiMergePreview.matchesExpected ? 'default' : 'outline'}
+              onClick={applyManualMayurbhaiMerge}
+              disabled={!manualMayurbhaiMergePreview.matchesExpected || isApplyingManualMayurbhaiMerge}
+              title={manualMayurbhaiMergePreview.matchesExpected ? 'Download rollback JSON and apply the confirmed order-only merge' : 'Blocked until preview matches expected Mayurbhai totals and 21 purchase orders'}
+            >
+              {isApplyingManualMayurbhaiMerge ? 'Applying...' : 'Confirm Merge'}
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid gap-2 text-xs md:grid-cols-4">
+              <SummaryCard label="Current Canonical Payable" value={`₹${formatNumber(manualMayurbhaiMergePreview.currentCanonicalPayable)}`} />
+              <SummaryCard label="Duplicate Payable" value={`₹${formatNumber(manualMayurbhaiMergePreview.duplicatePayable)}`} />
+              <SummaryCard label="Merged Purchases" value={`₹${formatNumber(manualMayurbhaiMergePreview.mergedTotalPurchases)}`} />
+              <SummaryCard label="Merged Net Payable" value={`₹${formatNumber(manualMayurbhaiMergePreview.mergedPayable)}`} />
+              <SummaryCard label="Merged Payments" value={`₹${formatNumber(manualMayurbhaiMergePreview.mergedPayments)}`} />
+              <SummaryCard label="Merged Credit Created" value={`₹${formatNumber(manualMayurbhaiMergePreview.mergedCreditCreated)}`} />
+              <SummaryCard label="Merged Credit Applied" value={`₹${formatNumber(manualMayurbhaiMergePreview.mergedCreditApplied)}`} />
+              <SummaryCard label="Orders to Reassign" value={`${manualMayurbhaiMergePreview.purchaseOrdersToReassign.length} / ${MAYURBHAI_MANUAL_MERGE.expectedOrderCount}`} />
+            </div>
+            <div className={`rounded-xl border p-3 text-xs ${manualMayurbhaiMergePreview.matchesExpected ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+              <div className="font-semibold">{manualMayurbhaiMergePreview.matchesExpected ? 'Preview matches expected Mayurbhai merge totals. Confirm Merge is enabled.' : 'Confirm Merge blocked until every expected value matches.'}</div>
+              <div className="mt-1">Expected: purchases ₹{formatNumber(MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)} · payments ₹{formatNumber(MAYURBHAI_MANUAL_MERGE.expectedPayments)} · net payable ₹{formatNumber(MAYURBHAI_MANUAL_MERGE.expectedNetPayable)} · orders {MAYURBHAI_MANUAL_MERGE.expectedOrderCount}</div>
+              {manualMayurbhaiMergePreview.validationMessages.length > 0 && (
+                <ul className="mt-2 list-disc pl-4">
+                  {manualMayurbhaiMergePreview.validationMessages.map((message, idx) => <li key={`mayurbhai-validation-${idx}`}>{message}</li>)}
+                </ul>
+              )}
+            </div>
+            {manualMayurbhaiMergeStatus && (
+              <div className="rounded-xl border border-blue-200 bg-white p-3 text-xs text-blue-800">
+                <div className="font-semibold">Manual Mayurbhai merge result</div>
+                <div className="mt-1">Applied: {manualMayurbhaiMergeStatus.applied} · Skipped: {manualMayurbhaiMergeStatus.skipped} · Failed: {manualMayurbhaiMergeStatus.failed}</div>
+                {manualMayurbhaiMergeStatus.message && <div className="mt-1">{manualMayurbhaiMergeStatus.message}</div>}
+              </div>
+            )}
+            <div className="overflow-auto rounded-xl border bg-white">
+              <table className="w-full min-w-[820px] text-xs">
+                <thead className="bg-slate-50">
+                  <tr><th className="p-2 text-left">Purchase Order</th><th className="p-2 text-left">Date</th><th className="p-2 text-left">Current Party</th><th className="p-2 text-right">Total</th><th className="p-2 text-right">Paid</th><th className="p-2 text-right">Remaining</th></tr>
+                </thead>
+                <tbody>
+                  {manualMayurbhaiMergePreview.purchaseOrdersToReassign.map((order) => (
+                    <tr key={order.id} className="border-t">
+                      <td className="p-2 font-medium">{order.billNumber || order.id}<div className="font-mono text-[10px] text-muted-foreground">{order.id}</div></td>
+                      <td className="p-2">{order.orderDate || order.createdAt || '—'}</td>
+                      <td className="p-2">{order.partyName || MAYURBHAI_MANUAL_MERGE.duplicatePartyId}</td>
+                      <td className="p-2 text-right">₹{formatNumber(Number(order.totalAmount || 0))}</td>
+                      <td className="p-2 text-right">₹{formatNumber(Number(order.totalPaid || 0))}</td>
+                      <td className="p-2 text-right">₹{formatNumber(Number(order.remainingAmount || 0))}</td>
+                    </tr>
+                  ))}
+                  {!manualMayurbhaiMergePreview.purchaseOrdersToReassign.length && (
+                    <tr><td colSpan={6} className="p-4 text-center text-muted-foreground">No duplicate Mayurbhai purchase orders are currently assigned to the no-phone party.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader><CardTitle>Create Party</CardTitle></CardHeader>
@@ -934,6 +1565,13 @@ export default function PurchasePanel() {
               <div><Label>Location</Label><Input value={newPartyLocation} onChange={e => setNewPartyLocation(e.target.value)} /></div>
               <div><Label>Contact Person</Label><Input value={newPartyContactPerson} onChange={e => setNewPartyContactPerson(e.target.value)} /></div>
               <div><Label>Notes</Label><textarea value={newPartyNotes} onChange={e => setNewPartyNotes(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={3} /></div>
+              {partyDuplicateWarning && !editingPartyId && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  <div className="font-semibold">Existing supplier found. Update existing supplier instead?</div>
+                  <div className="mt-1">{partyDuplicateWarning.name} · {partyDuplicateWarning.phone || 'No phone'} · ID {partyDuplicateWarning.id}</div>
+                  <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => startEditingParty(partyDuplicateWarning, true)}>Open Existing Supplier</Button>
+                </div>
+              )}
               <Button onClick={saveParty}><Plus className="w-4 h-4 mr-1" /> {editingPartyId ? "Update Party" : "Save Party"}</Button>
             </CardContent>
           </Card>
@@ -954,16 +1592,16 @@ export default function PurchasePanel() {
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || '—'}</div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
                     <SummaryCard label="Total Purchase" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
-                    <SummaryCard label="Actual Payments" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.actualPayments || 0)}`} />
+                    <SummaryCard label="Total Payments" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.actualPayments || 0)}`} />
                     <SummaryCard label="Payable Applied" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.payableApplied || 0)}`} />
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
                     <SummaryCard label="Credit Created" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditCreated || partyLedgers.get(p.id)?.summary.partyCreditCreated || 0)}`} />
-                    <SummaryCard label="Credit Used" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)}`} />
-                    <SummaryCard label="Gross Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)}`} />
+                    <SummaryCard label="Credit Applied" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)}`} />
+                    <SummaryCard label="Current Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.currentPayable || partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)}`} />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <SummaryCard label="Our Credit" value={`₹${formatNumber((partyLedgers.get(p.id)?.summary.ourCredit || 0))}`} />
+                    <SummaryCard label="Current Credit" value={`₹${formatNumber((partyLedgers.get(p.id)?.summary.currentCredit || partyLedgers.get(p.id)?.summary.ourCredit || 0))}`} />
                     <SummaryCard label="Net Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.netPayable || 0)}`} />
                   </div>
                   <div className="mt-2">
@@ -992,23 +1630,22 @@ export default function PurchasePanel() {
                     <thead className="bg-slate-50">
                       <tr>
                         <th className="p-2 text-left">Date</th><th className="p-2 text-left">Type</th><th className="p-2 text-left">Reference</th><th className="p-2 text-left">Description</th>
-                        <th className="p-2 text-right">Purchase / Payable +</th><th className="p-2 text-right">Actual Payment</th><th className="p-2 text-right">Payable Applied</th><th className="p-2 text-right">Credit Created</th><th className="p-2 text-right">Credit Used</th><th className="p-2 text-right">Gross Payable</th><th className="p-2 text-right">Our Credit</th><th className="p-2 text-right">Net Payable</th>
+                        <th className="p-2 text-right">Purchase +</th><th className="p-2 text-right">Payment -</th><th className="p-2 text-right">Credit Applied</th><th className="p-2 text-right">Credit Created</th><th className="p-2 text-right">Running Payable</th><th className="p-2 text-right">Running Credit</th><th className="p-2 text-right">Net Payable</th>
                       </tr>
                     </thead>
                     <tbody>
                       {partyLedgerRows.map((row, idx) => (
                         <tr key={`${row.reference}-${idx}`} className="border-t">
                           <td className="p-2">{row.date ? new Date(row.date).toLocaleDateString('en-GB') : '—'}</td>
-                          <td className="p-2">{{ purchase: 'Purchase Created', supplier_payment: 'Supplier Payment', credit_used: 'Credit Used', legacy_payment: 'Legacy Payment', reversal: 'Reversal' }[row.type] || row.type || '—'}</td>
+                          <td className="p-2">{{ purchase: 'Purchase', supplier_payment: 'Payment', credit_used: 'Credit Applied', legacy_payment: 'Payment', edit_credit: 'Adjustment', reversal: 'Adjustment' }[row.type] || row.type || '—'}</td>
                           <td className="p-2">{row.reference || '—'}</td>
                           <td className="p-2">{row.description || '—'}</td>
-                          <td className="p-2 text-right">{row.payableIncrease ? `₹${formatNumber(row.payableIncrease)}` : '—'}</td>
-                          <td className="p-2 text-right">{row.actualPayment ? `₹${formatNumber(row.actualPayment)}` : '—'}</td>
-                          <td className="p-2 text-right">{row.payableApplied ? `₹${formatNumber(row.payableApplied)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.purchaseAmount ? `₹${formatNumber(row.purchaseAmount)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.paymentAmount ? `₹${formatNumber(row.paymentAmount)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.creditApplied ? `₹${formatNumber(row.creditApplied)}` : '—'}</td>
                           <td className="p-2 text-right">{row.creditCreated ? `₹${formatNumber(row.creditCreated)}` : '—'}</td>
-                          <td className="p-2 text-right">{row.creditUsed ? `₹${formatNumber(row.creditUsed)}` : '—'}</td>
-                          <td className="p-2 text-right">₹{formatNumber((row.grossPayable ?? row.runningGrossPayable ?? row.runningPayable) || 0)}</td>
-                          <td className="p-2 text-right">₹{formatNumber((row.ourCredit ?? row.runningOurCredit ?? row.runningCredit) || 0)}</td>
+                          <td className="p-2 text-right">₹{formatNumber((row.runningPayable ?? row.grossPayable ?? row.runningGrossPayable) || 0)}</td>
+                          <td className="p-2 text-right">₹{formatNumber((row.runningCredit ?? row.ourCredit ?? row.runningOurCredit) || 0)}</td>
                           <td className="p-2 text-right font-semibold">₹{formatNumber((row.netPayable ?? row.runningNetPayable) || 0)}</td>
                         </tr>
                       ))}
@@ -1448,6 +2085,13 @@ export default function PurchasePanel() {
           <div><Label>Contact Person</Label><Input value={newPartyContactPerson} onChange={e => setNewPartyContactPerson(e.target.value)} /></div>
           <div><Label>Notes</Label><Input value={newPartyNotes} onChange={e => setNewPartyNotes(e.target.value)} /></div>
         </div>
+        {partyDuplicateWarning && !editingPartyId && (
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            <div className="font-semibold">Existing supplier found. Update existing supplier instead?</div>
+            <div className="mt-1">{partyDuplicateWarning.name} · {partyDuplicateWarning.phone || 'No phone'} · ID {partyDuplicateWarning.id}</div>
+            <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => startEditingParty(partyDuplicateWarning, true)}>Open Existing Supplier</Button>
+          </div>
+        )}
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" onClick={() => setShowPartyPopup(false)}>Cancel</Button>
           <Button onClick={() => saveParty(true)}><Plus className="w-4 h-4 mr-1" /> {editingPartyId ? "Update Party" : "Save Party"}</Button>
@@ -1532,7 +2176,7 @@ export default function PurchasePanel() {
           <div className="text-sm">Party: <span className="font-semibold">{paymentTargetParty?.name || '—'}</span></div>
           <div className="grid grid-cols-3 gap-2">
             <SummaryCard label="Payable" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0)))}`} />
-            <SummaryCard label="Our Credit" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
+            <SummaryCard label="Current Credit" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
             <SummaryCard label="Net Payable" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0) - Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
           </div>
           <div><Label>Amount</Label><Input type="number" value={partialPaymentAmount} onChange={e => setPartialPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))} /></div>

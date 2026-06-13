@@ -221,6 +221,157 @@ export const generateAccountStatementPDF = async ({
   return null;
 };
 
+export type LedgerStatementColumn = {
+  header: string;
+  key: string;
+  align?: 'left' | 'right' | 'center';
+  width?: number;
+};
+
+export type LedgerStatementSummaryCard = {
+  label: string;
+  value: string;
+  tone?: 'neutral' | 'due' | 'credit' | 'dark';
+};
+
+export type LedgerStatementRow = Record<string, string | number | null | undefined>;
+
+export const generateLedgerStatementPDF = async ({
+  profile,
+  statementTitle,
+  entityLabel,
+  entityName,
+  entityMeta,
+  summaryCards,
+  columns,
+  rows,
+  fileName,
+  returnBlob = false,
+}: {
+  profile?: Partial<StoreProfile> | null;
+  statementTitle: string;
+  entityLabel: string;
+  entityName: string;
+  entityMeta: string[];
+  summaryCards: LedgerStatementSummaryCard[];
+  columns: LedgerStatementColumn[];
+  rows: LedgerStatementRow[];
+  fileName: string;
+  returnBlob?: boolean;
+}) => {
+  const doc = new jsPDF({ format: 'a4', unit: 'mm' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 9;
+  const today = new Date();
+  const safeProfile = profile || {};
+  const formatDate = (value: string | Date) => new Date(value).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+
+  const logoData = await getPdfImageSource(safeProfile?.logoImage || '');
+  if (logoData) {
+    try {
+      const props = (doc as any).getImageProperties(logoData);
+      const ratio = (props?.width || 1) / (props?.height || 1);
+      const drawH = 14;
+      doc.addImage(logoData, props?.fileType || 'PNG', margin, 9, drawH * ratio, drawH, undefined, 'FAST');
+    } catch {}
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(15, 23, 42);
+  doc.text(safeProfile?.storeName || 'StockFlow', logoData ? 30 : margin, 13);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(71, 85, 105);
+  const headerLines = [safeProfile?.phone ? `Phone: ${safeProfile.phone}` : '', safeProfile?.gstin ? `GSTIN: ${safeProfile.gstin}` : '', safeProfile?.addressLine1, safeProfile?.addressLine2].filter(Boolean) as string[];
+  if (headerLines.length) doc.text(doc.splitTextToSize(headerLines.join(' • '), 102), logoData ? 30 : margin, 18, { lineHeightFactor: 1.15 });
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.setTextColor(30, 64, 175);
+  doc.text(statementTitle, pageWidth - margin, 13, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(71, 85, 105);
+  doc.text(`Generated: ${formatDate(today)}`, pageWidth - margin, 19, { align: 'right' });
+  const dates = rows.map((row) => new Date(String(row.date || '')).getTime()).filter(Number.isFinite).sort((a, b) => a - b);
+  if (dates.length) doc.text(`Period: ${formatDate(new Date(dates[0]))} to ${formatDate(new Date(dates[dates.length - 1]))}`, pageWidth - margin, 24, { align: 'right' });
+
+  doc.setDrawColor(226, 232, 240);
+  doc.line(margin, 31, pageWidth - margin, 31);
+
+  const entityY = 35;
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(margin, entityY, pageWidth - (margin * 2), 19, 1.5, 1.5, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setTextColor(37, 99, 235);
+  doc.text(entityLabel, margin + 2, entityY + 5);
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  doc.text(doc.splitTextToSize(entityName, 86), margin + 2, entityY + 10);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(71, 85, 105);
+  const metaText = entityMeta.filter(Boolean).join(' • ');
+  if (metaText) doc.text(doc.splitTextToSize(metaText, pageWidth - (margin * 2) - 4), margin + 2, entityY + 15, { lineHeightFactor: 1.15 });
+
+  const summaryY = 58;
+  const visibleCards = summaryCards.slice(0, 8);
+  const cardGap = 2;
+  const cardW = (pageWidth - (margin * 2) - (cardGap * 3)) / 4;
+  visibleCards.forEach((card, idx) => {
+    const row = Math.floor(idx / 4);
+    const col = idx % 4;
+    const x = margin + col * (cardW + cardGap);
+    const y = summaryY + row * 16;
+    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(x, y, cardW, 13, 1.5, 1.5, 'FD');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(100, 116, 139);
+    doc.text(card.label, x + 1.8, y + 4.3);
+    const color = card.tone === 'due' ? [185, 28, 28] : card.tone === 'credit' ? [21, 128, 61] : card.tone === 'dark' ? [15, 23, 42] : [37, 99, 235];
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(color[0], color[1], color[2]);
+    doc.text(doc.splitTextToSize(card.value, cardW - 3), x + 1.8, y + 9.5);
+  });
+
+  const tableStartY = summaryY + (visibleCards.length > 4 ? 34 : 18);
+  const head = [columns.map((col) => col.header)];
+  const body = rows.length ? rows.map((row) => columns.map((col) => String(row[col.key] ?? ''))) : [columns.map((col, idx) => idx === 2 ? 'No ledger rows available.' : '')];
+  const columnStyles = columns.reduce<Record<number, any>>((acc, col, idx) => {
+    acc[idx] = { halign: col.align || 'left' };
+    if (col.width) acc[idx].cellWidth = col.width;
+    return acc;
+  }, {});
+
+  autoTable(doc, {
+    startY: tableStartY,
+    head,
+    body,
+    theme: 'grid',
+    margin: { left: margin, right: margin, bottom: 18 },
+    headStyles: { fillColor: [236, 242, 250], textColor: [30, 41, 59], fontStyle: 'bold', halign: 'center', fontSize: 6.5 },
+    styles: { fontSize: 6.2, cellPadding: { top: 1.3, right: 1, bottom: 1.3, left: 1 }, overflow: 'linebreak', textColor: [51, 65, 85], lineColor: [226, 232, 240], lineWidth: 0.1, minCellHeight: 4 },
+    columnStyles,
+    didDrawPage: () => {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7);
+      doc.setTextColor(120);
+      doc.text('System generated ledger statement. Transactions are unchanged by this statement.', margin, pageHeight - 7);
+      doc.text(`Page ${doc.getCurrentPageInfo().pageNumber} of ${doc.getNumberOfPages()}`, pageWidth - margin, pageHeight - 7, { align: 'right' });
+    },
+  });
+
+  if (returnBlob) return doc.output('blob');
+  doc.save(fileName);
+  return null;
+};
+
 export const generateProductCatalogPDF = async (
     products: Product[],
     options?: { fileName?: string; generatedLabel?: string; groupByCategory?: boolean; showInStockPrices?: boolean; showOutOfStockPrices?: boolean; firstPageImage?: string },

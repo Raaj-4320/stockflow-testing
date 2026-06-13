@@ -7,12 +7,17 @@ import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { buildPurchasePartyLedger } from '../services/purchaseLedger';
-import { generateAccountStatementPDF } from '../services/pdf';
+import { analyzeSupplierPurchaseLedger, repairSupplierPurchaseLedgerDryRun, SupplierLedgerAnalysis, SupplierLedgerDryRunPlan } from '../services/supplierLedgerReconciliation';
+import { generateLedgerStatementPDF } from '../services/pdf';
+import { buildCustomerStatementRowsFromCanonicalReplay, buildSupplierStatementRowsFromCanonicalLedger } from '../services/ledgerStatements';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
+import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
+import { appendWhatsAppLog } from '../services/whatsappLogs';
+import { auth } from '../services/firebase';
 
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
-type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund'; source?: 'direct' | 'legacyGroup' | 'purchase' | 'customerPayment'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }> };
+type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund'; source?: 'direct' | 'legacyGroup' | 'purchase' | 'customerPayment'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }>; purchaseAmount?: number; paymentAmount?: number; creditApplied?: number; creditCreated?: number; runningPayable?: number; runningCredit?: number; netPayable?: number; warnings?: Array<{ code: string; message: string }> };
 const formatGroupedSupplierPaymentDescription = (method: string, allocationCount: number) => {
   const normalizedMethod = String(method || '').toLowerCase();
   const methodLabel = normalizedMethod === 'online' ? 'Online' : normalizedMethod === 'bank' ? 'Bank' : 'Cash';
@@ -47,6 +52,18 @@ const getPurchaseOrderProductSummary = (order: PurchaseOrder, maxItems = 2): str
   const shown = names.slice(0, maxItems).join(', ');
   return names.length > maxItems ? `${shown} +${names.length - maxItems} more` : shown;
 };
+
+const getWhatsAppNumber = (entity: { phone?: string } & Record<string, any>) => String(entity?.whatsapp || entity?.whatsappNumber || entity?.mobile || entity?.phone || '').trim();
+
+const buildWhatsAppLogMeta = (recipientType: 'customer' | 'purchase_party', recipientId: string, recipientName: string, phone: string, extra: Record<string, unknown> = {}) => ({
+  recipientType,
+  recipientId,
+  recipientName,
+  phoneNumber: phone,
+  ledgerType: recipientType === 'customer' ? 'customer_ledger' : 'purchase_party_statement',
+  timestamp: new Date().toISOString(),
+  ...extra,
+});
 
 const toDateTimeLocalValue = (date: Date) => {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -148,8 +165,12 @@ export default function Dashboard() {
   const [pendingSupplierDeleteRow, setPendingSupplierDeleteRow] = useState<LedgerRow | null>(null);
   const [pendingCustomerDeleteRowId, setPendingCustomerDeleteRowId] = useState<string | null>(null);
   const [pendingPartyCreditRepairOrder, setPendingPartyCreditRepairOrder] = useState<{ orderId: string; amount: number; orderRef: string } | null>(null);
+  const [supplierLedgerAnalysis, setSupplierLedgerAnalysis] = useState<SupplierLedgerAnalysis | null>(null);
+  const [supplierLedgerDryRun, setSupplierLedgerDryRun] = useState<SupplierLedgerDryRunPlan | null>(null);
   const [isGeneratingCustomerPdf, setIsGeneratingCustomerPdf] = useState(false);
   const [isGeneratingPartyPdf, setIsGeneratingPartyPdf] = useState(false);
+  const [sendingLedgerKey, setSendingLedgerKey] = useState<string | null>(null);
+  const [whatsAppLedgerNotice, setWhatsAppLedgerNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
   const [customerDashboardTab, setCustomerDashboardTab] = useState<'receivable' | 'storeCredit' | 'withoutDue'>('receivable');
   const [supplierDashboardTab, setSupplierDashboardTab] = useState<'payable' | 'credit' | 'withoutDue'>('payable');
@@ -314,130 +335,60 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const storeCreditCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) > 0), [allCustomerDashboardRows]);
   const zeroDueCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) <= 0), [allCustomerDashboardRows]);
 
-  const partyPayables = useMemo<PartyPayableRow[]>(() => {
-    const dueOrders = orders
-      .filter((order) => Math.max(0, Number(order.remainingAmount || 0)) > 0)
-      .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
-
-    return parties
-      .map((party) => {
-        const partyDueOrders = dueOrders.filter((order) => order.partyId === party.id);
-        const payable = partyDueOrders.reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
-        return { ...party, payable, dueOrders: partyDueOrders };
-      })
-      .filter((party) => party.payable > 0)
-      .sort((a, b) => b.payable - a.payable);
-  }, [parties, orders]);
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => {
     const partyMap = new Map<string, PartyPayableRow>();
-    const activeSupplierEntries = (supplierPayments || []).filter((sp) => !sp.deletedAt);
-    const activeSupplierPaymentIds = new Set(activeSupplierEntries.map((sp) => sp.id));
-    const activeSupplierVouchers = new Set(activeSupplierEntries.filter((sp) => !!sp.voucherNo).map((sp) => String(sp.voucherNo)));
-    parties.forEach((p) => partyMap.set(p.id, { ...p, payable: 0, dueOrders: [], partyCredit: 0 }));
-    orders.forEach((o) => {
-      if (!partyMap.has(o.partyId)) {
-        partyMap.set(o.partyId, { id: o.partyId, name: o.partyName || 'Unknown Party', phone: o.partyPhone || '', gst: o.partyGst || '', location: o.partyLocation || '', payable: 0, dueOrders: [], partyCredit: 0 });
+    parties.forEach((party) => partyMap.set(party.id, { ...party, payable: 0, dueOrders: [], partyCredit: 0 }));
+    orders.forEach((order) => {
+      if (!partyMap.has(order.partyId)) {
+        partyMap.set(order.partyId, {
+          id: order.partyId,
+          name: order.partyName || 'Unknown Party',
+          phone: order.partyPhone || '',
+          gst: order.partyGst || '',
+          location: order.partyLocation || '',
+          createdAt: order.createdAt || order.orderDate || new Date().toISOString(),
+          updatedAt: order.updatedAt || order.createdAt || order.orderDate || new Date().toISOString(),
+          payable: 0,
+          dueOrders: [],
+          partyCredit: 0,
+        });
       }
     });
-    supplierPayments.forEach((sp) => {
-      if (!partyMap.has(sp.partyId)) {
-        partyMap.set(sp.partyId, { id: sp.partyId, name: sp.partyName || 'Unknown Party', phone: '', gst: '', location: '', payable: 0, dueOrders: [], partyCredit: 0 });
+    supplierPayments.forEach((payment) => {
+      if (!partyMap.has(payment.partyId)) {
+        partyMap.set(payment.partyId, {
+          id: payment.partyId,
+          name: payment.partyName || 'Unknown Party',
+          phone: '',
+          gst: '',
+          location: '',
+          createdAt: payment.createdAt || payment.paidAt || new Date().toISOString(),
+          updatedAt: payment.updatedAt || payment.createdAt || payment.paidAt || new Date().toISOString(),
+          payable: 0,
+          dueOrders: [],
+          partyCredit: 0,
+        });
       }
     });
-    const dueOrders = orders.filter((o) => Math.max(0, Number(o.remainingAmount || 0)) > 0);
+
     partyMap.forEach((party, id) => {
-      const partyDueOrders = dueOrders.filter((o) => o.partyId === id);
-      const payable = partyDueOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
-      const partyOrders = orders.filter((o) => o.partyId === id);
-      const partyTotalPurchase = partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.totalAmount || 0)), 0);
-      const partySupplierPayments = activeSupplierEntries.filter((payment) => (
-        payment.partyId
-          ? payment.partyId === id
-          : String(payment.partyName || '').trim().toLowerCase() === String(party.name || '').trim().toLowerCase()
-      ));
-      const partyTotalPaid = partySupplierPayments.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount || 0)), 0);
-      const partyLevelCreditCap = Math.max(0, Number((partyTotalPaid - partyTotalPurchase).toFixed(2)));
-      const ledgerCredit = (partyCreditLedger || []).filter((entry) => {
-        if (entry.partyId !== id) return false;
-        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
-        const linkedActivePayment = (entry.sourcePaymentId && activeSupplierPaymentIds.has(entry.sourcePaymentId))
-          || (entry.sourceVoucherNo && activeSupplierVouchers.has(String(entry.sourceVoucherNo)));
-        if (linkedActivePayment) return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
-        const usedAmount = (entry.usageHistory || []).reduce((acc, usage) => acc + Math.max(0, Number(usage.amount) || 0), 0);
-        return usedAmount > 0;
-      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
-      const rawDerivedFallback = partySupplierPayments.reduce((sum, payment) => {
-        const fullAmount = Math.max(0, Number(payment.amount || 0));
-        const explicitCredit = Math.max(0, Number(payment.partyCreditCreated || 0));
-        const appliedToPayable = Math.max(0, Number(payment.paymentAppliedToPayable || 0));
-        const allocationTotal = Array.isArray(payment.allocations)
-          ? payment.allocations.reduce((acc, allocation) => acc + Math.max(0, Number(allocation.amount || 0)), 0)
-          : 0;
-        const derivedCreditFromApplied = (fullAmount > appliedToPayable) ? Number((fullAmount - appliedToPayable).toFixed(2)) : 0;
-        const derivedCreditFromAllocations = (fullAmount > allocationTotal) ? Number((fullAmount - allocationTotal).toFixed(2)) : 0;
-        const derivedCredit = explicitCredit > 0
-          ? explicitCredit
-          : (appliedToPayable > 0 && fullAmount > appliedToPayable)
-            ? derivedCreditFromApplied
-            : (fullAmount > allocationTotal)
-              ? derivedCreditFromAllocations
-              : 0;
-        if (derivedCredit <= 0) return sum;
-        const linkedLedgerExists = (partyCreditLedger || []).some((entry) => (
-          entry.partyId === id
-          && (
-            (entry.sourcePaymentId && entry.sourcePaymentId === payment.id)
-            || (entry.sourceVoucherNo && payment.voucherNo && String(entry.sourceVoucherNo) === String(payment.voucherNo))
-          )
-          && Math.max(0, Number(entry.remainingAmount || 0)) > 0
-        ));
-        const linkedLedgerCredit = linkedLedgerExists
-          ? (partyCreditLedger || []).filter((entry) => (
-            entry.partyId === id
-            && (
-              (entry.sourcePaymentId && entry.sourcePaymentId === payment.id)
-              || (entry.sourceVoucherNo && payment.voucherNo && String(entry.sourceVoucherNo) === String(payment.voucherNo))
-            )
-            && Math.max(0, Number(entry.remainingAmount || 0)) > 0
-          )).reduce((acc, entry) => acc + Math.max(0, Number(entry.remainingAmount || 0)), 0)
-          : 0;
-        const fallbackCreditUsed = !linkedLedgerExists && derivedCredit > 0 ? derivedCredit : 0;
-        const shouldTrace = (String(payment.partyName || '').trim().toLowerCase() === 'k') || fullAmount > 0;
-        if ((import.meta as any).env?.DEV && shouldTrace) {
-        }
-        if (linkedLedgerExists) return sum;
-        if ((import.meta as any).env?.DEV) {
-        }
-        return sum + derivedCredit;
-      }, 0);
-      const availableFallbackCap = Math.max(0, Number((partyLevelCreditCap - ledgerCredit).toFixed(2)));
-      const fallbackCredit = Math.min(rawDerivedFallback, availableFallbackCap);
-      const partyCredit = ledgerCredit + fallbackCredit;
-      if ((import.meta as any).env?.DEV) {
-        const reconPayload: Record<string, unknown> = {
-          partyId: id,
-          partyName: party.name,
-          partyTotalPurchase,
-          partyTotalPaid,
-          partyLevelCreditCap,
-          ledgerCredit,
-          rawDerivedFallback,
-          cappedFallbackCredit: fallbackCredit,
-          finalPartyCredit: partyCredit,
-        };
-        if (rawDerivedFallback > fallbackCredit) {
-          reconPayload.reason = 'fallback capped by party-level overpayment to avoid stale allocation inflation';
-        }
-      }
-      partyMap.set(id, { ...party, payable, dueOrders: partyDueOrders, partyCredit });
+      const ledger = buildPurchasePartyLedger({ partyId: id, purchaseOrders: orders, supplierPayments, partyCreditLedger });
+      const dueOrders = orders.filter((order) => order.partyId === id && Math.max(0, Number(order.remainingAmount || 0)) > 0);
+      partyMap.set(id, {
+        ...party,
+        payable: Math.max(0, Number(ledger.summary.currentPayable || ledger.summary.netPayable || 0)),
+        dueOrders,
+        partyCredit: Math.max(0, Number(ledger.summary.currentCredit || ledger.summary.ourCredit || 0)),
+      });
     });
+
     return Array.from(partyMap.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [parties, orders, supplierPayments, partyCreditLedger]);
   const payablePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable > 0), [allPartyDashboardRows]);
   const creditPartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [allPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
-  const totalPayable = useMemo(() => partyPayables.reduce((sum, party) => sum + party.payable, 0), [partyPayables]);
+  const totalPayable = useMemo(() => payablePartyRows.reduce((sum, party) => sum + party.payable, 0), [payablePartyRows]);
   const isPayableTraceEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -481,8 +432,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         purchaseParties: parties.length,
       },
       chains: {
-        totalPayable: 'Total Payable <- sum payableRows.payable <- allPartyDashboardRows <- orders.remainingAmount <- loadData()',
-        partyCredit: 'Party Credit <- row.partyCredit <- ledgerCredit + fallbackCredit <- partyCreditLedger + supplierPayments fallback <- loadData()',
+        totalPayable: 'Total Payable <- sum payableRows.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay',
+        partyCredit: 'Party Credit <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay',
         creditTabCount: 'Parties with Credit (N) <- creditPartyRows.length <- allPartyDashboardRows.filter(payable <= 0 && partyCredit > 0)',
       },
     };
@@ -495,6 +446,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       ));
       const matchingPartyCreditLedgerEntries = partyCreditLedger.filter((entry) => entry.partyId === row.id);
       const matchedPurchaseParties = parties.filter((p) => p.id === row.id || normalize(p.name) === normalize(row.name));
+      const canonicalLedger = buildPurchasePartyLedger({ partyId: row.id, purchaseOrders: orders, supplierPayments, partyCreditLedger });
       const sourceOrders = matchingPurchaseOrders.filter((o) => Math.max(0, Number(o.remainingAmount || 0)) > 0).map((o) => ({
         id: o.id,
         billNumber: o.billNumber,
@@ -502,14 +454,11 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         totalPaid: Number(o.totalPaid || 0),
         remainingAmount: Number(o.remainingAmount || 0),
       }));
-      const payableResult = sourceOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
+      const payableResult = Math.max(0, Number(canonicalLedger.summary.currentPayable || canonicalLedger.summary.netPayable || 0));
       const partyTotalPurchase = matchingPurchaseOrders.reduce((sum, o) => sum + Math.max(0, Number(o.totalAmount || 0)), 0);
       const partyTotalPaid = matchingSupplierPayments.reduce((sum, p) => sum + Math.max(0, Number(p.amount || 0)), 0);
       const partyLevelCreditCap = Math.max(0, Number((partyTotalPaid - partyTotalPurchase).toFixed(2)));
-      const ledgerCreditResult = matchingPartyCreditLedgerEntries.filter((entry) => {
-        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
-        return Math.max(0, Number(entry.remainingAmount || 0)) > 0 || (entry.usageHistory || []).some((usage) => Math.max(0, Number(usage.amount || 0)) > 0);
-      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const ledgerCreditResult = Math.max(0, Number(canonicalLedger.summary.currentCredit || canonicalLedger.summary.ourCredit || 0));
       const rawDerivedFallback = matchingSupplierPayments.reduce((sum, payment) => {
         const fullAmount = Math.max(0, Number(payment.amount || 0));
         const explicitCredit = Math.max(0, Number(payment.partyCreditCreated || 0));
@@ -526,7 +475,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       }, 0);
       const availableFallbackCap = Math.max(0, Number((partyLevelCreditCap - ledgerCreditResult).toFixed(2)));
       const fallbackCreditResult = Math.min(rawDerivedFallback, availableFallbackCap);
-      const finalPartyCredit = ledgerCreditResult + fallbackCreditResult;
+      const finalPartyCredit = ledgerCreditResult;
       const tab = row.payable > 0 ? 'Payables' : (Math.max(0, Number(row.partyCredit || 0)) > 0 ? 'Parties with Credit' : 'Parties Without Due');
       const payload = {
         traceType: 'PARTY_VALUE_CHAIN',
@@ -586,8 +535,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           matchedPurchaseParty: matchedPurchaseParties[0] || null,
         },
         calculations: {
-          payable: { formula: 'sum matching purchaseOrders.remainingAmount', result: payableResult },
-          ledgerCredit: { formula: 'sum matching partyCreditLedger.remainingAmount', result: ledgerCreditResult },
+          payable: { formula: 'buildPurchasePartyLedger.summary.currentPayable', result: payableResult },
+          ledgerCredit: { formula: 'buildPurchasePartyLedger.summary.currentCredit', result: ledgerCreditResult },
           fallbackCredit: {
             formula: 'supplier payment derived fallback capped by party-level overpayment',
             partyTotalPurchase,
@@ -597,15 +546,15 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
             cappedFallbackCredit: fallbackCreditResult,
             result: fallbackCreditResult,
           },
-          finalPartyCredit: { formula: 'ledgerCredit + fallbackCredit', result: finalPartyCredit },
+          finalPartyCredit: { formula: 'canonical currentCredit', result: finalPartyCredit },
           tabDecision: {
             formula: 'payable > 0 ? Payables : partyCredit > 0 ? Parties with Credit : Parties Without Due',
             result: tab,
           },
         },
         chain: {
-          payableChain: `Payable ₹${Number(row.payable || 0)} <- row.payable <- sum purchaseOrders.remainingAmount <- allPartyDashboardRows <- loadData() <- memoryState/cloud store`,
-          partyCreditChain: `Party Credit ₹${Number(row.partyCredit || 0)} <- row.partyCredit <- ledgerCredit + fallbackCredit <- partyCreditLedger.remainingAmount + supplierPayments derived fallback <- allPartyDashboardRows <- loadData() <- memoryState/cloud store`,
+          payableChain: `Payable ₹${Number(row.payable || 0)} <- row.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay`,
+          partyCreditChain: `Party Credit ₹${Number(row.partyCredit || 0)} <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay`,
         },
       };
       console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify(payload, null, 2));
@@ -617,6 +566,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
 
   const selectedCustomer = useMemo(() => customers.find(c => c.id === statementCustomerId) || null, [customers, statementCustomerId]);
   const selectedParty = useMemo(() => parties.find(p => p.id === statementPartyId) || null, [parties, statementPartyId]);
+  useEffect(() => { setSupplierLedgerAnalysis(null); setSupplierLedgerDryRun(null); }, [statementPartyId]);
 
 
   const customerStatement = useMemo(() => {
@@ -636,42 +586,35 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const rows: LedgerRow[] = result.rows.map((row) => ({
       id: row.id,
       date: row.date,
-      type: row.type === 'purchase' ? 'Purchase' : row.type === 'credit_used' ? 'Credit Used' : row.type === 'edit_credit' ? 'Edit Credit' : 'Payment',
+      type: row.type === 'purchase' ? 'Purchase' : row.type === 'edit_credit' ? 'Adjustment' : 'Payment',
       ref: row.reference,
       description: row.description,
-      debit: row.payableIncrease,
-      credit: row.actualPayment || row.creditUsed,
+      debit: row.purchaseAmount,
+      credit: row.paymentAmount,
       balance: row.netPayable,
-      actualPayment: row.actualPayment,
-      payableApplied: row.payableApplied,
+      purchaseAmount: row.purchaseAmount,
+      paymentAmount: row.paymentAmount,
+      creditApplied: row.creditApplied,
       creditCreated: row.creditCreated,
-      creditUsed: row.creditUsed,
-      grossPayable: row.grossPayable ?? row.runningGrossPayable ?? row.runningPayable,
-      ourCredit: row.ourCredit ?? row.runningOurCredit ?? row.runningCredit,
-      netPayable: row.netPayable ?? row.runningNetPayable,
+      runningPayable: row.runningPayable,
+      runningCredit: row.runningCredit,
+      netPayable: row.netPayable,
+      warnings: row.warnings,
       tone: row.type === 'purchase' ? 'due' : (row.type === 'supplier_payment' ? 'payment' : 'cash'),
-      source: row.sourceType,
-    } as LedgerRow & {
-      actualPayment: number;
-      payableApplied: number;
-      creditCreated: number;
-      creditUsed: number;
-      grossPayable: number;
-      ourCredit: number;
-      netPayable: number;
+      source: row.type === 'purchase' ? 'purchase' : row.type === 'legacy_payment' ? 'legacyGroup' : 'direct',
     }));
     const displayRows = [...rows].reverse();
     return {
       rows,
       displayRows,
+      warnings: result.warnings,
       totalPurchase: result.summary.totalPurchase,
+      totalPayments: result.summary.totalPayments ?? result.summary.actualPayments,
       totalActualPayments: result.summary.actualPayments,
-      totalPayableApplied: result.summary.payableApplied,
       totalCreditCreated: result.summary.creditCreated ?? result.summary.partyCreditCreated,
-      totalPartyCreditUsed: result.summary.partyCreditUsed,
-      totalCreditUsed: result.summary.creditUsed ?? result.summary.partyCreditUsed,
-      grossPayable: result.summary.grossPayable ?? result.summary.remainingPayable,
-      ourCredit: result.summary.ourCredit,
+      totalCreditApplied: result.summary.creditApplied ?? result.summary.partyCreditUsed,
+      currentPayable: result.summary.currentPayable ?? result.summary.grossPayable ?? result.summary.remainingPayable,
+      currentCredit: result.summary.currentCredit ?? result.summary.ourCredit,
       netPayable: result.summary.netPayable,
       lastPaymentAt: result.rows.filter((r) => r.type === 'supplier_payment').slice(-1)[0]?.date || '',
       lastPurchaseAt: result.rows.filter((r) => r.type === 'purchase').slice(-1)[0]?.date || '',
@@ -799,31 +742,159 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const receiveExtraToStoreCredit = receiveAmountValid ? Math.max(0, receiveAmountValue - receiveCurrentDue) : 0;
   const receiveRemainingDueAfterPayment = receiveAmountValid ? Math.max(0, receiveCurrentDue - receiveAmountValue) : receiveCurrentDue;
 
+  const generateCustomerStatementPdfBlob = async (customer: Customer) => {
+    const statement = buildCustomerStatementRowsFromCanonicalReplay(customer, transactions, upfrontOrders);
+    const profile = loadData().profile;
+    const blob = await generateLedgerStatementPDF({
+      profile,
+      ...statement,
+      fileName: `customer-statement-${customer.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
+      returnBlob: true,
+    });
+    return blob instanceof Blob ? blob : null;
+  };
+
+  const buildPartyStatementProjection = (party: PurchaseParty) => {
+    const result = buildPurchasePartyLedger({
+      partyId: party.id,
+      purchaseOrders: orders,
+      supplierPayments,
+      partyCreditLedger,
+    });
+    const rows: LedgerRow[] = result.rows.map((row) => ({
+      id: row.id,
+      date: row.date,
+      type: row.type === 'purchase' ? 'Purchase' : row.type === 'edit_credit' ? 'Adjustment' : 'Payment',
+      ref: row.reference,
+      description: row.description,
+      debit: row.purchaseAmount,
+      credit: row.paymentAmount,
+      balance: row.netPayable,
+      purchaseAmount: row.purchaseAmount,
+      paymentAmount: row.paymentAmount,
+      creditApplied: row.creditApplied,
+      creditCreated: row.creditCreated,
+      runningPayable: row.runningPayable,
+      runningCredit: row.runningCredit,
+      netPayable: row.netPayable,
+      warnings: row.warnings,
+      tone: row.type === 'purchase' ? 'due' : (row.type === 'supplier_payment' ? 'payment' : 'cash'),
+      source: row.type === 'purchase' ? 'purchase' : row.type === 'legacy_payment' ? 'legacyGroup' : 'direct',
+    }));
+    return {
+      rows,
+      displayRows: [...rows].reverse(),
+      warnings: result.warnings,
+      totalPurchase: result.summary.totalPurchase,
+      totalPayments: result.summary.totalPayments ?? result.summary.actualPayments,
+      totalActualPayments: result.summary.actualPayments,
+      totalCreditCreated: result.summary.creditCreated ?? result.summary.partyCreditCreated,
+      totalCreditApplied: result.summary.creditApplied ?? result.summary.partyCreditUsed,
+      currentPayable: result.summary.currentPayable ?? result.summary.grossPayable ?? result.summary.remainingPayable,
+      currentCredit: result.summary.currentCredit ?? result.summary.ourCredit,
+      netPayable: result.summary.netPayable,
+      lastPaymentAt: result.rows.filter((r) => r.type === 'supplier_payment').slice(-1)[0]?.date || '',
+      lastPurchaseAt: result.rows.filter((r) => r.type === 'purchase').slice(-1)[0]?.date || '',
+    };
+  };
+
+  const generatePartyStatementPdfBlob = async (party: PurchaseParty) => {
+    const statement = buildSupplierStatementRowsFromCanonicalLedger(party, orders, supplierPayments, partyCreditLedger);
+    const profile = loadData().profile;
+    const blob = await generateLedgerStatementPDF({
+      profile,
+      ...statement,
+      fileName: `party-statement-${party.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
+      returnBlob: true,
+    });
+    return blob instanceof Blob ? blob : null;
+  };
+
+  const recordWhatsAppLedgerLog = async (status: 'pending' | 'sent' | 'failed', meta: Record<string, unknown>, error?: string | null) => {
+    const uid = String(auth?.currentUser?.uid || '').trim();
+    if (!uid) return;
+    try {
+      await appendWhatsAppLog(uid, {
+        type: 'ledger',
+        status,
+        ledgerId: String(meta.ledgerId || meta.recipientId || ''),
+        customerId: meta.recipientType === 'customer' ? String(meta.recipientId || '') : undefined,
+        customerName: String(meta.recipientName || ''),
+        customerPhone: String(meta.phoneNumber || ''),
+        error: error || null,
+        sentAt: status === 'sent' ? new Date().toISOString() : null,
+        meta,
+      });
+    } catch (logError) {
+      console.warn('[WHATSAPP LEDGER LOG FAILED]', logError);
+    }
+  };
+
+  const sendCustomerLedgerWhatsApp = async (customer: Customer) => {
+    const phone = getWhatsAppNumber(customer as any);
+    if (!phone) {
+      setWhatsAppLedgerNotice({ type: 'error', text: 'No WhatsApp number found for this customer.' });
+      return;
+    }
+    const key = `customer-${customer.id}`;
+    if (sendingLedgerKey) return;
+    const meta = buildWhatsAppLogMeta('customer', customer.id, customer.name, phone, { ledgerId: `customer-ledger-${customer.id}` });
+    try {
+      setSendingLedgerKey(key);
+      setWhatsAppLedgerNotice(null);
+      await recordWhatsAppLedgerLog('pending', meta);
+      const pdfBlob = await generateCustomerStatementPdfBlob({ ...customer, phone });
+      if (!pdfBlob) throw new Error('Ledger PDF could not be prepared. Please try again.');
+      const result = await shareCustomerLedgerViaWhatsApp({ ...customer, phone }, pdfBlob);
+      if (!result.ok) throw new Error(result.message);
+      await recordWhatsAppLedgerLog('sent', meta);
+      setWhatsAppLedgerNotice({ type: 'success', text: 'Ledger sent on WhatsApp.' });
+    } catch (error) {
+      const message = getFriendlyErrorMessage(error, 'dashboard.whatsapp_customer_ledger');
+      await recordWhatsAppLedgerLog('failed', meta, message);
+      setWhatsAppLedgerNotice({ type: 'error', text: message });
+    } finally {
+      setSendingLedgerKey(null);
+    }
+  };
+
+  const sendPartyLedgerWhatsApp = async (party: PurchaseParty) => {
+    const phone = getWhatsAppNumber(party as any);
+    if (!phone) {
+      setWhatsAppLedgerNotice({ type: 'error', text: 'No WhatsApp number found for this party/customer.' });
+      return;
+    }
+    const key = `party-${party.id}`;
+    if (sendingLedgerKey) return;
+    const meta = buildWhatsAppLogMeta('purchase_party', party.id, party.name, phone, { ledgerId: `purchase-party-ledger-${party.id}` });
+    try {
+      setSendingLedgerKey(key);
+      setWhatsAppLedgerNotice(null);
+      await recordWhatsAppLedgerLog('pending', meta);
+      const pdfBlob = await generatePartyStatementPdfBlob(party);
+      if (!pdfBlob) throw new Error('Ledger PDF could not be prepared. Please try again.');
+      const result = await shareCustomerLedgerViaWhatsApp({ id: party.id, name: party.name, phone, totalSpend: 0, totalDue: 0, lastVisit: '', visitCount: 0 }, pdfBlob);
+      if (!result.ok) throw new Error(result.message);
+      await recordWhatsAppLedgerLog('sent', meta);
+      setWhatsAppLedgerNotice({ type: 'success', text: 'Ledger sent on WhatsApp.' });
+    } catch (error) {
+      const message = getFriendlyErrorMessage(error, 'dashboard.whatsapp_party_ledger');
+      await recordWhatsAppLedgerLog('failed', meta, message);
+      setWhatsAppLedgerNotice({ type: 'error', text: message });
+    } finally {
+      setSendingLedgerKey(null);
+    }
+  };
+
   const downloadCustomerStatementPdf = async () => {
-    if (!selectedCustomer || !customerStatement) return;
+    if (!selectedCustomer) return;
     try {
       setStatementPdfError(null);
       setIsGeneratingCustomerPdf(true);
-      const profile = loadData().profile;
-      const mapCustomerDescription = (row: LedgerRow) => {
-        if (row.type === 'Credit Sale') return 'Sale Invoice';
-        if (row.type === 'Payment') return 'Payment Received';
-        if (row.type === 'Return') return 'Sales Return';
-        return row.type || 'Ledger Entry';
-      };
-      await generateAccountStatementPDF({
-        profile,
-        entityLabel: 'BILLED TO',
-        entityName: selectedCustomer.name,
-        entityMeta: [selectedCustomer.phone || '', `Customer ID: ${selectedCustomer.id}`],
-        rows: customerStatement.displayRows.map(row => ({
-          date: row.date,
-          description: mapCustomerDescription(row),
-          reference: row.ref || row.id.slice(-6),
-          debit: row.debit,
-          credit: row.credit,
-          balance: row.balance,
-        })),
+      const statement = buildCustomerStatementRowsFromCanonicalReplay(selectedCustomer, transactions, upfrontOrders);
+      await generateLedgerStatementPDF({
+        profile: loadData().profile,
+        ...statement,
         fileName: `customer-statement-${selectedCustomer.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
       });
     } catch (error) {
@@ -834,29 +905,14 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   };
 
   const downloadPartyStatementPdf = async () => {
-    if (!selectedParty || !partyStatement) return;
+    if (!selectedParty) return;
     try {
       setStatementPdfError(null);
       setIsGeneratingPartyPdf(true);
-      const profile = loadData().profile;
-      const mapPartyDescription = (row: LedgerRow) => {
-        if (row.type === 'Purchase') return 'Purchase Order';
-        if (row.type === 'Payment') return 'Payment to Supplier';
-        return row.type || 'Ledger Entry';
-      };
-      await generateAccountStatementPDF({
-        profile,
-        entityLabel: 'PARTY / SUPPLIER',
-        entityName: selectedParty.name,
-        entityMeta: [selectedParty.phone || '', `Party ID: ${selectedParty.id}`],
-        rows: partyStatement.displayRows.map(row => ({
-          date: row.date,
-          description: mapPartyDescription(row),
-          reference: row.ref || row.id.slice(-6),
-          debit: row.debit,
-          credit: row.credit,
-          balance: row.balance,
-        })),
+      const statement = buildSupplierStatementRowsFromCanonicalLedger(selectedParty, orders, supplierPayments, partyCreditLedger);
+      await generateLedgerStatementPDF({
+        profile: loadData().profile,
+        ...statement,
         fileName: `party-statement-${selectedParty.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
       });
     } catch (error) {
@@ -965,8 +1021,8 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const getPartyCreditRepairCandidate = (row: LedgerRow) => {
     if (row.type !== 'Purchase') return null;
     if (!selectedParty) return null;
-    if (!row.id.startsWith('order-')) return null;
-    const orderId = row.id.replace('order-', '');
+    if (!row.id.startsWith('po-')) return null;
+    const orderId = row.id.replace('po-', '');
     const order = orders.find((o) => o.id === orderId && o.partyId === selectedParty.id);
     if (!order) return null;
     const remainingAmount = Math.max(0, Number(order.remainingAmount || 0));
@@ -990,6 +1046,14 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     refresh();
   };
 
+
+  const handleAnalyzeSupplierLedger = () => {
+    if (!selectedParty) return;
+    const latestData = loadData();
+    setSupplierLedgerAnalysis(analyzeSupplierPurchaseLedger(selectedParty.id, latestData));
+    setSupplierLedgerDryRun(repairSupplierPurchaseLedgerDryRun(selectedParty.id, latestData));
+  };
+
   return (
     <div className="h-[calc(100vh-9rem)] min-h-0 flex flex-col gap-4 overflow-hidden">
       <div className="shrink-0 space-y-3">
@@ -1008,6 +1072,12 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </Card>
         </div>
       </div>
+
+      {whatsAppLedgerNotice && (
+        <div className={`shrink-0 rounded-lg border px-3 py-2 text-sm ${whatsAppLedgerNotice.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+          {whatsAppLedgerNotice.text}
+        </div>
+      )}
 
       <div className="min-h-0 flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card className="min-h-0 flex flex-col">
@@ -1030,6 +1100,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
                   </div>
                   <div className="mt-2 flex gap-2 justify-end">
                     <Button size="sm" variant="outline" onClick={() => setStatementCustomerId(c.id)}>View Statement</Button>
+                    <Button size="sm" variant="outline" disabled={!getWhatsAppNumber(c as any) || Boolean(sendingLedgerKey)} title={!getWhatsAppNumber(c as any) ? 'No WhatsApp number found.' : 'Send this customer ledger on WhatsApp'} onClick={() => void sendCustomerLedgerWhatsApp(c)}>
+                      {!getWhatsAppNumber(c as any) ? 'No WhatsApp number' : sendingLedgerKey === `customer-${c.id}` ? 'Sending...' : 'Send Ledger WhatsApp'}
+                    </Button>
                     {customerDashboardTab === 'receivable' && <Button size="sm" onClick={() => openReceiveModal(c)}>Receive</Button>}
                   </div>
                 </div>
@@ -1061,6 +1134,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
                   </div>
                   <div className="mt-2 flex gap-2 justify-end">
                     <Button size="sm" variant="outline" onClick={() => setStatementPartyId(p.id)}>View Statement</Button>
+                    <Button size="sm" variant="outline" disabled={!getWhatsAppNumber(p as any) || Boolean(sendingLedgerKey)} title={!getWhatsAppNumber(p as any) ? 'No WhatsApp number found.' : 'Send this supplier statement on WhatsApp'} onClick={() => void sendPartyLedgerWhatsApp(p)}>
+                      {!getWhatsAppNumber(p as any) ? 'No WhatsApp number' : sendingLedgerKey === `party-${p.id}` ? 'Sending...' : 'Send Ledger WhatsApp'}
+                    </Button>
                     {supplierDashboardTab === 'payable' && <Button size="sm" variant="outline" onClick={() => openPayModal(p)}>{Math.max(0, Number(p.payable || 0)) > 0 ? 'Pay' : 'View'}</Button>}
                   </div>
                   {supplierDashboardTab === 'payable' && Math.max(0, Number(p.partyCredit || 0)) > 0 && <div className="mt-1 text-xs text-emerald-700">Credit Available {formatINRPrecise(p.partyCredit || 0)}</div>}
@@ -1173,13 +1249,16 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
               <Button type="button" variant="outline" size="sm" disabled={isGeneratingCustomerPdf} onClick={() => void downloadCustomerStatementPdf()}>
                 {isGeneratingCustomerPdf ? 'Generating PDF...' : 'Download Statement PDF'}
               </Button>
+              <Button type="button" variant="outline" size="sm" className="ml-2" disabled={!getWhatsAppNumber(selectedCustomer as any) || Boolean(sendingLedgerKey)} title={!getWhatsAppNumber(selectedCustomer as any) ? 'No WhatsApp number found.' : 'Send this customer ledger on WhatsApp'} onClick={() => void sendCustomerLedgerWhatsApp(selectedCustomer)}>
+                {!getWhatsAppNumber(selectedCustomer as any) ? 'No WhatsApp number' : sendingLedgerKey === `customer-${selectedCustomer.id}` ? 'Sending...' : 'Send Ledger WhatsApp'}
+              </Button>
             </div>
             {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
             <p className="text-xs text-muted-foreground">Latest transactions shown first. Balance means balance after that transaction.</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Due Generated</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(customerStatement.totalCreditSales)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Payments Received</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(customerStatement.totalPayments)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Store Credit Used / Added</div><div className="mt-1 text-lg font-semibold">{formatINRPrecise(customerStatement.totalStoreCreditUsed)} / {formatINRPrecise(customerStatement.totalStoreCreditAdded)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Store Credit Applied / Added</div><div className="mt-1 text-lg font-semibold">{formatINRPrecise(customerStatement.totalStoreCreditUsed)} / {formatINRPrecise(customerStatement.totalStoreCreditAdded)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current Receivable</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(customerStatement.balanceDue)}</div></div>
             </div>
             <div className="max-h-[52vh] overflow-auto rounded-xl border">
@@ -1256,6 +1335,14 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
               <Button type="button" variant="outline" size="sm" disabled={isGeneratingPartyPdf} onClick={() => void downloadPartyStatementPdf()}>
                 {isGeneratingPartyPdf ? 'Generating PDF...' : 'Download Statement PDF'}
               </Button>
+              <Button type="button" variant="outline" size="sm" className="ml-2" disabled={!getWhatsAppNumber(selectedParty as any) || Boolean(sendingLedgerKey)} title={!getWhatsAppNumber(selectedParty as any) ? 'No WhatsApp number found.' : 'Send this supplier statement on WhatsApp'} onClick={() => void sendPartyLedgerWhatsApp(selectedParty)}>
+                {!getWhatsAppNumber(selectedParty as any) ? 'No WhatsApp number' : sendingLedgerKey === `party-${selectedParty.id}` ? 'Sending...' : 'Send Ledger WhatsApp'}
+              </Button>
+              {isPurchaseLedgerDebugEnabled && (
+                <Button type="button" variant="outline" size="sm" className="ml-2" onClick={handleAnalyzeSupplierLedger}>
+                  Analyze Supplier Ledger
+                </Button>
+              )}
               {isPurchaseLedgerDebugEnabled && dashboardLedgerDebugPayload && (
                 <Button type="button" variant="outline" size="sm" className="ml-2" onClick={() => void navigator.clipboard.writeText(JSON.stringify(dashboardLedgerDebugPayload, null, 2))}>
                   Copy Ledger Debug JSON
@@ -1263,25 +1350,65 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
               )}
             </div>
             {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
-            <p className="text-xs text-muted-foreground">Latest transactions shown first. Gross Payable, Our Credit, and Net Payable are shown explicitly.</p>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Purchase</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.totalPurchase)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Actual Payments</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalActualPayments)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Payable Applied</div><div className="mt-1 text-lg font-semibold text-slate-700">{formatINRPrecise((partyStatement as any).totalPayableApplied || 0)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Created</div><div className="mt-1 text-lg font-semibold text-emerald-700">{formatINRPrecise((partyStatement as any).totalCreditCreated || 0)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Used</div><div className="mt-1 text-lg font-semibold text-violet-700">{formatINRPrecise((partyStatement as any).totalCreditUsed || 0)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Gross Payable</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise((partyStatement as any).grossPayable || 0)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Our Credit</div><div className="mt-1 text-lg font-semibold text-emerald-700">{formatINRPrecise((partyStatement as any).ourCredit || 0)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Net Payable</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise((partyStatement as any).netPayable || 0)}</div></div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">Latest transactions are shown first; running balances are still calculated chronologically. Positive balance means payable to supplier. Credit means advance available with supplier. Credit Applied is shown inside the related purchase row.</div>
+            {partyStatement.warnings?.length ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+                <div className="font-semibold">Review notes</div>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {partyStatement.warnings.slice(0, 5).map((warning, idx) => <li key={`${warning.code}-${idx}`}>{warning.message}</li>)}
+                  {partyStatement.warnings.length > 5 && <li>{partyStatement.warnings.length - 5} more review note(s). Export/debug the statement for details.</li>}
+                </ul>
+              </div>
+            ) : null}
+            {isPurchaseLedgerDebugEnabled && supplierLedgerAnalysis && supplierLedgerDryRun && (
+              <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3 text-xs text-slate-700">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-semibold text-blue-900">Supplier ledger analysis (read-only)</div>
+                  <div className="text-[11px] text-slate-500">Generated {new Date(supplierLedgerAnalysis.generatedAt).toLocaleString()}</div>
+                </div>
+                <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded border bg-white px-2 py-1"><span className="text-muted-foreground">Expected payable:</span> {formatINRPrecise(supplierLedgerAnalysis.expected.expectedCurrentPayable)}</div>
+                  <div className="rounded border bg-white px-2 py-1"><span className="text-muted-foreground">Expected credit:</span> {formatINRPrecise(supplierLedgerAnalysis.expected.expectedCurrentCredit)}</div>
+                  <div className="rounded border bg-white px-2 py-1"><span className="text-muted-foreground">Stored order remaining:</span> {formatINRPrecise(supplierLedgerAnalysis.stored.storedOrderRemaining)}</div>
+                  <div className="rounded border bg-white px-2 py-1"><span className="text-muted-foreground">Stored credit remaining:</span> {formatINRPrecise(supplierLedgerAnalysis.stored.storedCreditRemaining)}</div>
+                </div>
+                <div className="mt-2 grid gap-3 lg:grid-cols-2">
+                  <div>
+                    <div className="font-medium text-slate-800">Issues ({supplierLedgerAnalysis.issues.length})</div>
+                    {!supplierLedgerAnalysis.issues.length ? <div className="mt-1 text-slate-500">No reconciliation issues detected.</div> : (
+                      <ul className="mt-1 max-h-36 space-y-1 overflow-auto pr-1">
+                        {supplierLedgerAnalysis.issues.slice(0, 8).map((issue, idx) => <li key={`${issue.type}-${issue.sourceId}-${idx}`} className="rounded border bg-white px-2 py-1"><span className={`font-semibold ${issue.severity === 'critical' ? 'text-red-700' : issue.severity === 'warning' ? 'text-amber-700' : 'text-slate-600'}`}>{issue.severity}</span> · {issue.message}<div className="text-[11px] text-slate-500">{issue.sourceCollection}/{issue.sourceId} · Suggested: {issue.suggestedFix} · Auto-fix: {issue.safeToAutoFix ? 'dry-run only' : 'unsafe'}</div></li>)}
+                        {supplierLedgerAnalysis.issues.length > 8 && <li className="text-slate-500">{supplierLedgerAnalysis.issues.length - 8} more issue(s).</li>}
+                      </ul>
+                    )}
+                  </div>
+                  <div>
+                    <div className="font-medium text-slate-800">Dry-run repair preview</div>
+                    <div className="mt-1 rounded border bg-white px-2 py-1">Purchase order patches: {supplierLedgerDryRun.patches.purchaseOrders.length}</div>
+                    <div className="mt-1 rounded border bg-white px-2 py-1">Supplier payment patches: {supplierLedgerDryRun.patches.supplierPayments.length}</div>
+                    <div className="mt-1 rounded border bg-white px-2 py-1">Party credit patches: {supplierLedgerDryRun.patches.partyCreditLedger.length}</div>
+                    <div className="mt-1 rounded border bg-white px-2 py-1">Unsafe rows requiring manual review: {supplierLedgerDryRun.unsafeRows.length}</div>
+                    <div className="mt-2 text-[11px] text-slate-500">No changes are applied from this panel. It only shows the patch plan.</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Purchases</div><div className="mt-0.5 text-base font-semibold text-orange-700">{formatINRPrecise(partyStatement.totalPurchase)}</div></div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Payments</div><div className="mt-0.5 text-base font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalPayments)}</div></div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Created</div><div className="mt-0.5 text-base font-semibold text-emerald-700">{formatINRPrecise((partyStatement as any).totalCreditCreated || 0)}</div></div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Applied</div><div className="mt-0.5 text-base font-semibold text-violet-700">{formatINRPrecise((partyStatement as any).totalCreditApplied || 0)}</div></div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current Payable</div><div className="mt-0.5 text-base font-semibold text-orange-700">{formatINRPrecise((partyStatement as any).currentPayable || 0)}</div></div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current Credit</div><div className="mt-0.5 text-base font-semibold text-emerald-700">{formatINRPrecise((partyStatement as any).currentCredit || 0)}</div></div>
+              <div className="rounded-lg border bg-slate-50 px-3 py-2"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Net Payable</div><div className="mt-0.5 text-base font-semibold text-blue-700">{formatINRPrecise((partyStatement as any).netPayable || 0)}</div></div>
             </div>
-            <div className="max-h-[52vh] overflow-auto rounded-xl border">
-              <table className="w-full min-w-[1320px] text-sm">
-                <thead className="sticky top-0 bg-slate-50"><tr><th className="p-3 text-left whitespace-nowrap">Date</th><th className="p-3 text-left">Type</th><th className="p-3 text-left whitespace-nowrap">Ref</th><th className="p-3 text-left min-w-[260px]">Description</th><th className="p-3 text-right whitespace-nowrap">Purchase / Payable +</th><th className="p-3 text-right whitespace-nowrap">Actual Payment</th><th className="p-3 text-right whitespace-nowrap">Payable Applied</th><th className="p-3 text-right whitespace-nowrap">Credit Created</th><th className="p-3 text-right whitespace-nowrap">Credit Used</th><th className="p-3 text-right whitespace-nowrap">Gross Payable</th><th className="p-3 text-right whitespace-nowrap">Our Credit</th><th className="p-3 text-right whitespace-nowrap">Net Payable</th><th className="p-3 text-left whitespace-nowrap">Actions</th></tr></thead>
+            <div className="max-h-[56vh] overflow-auto rounded-lg border">
+              <table className="w-full min-w-[1180px] text-xs">
+                <thead className="sticky top-0 bg-slate-50"><tr><th className="px-2 py-2 text-left whitespace-nowrap">Date</th><th className="px-2 py-2 text-left">Type</th><th className="px-2 py-2 text-left whitespace-nowrap">Ref</th><th className="px-2 py-2 text-left min-w-[280px]">Description</th><th className="px-2 py-2 text-right whitespace-nowrap">Purchase +</th><th className="px-2 py-2 text-right whitespace-nowrap">Payment -</th><th className="px-2 py-2 text-right whitespace-nowrap">Credit Applied</th><th className="px-2 py-2 text-right whitespace-nowrap">Credit Created</th><th className="px-2 py-2 text-right whitespace-nowrap">Running Payable</th><th className="px-2 py-2 text-right whitespace-nowrap">Running Credit</th><th className="px-2 py-2 text-right whitespace-nowrap">Net Payable</th><th className="px-2 py-2 text-left whitespace-nowrap">Actions</th></tr></thead>
                 <tbody>
                   {partyStatement.displayRows.map((row, idx) => {
                     const repairCandidate = getPartyCreditRepairCandidate(row);
-                    const purchaseRow = row as LedgerRow & { actualPayment?: number; payableApplied?: number; creditCreated?: number; creditUsed?: number; grossPayable?: number; ourCredit?: number; netPayable?: number };
-                    return <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{purchaseRow.actualPayment ? formatINRPrecise(purchaseRow.actualPayment) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{purchaseRow.payableApplied ? formatINRPrecise(purchaseRow.payableApplied) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{purchaseRow.creditCreated ? formatINRPrecise(purchaseRow.creditCreated) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{purchaseRow.creditUsed ? formatINRPrecise(purchaseRow.creditUsed) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{formatINRPrecise(purchaseRow.grossPayable || 0)}</td><td className="p-3 text-right whitespace-nowrap">{formatINRPrecise(purchaseRow.ourCredit || 0)}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(purchaseRow.netPayable ?? row.balance)}</td><td className="p-3 whitespace-nowrap">{row.type === 'Payment' ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row)}>Delete</Button></div> : repairCandidate ? <Button size="sm" variant="outline" onClick={() => setPendingPartyCreditRepairOrder(repairCandidate)}>Apply Party Credit</Button> : '—'}</td></tr>;
+                    return <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="px-2 py-2 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="px-2 py-2"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span>{row.warnings?.length ? <div className="mt-1 text-[10px] font-medium text-amber-700">Review</div> : null}</td><td className="px-2 py-2 whitespace-nowrap">{row.ref}</td><td className="px-2 py-2 whitespace-normal"><div>{row.description}</div>{row.warnings?.length ? <ul className="mt-1 list-disc pl-4 text-[11px] text-amber-700">{row.warnings.map((warning, warningIdx) => <li key={`${warning.code}-${warningIdx}`}>{warning.message}</li>)}</ul> : null}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.purchaseAmount ? formatINRPrecise(row.purchaseAmount) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.paymentAmount ? formatINRPrecise(row.paymentAmount) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.creditApplied ? formatINRPrecise(row.creditApplied) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.creditCreated ? formatINRPrecise(row.creditCreated) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{formatINRPrecise(row.runningPayable || 0)}</td><td className="px-2 py-2 text-right whitespace-nowrap">{formatINRPrecise(row.runningCredit || 0)}</td><td className="px-2 py-2 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.netPayable ?? row.balance)}</td><td className="px-2 py-2 whitespace-nowrap">{row.type === 'Payment' ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row)}>Delete</Button></div> : repairCandidate ? <Button size="sm" variant="outline" onClick={() => setPendingPartyCreditRepairOrder(repairCandidate)}>Apply Party Credit</Button> : '—'}</td></tr>;
                   })}
                 </tbody>
               </table>
