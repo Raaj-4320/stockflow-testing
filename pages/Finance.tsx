@@ -1813,7 +1813,7 @@ export default function Finance() {
     return buildLayerFinanceBreakdown(getRowsByLayer(rows, reportingLayerMode));
   }, [cashbookRowsWithSignals, profitMonth, reportingLayerMode]);
 
-  const cashbookExportRows = useMemo(() => filteredCashbookRows.map((row) => {
+  const buildCashbookExportRows = () => filteredCashbookRows.map((row) => {
     const touchesCurrentBalance = Math.abs(row.currentDueEffect) > 0.0001 || Math.abs(row.currentStoreCreditEffect) > 0.0001;
     const touchesCash = Math.abs(row.cashIn) > 0.0001 || Math.abs(row.cashOut) > 0.0001 || Math.abs(row.onlineIn) > 0.0001 || Math.abs(row.onlineOut) > 0.0001;
     const touchesProfit = Math.abs(row.grossProfitEffect) > 0.0001 || Math.abs(row.netProfitEffect) > 0.0001 || Math.abs(row.cogsEffect) > 0.0001 || Math.abs(row.expense) > 0.0001;
@@ -1857,7 +1857,7 @@ export default function Finance() {
       'Touches Profit': touchesProfit ? 'Yes' : 'No',
       'Potential Review Flag': potentialReviewFlag,
     };
-  }), [filteredCashbookRows]);
+  });
 
   const cashbookExportSummaryRows = useMemo(() => ([
     { Metric: 'Export generated at', Value: new Date().toISOString() },
@@ -1907,6 +1907,7 @@ export default function Finance() {
 
   const escapeCsvValue = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const exportCashbookCsv = (textFriendly = false) => {
+    const cashbookExportRows = buildCashbookExportRows();
     const headers = Object.keys(cashbookExportRows[0] || { 'Date': '', 'Transaction / Bill No': '' });
     const summaryBlock = [
       ['Metric', 'Value'],
@@ -1924,6 +1925,7 @@ export default function Finance() {
 
   const exportCashbookWorkbook = (ext: 'xlsx' | 'xls') => {
     // XLS and XLSX use the same workbook payload; extension controls target compatibility.
+    const cashbookExportRows = buildCashbookExportRows();
     const workbook = XLSX.utils.book_new();
     const summarySheet = XLSX.utils.json_to_sheet(cashbookExportSummaryRows);
     const detailSheet = XLSX.utils.json_to_sheet(cashbookExportRows);

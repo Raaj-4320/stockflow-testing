@@ -14,7 +14,7 @@ import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadCustomersData, downloadCustomersTemplate, importCustomersFromFile } from '../services/importExcel';
-import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label } from '../components/ui';
+import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label, LightweightLoader } from '../components/ui';
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
@@ -234,8 +234,9 @@ export default function Customers() {
   );
 
   const correctCustomerLedgerPreviews = useMemo(() => {
+    if (!showCorrectLedgerView) return [];
     return customers.map((customer) => buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders));
-  }, [customers, transactions, upfrontOrders]);
+  }, [showCorrectLedgerView, customers, transactions, upfrontOrders]);
 
   const filteredCorrectCustomerLedgerPreviews = useMemo(() => {
     const lowerQ = searchQuery.trim().toLowerCase();
@@ -260,14 +261,19 @@ export default function Customers() {
   }, [filteredCorrectCustomerLedgerPreviews]);
 
   const customerLedgerBalanceAnalysis = useMemo(() => (
-    analyzeCustomerLedgerBalances({ customers, transactions, upfrontOrders })
-  ), [customers, transactions, upfrontOrders]);
+    showCorrectLedgerView
+      ? analyzeCustomerLedgerBalances({ customers, transactions, upfrontOrders })
+      : null
+  ), [showCorrectLedgerView, customers, transactions, upfrontOrders]);
 
   const customerLedgerBalanceDryRun = useMemo(() => (
-    repairCustomerLedgerBalancesDryRun({ customers, transactions, upfrontOrders })
-  ), [customers, transactions, upfrontOrders]);
+    showCorrectLedgerView
+      ? repairCustomerLedgerBalancesDryRun({ customers, transactions, upfrontOrders })
+      : null
+  ), [showCorrectLedgerView, customers, transactions, upfrontOrders]);
 
   const downloadCustomerLedgerDryRunJson = () => {
+    if (!customerLedgerBalanceDryRun) return;
     const payload = JSON.stringify(customerLedgerBalanceDryRun, null, 2);
     const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
     const link = document.createElement('a');
@@ -278,14 +284,14 @@ export default function Customers() {
   };
 
   const safeCustomerLedgerPatches = useMemo(() => (
-    customerLedgerBalanceDryRun.patches.filter((patch) => patch.safeToApplySnapshot)
+    customerLedgerBalanceDryRun?.patches.filter((patch) => patch.safeToApplySnapshot) || []
   ), [customerLedgerBalanceDryRun]);
 
   const customerLedgerPatchById = useMemo(() => (
-    new Map(customerLedgerBalanceDryRun.patches.map((patch) => [patch.id, patch]))
+    new Map((customerLedgerBalanceDryRun?.patches || []).map((patch) => [patch.id, patch]))
   ), [customerLedgerBalanceDryRun]);
 
-  const downloadCustomerLedgerRollbackJson = (patchesToApply: typeof customerLedgerBalanceDryRun.patches) => {
+  const downloadCustomerLedgerRollbackJson = (patchesToApply: NonNullable<typeof customerLedgerBalanceDryRun>['patches']) => {
     const rollback = {
       generatedAt: new Date().toISOString(),
       note: 'Rollback snapshot before applying corrected customer balance snapshots. Transactions were not modified.',
@@ -349,7 +355,7 @@ export default function Customers() {
       }
     }
 
-    const skipped = customerLedgerBalanceDryRun.patches.length - applied - failed;
+    const skipped = (customerLedgerBalanceDryRun?.patches.length || 0) - applied - failed;
     setCustomerLedgerApplyStatus({ applied, skipped, failed });
     setSelectedCustomerLedgerPatchIds((prev) => prev.filter((id) => !candidates.some((patch) => patch.id === id)));
     refreshData();
@@ -939,13 +945,7 @@ export default function Customers() {
           </div>
         </div>
       )}
-      {isInitialLoading && (
-        <div className="space-y-3 p-1">
-          <div className="h-8 w-56 animate-pulse rounded bg-muted" />
-          <div className="h-20 animate-pulse rounded-xl bg-muted" />
-          <div className="h-20 animate-pulse rounded-xl bg-muted" />
-        </div>
-      )}
+      {isInitialLoading && <LightweightLoader label="Loading data…" />}
       {loadError && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</div>
       )}
@@ -1066,13 +1066,13 @@ export default function Customers() {
               </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-7">
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Customers</div><div className="font-black">{customerLedgerBalanceAnalysis.totalCustomers}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Affected</div><div className="font-black text-amber-700">{customerLedgerBalanceAnalysis.affectedCustomers}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Due</div><div className="font-black">₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalStoredDue)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Corrected Due</div><div className="font-black text-blue-700">₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalCorrectedDue)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${customerLedgerBalanceAnalysis.totalDifference === 0 ? 'text-slate-700' : customerLedgerBalanceAnalysis.totalDifference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalDifference)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-red-700">{customerLedgerBalanceAnalysis.totalWarnings}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Dry-run Patches</div><div className="font-black text-purple-700">{customerLedgerBalanceDryRun.patches.length}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Customers</div><div className="font-black">{customerLedgerBalanceAnalysis?.totalCustomers || 0}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Affected</div><div className="font-black text-amber-700">{customerLedgerBalanceAnalysis?.affectedCustomers || 0}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Due</div><div className="font-black">₹{formatMoneyWhole(customerLedgerBalanceAnalysis?.totalStoredDue || 0)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Corrected Due</div><div className="font-black text-blue-700">₹{formatMoneyWhole(customerLedgerBalanceAnalysis?.totalCorrectedDue || 0)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${(customerLedgerBalanceAnalysis?.totalDifference || 0) === 0 ? 'text-slate-700' : (customerLedgerBalanceAnalysis?.totalDifference || 0) > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(customerLedgerBalanceAnalysis?.totalDifference || 0)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-red-700">{customerLedgerBalanceAnalysis?.totalWarnings || 0}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Dry-run Patches</div><div className="font-black text-purple-700">{customerLedgerBalanceDryRun?.patches.length || 0}</div></div>
             </div>
             {customerLedgerApplyStatus && (
               <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
@@ -1082,9 +1082,9 @@ export default function Customers() {
             {customerLedgerApplyError && (
               <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800">{customerLedgerApplyError}</div>
             )}
-            {customerLedgerBalanceDryRun.blocked.length > 0 && (
+            {(customerLedgerBalanceDryRun?.blocked.length || 0) > 0 && (
               <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                {customerLedgerBalanceDryRun.blocked.length} customer(s) are blocked because they have unknown historical rows or unsafe warnings. They are skipped by Apply All Safe.
+                {(customerLedgerBalanceDryRun?.blocked.length || 0)} customer(s) are blocked because they have unknown historical rows or unsafe warnings. They are skipped by Apply All Safe.
               </div>
             )}
             <div className="mt-3 overflow-x-auto">
@@ -1102,7 +1102,7 @@ export default function Customers() {
                   </tr>
                 </thead>
                 <tbody>
-                  {customerLedgerBalanceAnalysis.issues.slice(0, 12).map((issue) => {
+                  {(customerLedgerBalanceAnalysis?.issues || []).slice(0, 12).map((issue) => {
                     const patch = customerLedgerPatchById.get(issue.customerId);
                     const canApply = Boolean(patch?.safeToApplySnapshot);
                     return (
@@ -1118,12 +1118,12 @@ export default function Customers() {
                     </tr>
                     );
                   })}
-                  {customerLedgerBalanceAnalysis.issues.length === 0 && (
+                  {(customerLedgerBalanceAnalysis?.issues.length || 0) === 0 && (
                     <tr><td colSpan={8} className="p-3 text-center text-muted-foreground">No stored-vs-corrected balance differences detected.</td></tr>
                   )}
                 </tbody>
               </table>
-              {customerLedgerBalanceAnalysis.issues.length > 12 && <div className="mt-2 text-xs text-muted-foreground">Showing first 12 issues. Download JSON for the full dry-run.</div>}
+              {(customerLedgerBalanceAnalysis?.issues.length || 0) > 12 && <div className="mt-2 text-xs text-muted-foreground">Showing first 12 issues. Download JSON for the full dry-run.</div>}
             </div>
           </div>
 
