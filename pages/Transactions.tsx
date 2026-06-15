@@ -7,7 +7,7 @@ import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder, SupplierPaymentLedgerEntry } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
-import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
+import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, refreshDeletedTransactionsFromCloud, TransactionPageCursor } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
 import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
@@ -266,6 +266,7 @@ export default function Transactions() {
     };
 
     refreshData();
+    void refreshDeletedTransactionsBin();
     window.addEventListener('storage', refreshData);
     window.addEventListener('local-storage-update', refreshData);
     return () => {
@@ -274,6 +275,19 @@ export default function Transactions() {
     };
   }, []);
 
+  const refreshDeletedTransactionsBin = async () => {
+    try {
+      await refreshDeletedTransactionsFromCloud();
+      const deletedWindow = loadDeletedTransactionsPage({ limit: DELETED_WINDOW_BATCH_SIZE });
+      setDeletedTransactions(deletedWindow.rows);
+      setDeletedWindowCursor(deletedWindow.nextCursor);
+      setHasMoreDeletedWindow(deletedWindow.hasMore);
+      setIsDeletedWindowed(deletedWindow.hasMore);
+      setLoadError(null);
+    } catch (error) {
+      setLoadError('Unable to refresh deleted transactions right now. Please try again.');
+    }
+  };
 
 
   const loadOlderTransactionsWindow = () => {
@@ -1373,6 +1387,9 @@ export default function Transactions() {
             </Badge>
             {!showBin && hasMoreTransactionsWindow && (
               <Button variant="outline" onClick={loadOlderTransactionsWindow} className="h-9 text-sm">Load Older Transactions</Button>
+            )}
+            {showBin && (
+              <Button variant="outline" onClick={() => void refreshDeletedTransactionsBin()} className="h-9 text-sm">Refresh Bin</Button>
             )}
             {showBin && hasMoreDeletedWindow && (
               <Button variant="outline" onClick={loadOlderDeletedWindow} className="h-9 text-sm">Load Older Bin Rows</Button>

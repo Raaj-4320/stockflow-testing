@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection, refreshDeletedTransactionsFromCloud, refreshExpenseActivitiesFromCloud } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
 import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, ManualCashbookEntry, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
@@ -828,6 +828,19 @@ export default function Finance() {
   const [isExpectedClosingBreakdownOpen, setIsExpectedClosingBreakdownOpen] = useState(false);
 
   const refreshData = () => setData(loadData());
+  const refreshFinanceNonCriticalData = async () => {
+    try {
+      await Promise.all([refreshDeletedTransactionsFromCloud(), refreshExpenseActivitiesFromCloud()]);
+      setData(loadData());
+      setErrors(null);
+    } catch (error) {
+      setErrors(getFriendlyErrorMessage(error, 'finance.refresh_non_critical'));
+    }
+  };
+
+  useEffect(() => {
+    void refreshFinanceNonCriticalData();
+  }, []);
 
   const cashSessions: CashSession[] = useMemo(() => (Array.isArray(data.cashSessions) ? data.cashSessions : []), [data]);
   const expenses: Expense[] = useMemo(() => (Array.isArray(data.expenses) ? data.expenses : []), [data]);
@@ -2472,9 +2485,12 @@ export default function Finance() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
-          <p className="text-sm text-slate-600">Track cash movement, expenses, shifts, and transaction-level operating effects.</p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
+            <p className="text-sm text-slate-600">Track cash movement, expenses, shifts, and transaction-level operating effects.</p>
+          </div>
+          <Button type="button" variant="outline" onClick={() => void refreshFinanceNonCriticalData()}>Refresh finance data</Button>
         </div>
 
         {errors && (
