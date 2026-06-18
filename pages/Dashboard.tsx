@@ -10,44 +10,20 @@ import { buildPurchasePartyLedger } from '../services/purchaseLedger';
 import { analyzeSupplierPurchaseLedger, repairSupplierPurchaseLedgerDryRun, SupplierLedgerAnalysis, SupplierLedgerDryRunPlan } from '../services/supplierLedgerReconciliation';
 import { generateLedgerStatementPDF } from '../services/pdf';
 import { buildCustomerStatementRowsFromCanonicalReplay, buildSupplierStatementRowsFromCanonicalLedger } from '../services/ledgerStatements';
-import { buildCorrectCustomerLedgerPreview } from '../services/customerLedger';
+import { CanonicalCustomerBalanceResult, getCanonicalCustomerBalanceResult } from '../services/customerBalanceView';
 import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { auth } from '../services/firebase';
 import { can } from '../src/auth/simplePermissions';
 import { Search } from 'lucide-react';
 
-type CustomerReceivableRow = Customer & { receivable: number };
+type CustomerReceivableRow = Customer & { receivable: number; ledgerBalanceUnavailable?: boolean };
+type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit: number };
 
-type CanonicalCustomerDashboardBalance = {
-  currentDue: number;
-  storeCredit: number;
-  netReceivable: number;
-  replayFailed: boolean;
-};
+type CanonicalCustomerDashboardBalance = CanonicalCustomerBalanceResult;
 
-const getStoredCustomerDashboardBalance = (customer: Customer): CanonicalCustomerDashboardBalance => {
-  const currentDue = Math.max(0, Number(customer.totalDue || 0));
-  const storeCredit = Math.max(0, Number(customer.storeCredit || 0));
-  return { currentDue, storeCredit, netReceivable: Math.max(0, currentDue - storeCredit), replayFailed: true };
-};
+const getCanonicalCustomerDashboardBalance = (customer: Customer, transactions: Transaction[], upfrontOrders: UpfrontOrder[]): CanonicalCustomerDashboardBalance => getCanonicalCustomerBalanceResult(customer, transactions, upfrontOrders);
 
-const getCanonicalCustomerDashboardBalance = (customer: Customer, transactions: Transaction[], upfrontOrders: UpfrontOrder[]): CanonicalCustomerDashboardBalance => {
-  const fallback = getStoredCustomerDashboardBalance(customer);
-  try {
-    const preview = buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders);
-    return {
-      currentDue: Math.max(0, Number(preview.summary.correctedCurrentDue || 0)),
-      storeCredit: Math.max(0, Number(preview.summary.correctedStoreCredit || 0)),
-      netReceivable: Math.max(0, Number(preview.summary.correctedNetReceivable || 0)),
-      replayFailed: false,
-    };
-  } catch (error) {
-    if (import.meta.env.DEV) console.warn('[Dashboard] canonical customer display balance failed; using stored snapshot fallback', { customerId: customer.id, error });
-    return fallback;
-  }
-};
-type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
 type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund'; source?: 'direct' | 'legacyGroup' | 'purchase' | 'customerPayment'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }>; purchaseAmount?: number; paymentAmount?: number; creditApplied?: number; creditCreated?: number; runningPayable?: number; runningCredit?: number; netPayable?: number; warnings?: Array<{ code: string; message: string }> };
 const getLedgerSortTime = (date: string): number => {
   const time = new Date(date || '').getTime();
@@ -304,7 +280,7 @@ export default function Dashboard() {
     return map;
   }, [partyCreditLedger]);
 
-  const canonicalSnapshot = useMemo(() => getCanonicalCustomerBalanceSnapshot(customers, transactions), [customers, transactions]);
+  const canonicalSnapshot = useMemo(() => getCanonicalCustomerBalanceSnapshot(customers, transactions, upfrontOrders), [customers, transactions, upfrontOrders]);
 
   const canonicalReplayBalanceByCustomerId = useMemo(() => {
     const map = new Map<string, CanonicalCustomerDashboardBalance>();
@@ -378,7 +354,7 @@ export default function Dashboard() {
       processed.push(tx);
     });
     const displayRows = [...rows].sort(newestLedgerRowFirst);
-    const persistedStoreCredit = Math.max(0, Number(canonicalSnapshot.balances.get(customer.id)?.storeCredit || customer.storeCredit || 0));
+    const persistedStoreCredit = Math.max(0, Number(canonicalSnapshot.balances.get(customer.id)?.storeCredit || 0));
     const effectiveStoreCredit = Math.max(persistedStoreCredit, totalStoreCreditAdded);
     return { rows, displayRows, summary: { creditDueGenerated: totalCreditSales, paymentsReceived: totalPayments, storeCreditUsed: totalStoreCreditUsed, storeCreditAdded: totalStoreCreditAdded, currentReceivable: Math.max(0, runningBalance), effectiveStoreCredit } };
   }, [transactionsByCustomerId, upfrontOrdersByCustomerId, canonicalSnapshot]);
@@ -413,7 +389,8 @@ export default function Dashboard() {
   const allCustomerDashboardRows = useMemo(() => {
     if (!dashboardDetailsReady) return [] as CustomerReceivableRow[];
     return customers.map((customer) => {
-      const balance = canonicalReplayBalanceByCustomerId.get(customer.id) || getStoredCustomerDashboardBalance(customer);
+      const balance = canonicalReplayBalanceByCustomerId.get(customer.id);
+      if (!balance || balance.status !== 'ok') return { ...customer, totalDue: 0, storeCredit: 0, receivable: 0, ledgerBalanceUnavailable: true } as CustomerReceivableRow;
       return { ...customer, totalDue: balance.currentDue, storeCredit: balance.storeCredit, receivable: balance.netReceivable } as CustomerReceivableRow;
     }).sort((a, b) => a.name.localeCompare(b.name));
   }, [dashboardDetailsReady, customers, canonicalReplayBalanceByCustomerId]);

@@ -21,62 +21,18 @@ import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole 
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { analyzeCustomerLedgerBalances, buildCorrectCustomerLedgerPreview, getEffectiveTransactionType, repairCustomerLedgerBalancesDryRun } from '../services/customerLedger';
+import { CanonicalCustomerBalanceResult, assertCanonicalBalanceErrorDoesNotTrustSnapshot, getCanonicalCustomerBalanceResult } from '../services/customerBalanceView';
 import { can } from '../src/auth/simplePermissions';
 import { useRoleSession } from '../src/auth/roleSession';
 
 const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
 const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
 const roundCorrectPreviewMoney = (value: number) => Math.round(value * 100) / 100;
-const customerNetReceivable = (customer: Pick<Customer, 'totalDue' | 'storeCredit'>) => Math.max(0, Number(customer.totalDue || 0) - Math.max(0, Number(customer.storeCredit || 0)));
 
-type CanonicalCustomerDisplayBalance = {
-  currentDue: number;
-  storeCredit: number;
-  netReceivable: number;
-  storedCurrentDue: number;
-  storedStoreCredit: number;
-  storedNetReceivable: number;
-  replayFailed: boolean;
-};
-
-const getStoredCustomerDisplayBalance = (customer: Customer): CanonicalCustomerDisplayBalance => {
-  const storedCurrentDue = Math.max(0, Number(customer.totalDue || 0));
-  const storedStoreCredit = Math.max(0, Number(customer.storeCredit || 0));
-  const storedNetReceivable = Math.max(0, storedCurrentDue - storedStoreCredit);
-  return {
-    currentDue: storedCurrentDue,
-    storeCredit: storedStoreCredit,
-    netReceivable: storedNetReceivable,
-    storedCurrentDue,
-    storedStoreCredit,
-    storedNetReceivable,
-    replayFailed: true,
-  };
-};
-
-const getCanonicalCustomerDisplayBalance = (customer: Customer, transactions: Transaction[], upfrontOrders: UpfrontOrder[]): CanonicalCustomerDisplayBalance => {
-  const fallback = getStoredCustomerDisplayBalance(customer);
-  try {
-    const preview = buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders);
-    return {
-      currentDue: Math.max(0, Number(preview.summary.correctedCurrentDue || 0)),
-      storeCredit: Math.max(0, Number(preview.summary.correctedStoreCredit || 0)),
-      netReceivable: Math.max(0, Number(preview.summary.correctedNetReceivable || 0)),
-      storedCurrentDue: preview.summary.storedCurrentDue,
-      storedStoreCredit: preview.summary.storedStoreCredit,
-      storedNetReceivable: preview.summary.storedNetReceivable,
-      replayFailed: false,
-    };
-  } catch (error) {
-    if (import.meta.env.DEV) console.warn('[Customers] canonical customer display balance failed; using stored snapshot fallback', { customerId: customer.id, error });
-    return fallback;
-  }
-};
-
-const hasCustomerDisplayBalanceMismatch = (balance?: CanonicalCustomerDisplayBalance): boolean => !!balance && !balance.replayFailed && (
-  Math.abs(balance.storedCurrentDue - balance.currentDue) > 0.01
-  || Math.abs(balance.storedStoreCredit - balance.storeCredit) > 0.01
-  || Math.abs(balance.storedNetReceivable - balance.netReceivable) > 0.01
+const hasCustomerDisplayBalanceMismatch = (balance?: CanonicalCustomerBalanceResult): boolean => !!balance && balance.status === 'ok' && (
+  Math.abs(balance.snapshotDue - balance.currentDue) > 0.01
+  || Math.abs(balance.snapshotStoreCredit - balance.storeCredit) > 0.01
+  || Math.abs(Math.max(0, balance.snapshotDue - balance.snapshotStoreCredit) - balance.netReceivable) > 0.01
 );
 const detectHistoricalTransactionType = (tx: Transaction): 'sale' | 'return' | 'payment' | 'customer_credit' | 'customer_cash_out' | 'unknown' => {
   const t = String((tx as any)?.type || '').toLowerCase();
@@ -297,6 +253,12 @@ export default function Customers() {
   };
 
   useEffect(() => {
+    if (import.meta.env.DEV && !assertCanonicalBalanceErrorDoesNotTrustSnapshot()) {
+      console.error('[Customers] canonical balance error handling incorrectly trusted a stored snapshot fallback');
+    }
+  }, []);
+
+  useEffect(() => {
     refreshData();
     window.addEventListener('storage', refreshData);
     window.addEventListener('local-storage-update', refreshData);
@@ -316,12 +278,17 @@ export default function Customers() {
   const canonicalCustomers = useMemo(() => customers, [customers]);
 
   const canonicalDisplayBalanceByCustomerId = useMemo(() => {
-    const map = new Map<string, CanonicalCustomerDisplayBalance>();
+    const map = new Map<string, CanonicalCustomerBalanceResult>();
     customers.forEach((customer) => {
-      map.set(customer.id, getCanonicalCustomerDisplayBalance(customer, transactions, upfrontOrders));
+      map.set(customer.id, getCanonicalCustomerBalanceResult(customer, transactions, upfrontOrders));
     });
     return map;
   }, [customers, transactions, upfrontOrders]);
+
+  const canonicalBalanceUnavailableSummary = useMemo(() => {
+    const unavailable = (Array.from(canonicalDisplayBalanceByCustomerId.values()) as CanonicalCustomerBalanceResult[]).filter((balance) => balance.status === 'error');
+    return { count: unavailable.length, firstMessage: unavailable[0]?.errorMessage || 'Ledger calculation unavailable.' };
+  }, [canonicalDisplayBalanceByCustomerId]);
 
   const canonicalBalanceMismatchSummary = useMemo(() => {
     let mismatchCount = 0;
@@ -329,9 +296,9 @@ export default function Customers() {
     let totalCanonicalReceivable = 0;
     let largestMismatch: { customerName: string; amount: number } | null = null;
     customers.forEach((customer) => {
-      const balance = canonicalDisplayBalanceByCustomerId.get(customer.id) || getStoredCustomerDisplayBalance(customer);
-      const delta = balance.netReceivable - balance.storedNetReceivable;
-      totalStoredReceivable = roundCorrectPreviewMoney(totalStoredReceivable + balance.storedNetReceivable);
+      const balance = canonicalDisplayBalanceByCustomerId.get(customer.id);
+      const delta = balance.netReceivable - Math.max(0, balance.snapshotDue - balance.snapshotStoreCredit);
+      totalStoredReceivable = roundCorrectPreviewMoney(totalStoredReceivable + Math.max(0, balance.snapshotDue - balance.snapshotStoreCredit));
       totalCanonicalReceivable = roundCorrectPreviewMoney(totalCanonicalReceivable + balance.netReceivable);
       if (Math.abs(delta) > 0.01) {
         mismatchCount += 1;
@@ -348,6 +315,26 @@ export default function Customers() {
     console.info('[Customers] canonical display balance mismatch summary', canonicalBalanceMismatchSummary);
   }, [canonicalBalanceMismatchSummary]);
 
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    customers.forEach((customer) => {
+      const displayed = canonicalDisplayBalanceByCustomerId.get(customer.id);
+      if (!displayed || displayed.status !== 'ok') return;
+      const correctLedger = buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders);
+      const displayedDue = roundCorrectPreviewMoney(displayed.currentDue);
+      const correctLedgerDue = roundCorrectPreviewMoney(correctLedger.summary.correctedCurrentDue);
+      if (Math.abs(displayedDue - correctLedgerDue) <= 0.01) return;
+      console.warn('[Customers] normal displayed due differs from Correct Ledger View due', {
+        customerId: customer.id,
+        customerName: customer.name,
+        storedDue: correctLedger.summary.storedCurrentDue,
+        displayedDue,
+        correctLedgerDue,
+        difference: roundCorrectPreviewMoney(displayedDue - correctLedgerDue),
+      });
+    });
+  }, [customers, transactions, upfrontOrders, canonicalDisplayBalanceByCustomerId]);
+
   const filteredData = useMemo(() => {
     let processed = [...canonicalCustomers];
     
@@ -360,7 +347,7 @@ export default function Customers() {
     }
     
     if (filterType === 'has_due') {
-        processed = processed.filter(c => (canonicalDisplayBalanceByCustomerId.get(c.id)?.netReceivable ?? customerNetReceivable(c)) > 0);
+        processed = processed.filter(c => (canonicalDisplayBalanceByCustomerId.get(c.id)?.status === 'ok' ? canonicalDisplayBalanceByCustomerId.get(c.id)!.netReceivable : 0) > 0);
     } else if (filterType === 'high_value') {
         processed = processed.filter(c => c.totalSpend >= highValueThreshold && c.totalSpend > 0);
     }
@@ -368,12 +355,12 @@ export default function Customers() {
     processed.sort((a, b) => {
         let valA, valB;
         if (sortBy === 'spend') { valA = a.totalSpend; valB = b.totalSpend; }
-        else if (sortBy === 'due') { valA = canonicalDisplayBalanceByCustomerId.get(a.id)?.netReceivable ?? customerNetReceivable(a); valB = canonicalDisplayBalanceByCustomerId.get(b.id)?.netReceivable ?? customerNetReceivable(b); }
+        else if (sortBy === 'due') { valA = canonicalDisplayBalanceByCustomerId.get(a.id)?.status === 'ok' ? canonicalDisplayBalanceByCustomerId.get(a.id)!.netReceivable : 0; valB = canonicalDisplayBalanceByCustomerId.get(b.id)?.status === 'ok' ? canonicalDisplayBalanceByCustomerId.get(b.id)!.netReceivable : 0; }
         else { valA = new Date(a.lastVisit).getTime(); valB = new Date(b.lastVisit).getTime(); }
         return sortOrder === 'asc' ? valA - valB : valB - valA;
     });
 
-    const totalDues = processed.reduce((acc, c) => acc + (canonicalDisplayBalanceByCustomerId.get(c.id)?.netReceivable ?? customerNetReceivable(c)), 0);
+    const totalDues = processed.reduce((acc, c) => acc + (canonicalDisplayBalanceByCustomerId.get(c.id)?.status === 'ok' ? canonicalDisplayBalanceByCustomerId.get(c.id)!.netReceivable : 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [canonicalCustomers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold, canonicalDisplayBalanceByCustomerId]);
   const customerTotalPages = Math.max(1, Math.ceil(filteredData.displayCustomers.length / CUSTOMERS_PAGE_SIZE));
@@ -529,10 +516,10 @@ export default function Customers() {
     if (alreadyAdjusted) return alreadyAdjusted;
     return viewingCustomer;
   }, [viewingCustomer, canonicalCustomers]);
-  const viewingCustomerDisplayBalance = viewingCustomerCanonical ? (canonicalDisplayBalanceByCustomerId.get(viewingCustomerCanonical.id) || getStoredCustomerDisplayBalance(viewingCustomerCanonical)) : null;
-  const viewingCustomerTotalDue = Math.max(0, Number(viewingCustomerDisplayBalance?.currentDue || 0));
-  const viewingCustomerStoreCredit = Math.max(0, Number(viewingCustomerDisplayBalance?.storeCredit || 0));
-  const viewingCustomerNetReceivable = Math.max(0, Number(viewingCustomerDisplayBalance?.netReceivable || 0));
+  const viewingCustomerDisplayBalance = viewingCustomerCanonical ? canonicalDisplayBalanceByCustomerId.get(viewingCustomerCanonical.id) : null;
+  const viewingCustomerTotalDue = Math.max(0, Number(viewingCustomerDisplayBalance?.status === 'ok' ? viewingCustomerDisplayBalance.currentDue : 0));
+  const viewingCustomerStoreCredit = Math.max(0, Number(viewingCustomerDisplayBalance?.status === 'ok' ? viewingCustomerDisplayBalance.storeCredit : 0));
+  const viewingCustomerNetReceivable = Math.max(0, Number(viewingCustomerDisplayBalance?.status === 'ok' ? viewingCustomerDisplayBalance.netReceivable : 0));
   const viewingCustomerBalanceMismatch = hasCustomerDisplayBalanceMismatch(viewingCustomerDisplayBalance);
   const viewingCustomerCorrectLedger = useMemo(() => {
     if (!viewingCustomerCanonical) return null;
@@ -1114,14 +1101,18 @@ export default function Customers() {
       doc.setFillColor(15, 23, 42); doc.rect(0, 0, pageWidth, 40, 'F');
       doc.setFontSize(20); doc.setTextColor(255, 255, 255); doc.text("Customer Dues Report", 14, 20);
       doc.setFontSize(10); doc.setTextColor(203, 213, 225); doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
-      const tableBody = filteredData.displayCustomers.map(c => [
-        c.name,
-        c.phone,
-        `Rs.${formatMoneyWhole(c.totalSpend)}`,
-        `Rs.${formatMoneyWhole(canonicalDisplayBalanceByCustomerId.get(c.id)?.currentDue ?? c.totalDue)}`,
-        `Rs.${formatMoneyWhole(canonicalDisplayBalanceByCustomerId.get(c.id)?.storeCredit ?? (c.storeCredit || 0))}`,
-        `Rs.${formatMoneyWhole(canonicalDisplayBalanceByCustomerId.get(c.id)?.netReceivable ?? customerNetReceivable(c))}`,
-      ]);
+      const tableBody = filteredData.displayCustomers.map(c => {
+        const balance = canonicalDisplayBalanceByCustomerId.get(c.id);
+        const unavailable = !balance || balance.status !== 'ok';
+        return [
+          c.name,
+          c.phone,
+          `Rs.${formatMoneyWhole(c.totalSpend)}`,
+          unavailable ? 'Ledger calculation unavailable' : `Rs.${formatMoneyWhole(balance.currentDue)}`,
+          unavailable ? 'Ledger calculation unavailable' : `Rs.${formatMoneyWhole(balance.storeCredit)}`,
+          unavailable ? 'Ledger calculation unavailable' : `Rs.${formatMoneyWhole(balance.netReceivable)}`,
+        ];
+      });
       tableBody.push(['TOTAL', '', '', '', '', `Rs.${formatMoneyWhole(filteredData.totalDues)}`]);
       autoTable(doc, { startY: 50, head: [['Name', 'Phone', 'Total Spend', 'Current Due', 'Store Credit', 'Net Receivable']], body: tableBody, theme: 'striped', columnStyles: { 5: { halign: 'right', fontStyle: 'bold', textColor: [220, 38, 38] } } });
       doc.save(`Customer_Dues_Report.pdf`);
@@ -1164,7 +1155,7 @@ export default function Customers() {
           } else {
               exportCustomersToExcel(filteredData.displayCustomers.map((customer) => {
                   const balance = canonicalDisplayBalanceByCustomerId.get(customer.id);
-                  return { ...customer, totalDue: balance?.netReceivable ?? customerNetReceivable(customer), storeCredit: balance?.storeCredit ?? customer.storeCredit };
+                  return { ...customer, totalDue: balance?.status === 'ok' ? balance.netReceivable : 0, storeCredit: balance?.status === 'ok' ? balance.storeCredit : 0 };
                 }));
           }
       } else if (exportType === 'invoice' && txToExport) {
@@ -1223,6 +1214,13 @@ export default function Customers() {
               </div>
           </div>
           
+          {canonicalBalanceUnavailableSummary.count > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <div className="font-bold">Ledger calculation unavailable</div>
+              <div>{canonicalBalanceUnavailableSummary.count} customer balance(s) are hidden because canonical replay failed. Stored snapshot fields are not shown as trusted balances.</div>
+            </div>
+          )}
+
           {can('analytics') && filteredData.totalDues > 0 && (
              <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex justify-between items-center animate-in slide-in-from-top-2">
                  <div className="flex items-center gap-2 text-red-700">
@@ -1507,8 +1505,19 @@ export default function Customers() {
                 </td>
                 <td className="p-3">{customer.visitCount}</td>
                 <td className="p-3">₹{formatMoneyWhole(customer.totalSpend)}</td>
-                <td className={`p-3 font-semibold ${(canonicalDisplayBalanceByCustomerId.get(customer.id)?.currentDue ?? customer.totalDue) > 0 ? 'text-orange-700' : 'text-green-700'}`}>₹{formatMoneyWhole(canonicalDisplayBalanceByCustomerId.get(customer.id)?.currentDue ?? customer.totalDue)}</td>
-                <td className={`p-3 font-semibold ${(canonicalDisplayBalanceByCustomerId.get(customer.id)?.storeCredit ?? (customer.storeCredit || 0)) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{formatMoneyWhole(canonicalDisplayBalanceByCustomerId.get(customer.id)?.storeCredit ?? (customer.storeCredit || 0))}</td>
+                {(() => {
+                  const balance = canonicalDisplayBalanceByCustomerId.get(customer.id);
+                  if (!balance || balance.status !== 'ok') {
+                    return <>
+                      <td className="p-3 font-semibold text-amber-700">Ledger calculation unavailable</td>
+                      <td className="p-3 font-semibold text-amber-700">Ledger calculation unavailable</td>
+                    </>;
+                  }
+                  return <>
+                    <td className={`p-3 font-semibold ${balance.currentDue > 0 ? 'text-orange-700' : 'text-green-700'}`}>₹{formatMoneyWhole(balance.currentDue)}</td>
+                    <td className={`p-3 font-semibold ${balance.storeCredit > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{formatMoneyWhole(balance.storeCredit)}</td>
+                  </>;
+                })()}
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
@@ -1651,25 +1660,32 @@ export default function Customers() {
                               <Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg border bg-white px-0" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab('ledger'); setViewingCustomer(null); }}><X className="h-4 w-4" /></Button>
                           </div>
                       </div>
+                      {viewingCustomerDisplayBalance?.status === 'error' && (
+                          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                              <div className="font-semibold">Ledger calculation unavailable</div>
+                              <div>{viewingCustomerDisplayBalance.errorMessage || 'Canonical replay failed.'} Stored snapshot values are hidden from trusted balance cards.</div>
+                              {can('analytics') && <div className="mt-1 text-[11px]">Debug snapshot only: Due ₹{formatMoneyWhole(viewingCustomerDisplayBalance.snapshotDue)} • Store Credit ₹{formatMoneyWhole(viewingCustomerDisplayBalance.snapshotStoreCredit)}</div>}
+                          </div>
+                      )}
                       <div className="mt-3 grid gap-2 sm:grid-cols-3">
                           <div className="rounded-lg border border-orange-100 bg-orange-50/30 px-3 py-2.5">
                               <div className="text-[10px] font-semibold uppercase tracking-[0.04em] text-orange-700/80">Current Due</div>
-                              <div className="mt-0.5 text-[23px] font-bold leading-none text-slate-950">₹{formatMoneyWhole(viewingCustomerTotalDue)}</div>
+                              <div className="mt-0.5 text-[23px] font-bold leading-none text-slate-950">{viewingCustomerDisplayBalance?.status === 'ok' ? `₹${formatMoneyWhole(viewingCustomerTotalDue)}` : 'Unavailable'}</div>
                           </div>
                           <div className="rounded-lg border border-blue-100 bg-blue-50/30 px-3 py-2.5">
                               <div className="text-[10px] font-semibold uppercase tracking-[0.04em] text-blue-700/80">Store Credit</div>
-                              <div className="mt-0.5 text-[23px] font-bold leading-none text-blue-700/90">₹{formatMoneyWhole(viewingCustomerStoreCredit)}</div>
+                              <div className="mt-0.5 text-[23px] font-bold leading-none text-blue-700/90">{viewingCustomerDisplayBalance?.status === 'ok' ? `₹${formatMoneyWhole(viewingCustomerStoreCredit)}` : 'Unavailable'}</div>
                           </div>
                           <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2.5">
                               <div className="text-[10px] font-semibold uppercase tracking-[0.04em] text-slate-500">Net Receivable</div>
-                              <div className="mt-0.5 text-[23px] font-bold leading-none text-slate-950">₹{formatMoneyWhole(viewingCustomerNetReceivable)}</div>
+                              <div className="mt-0.5 text-[23px] font-bold leading-none text-slate-950">{viewingCustomerDisplayBalance?.status === 'ok' ? `₹${formatMoneyWhole(viewingCustomerNetReceivable)}` : 'Unavailable'}</div>
                           </div>
                       </div>
                       {can('analytics') && viewingCustomerBalanceMismatch && viewingCustomerDisplayBalance && (
                           <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900">
                               <div className="font-semibold">Stored balance differs from ledger replay</div>
                               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-amber-800">
-                                  <span>Stored: ₹{formatMoneyWhole(viewingCustomerDisplayBalance.storedNetReceivable)}</span>
+                                  <span>Stored: ₹{formatMoneyWhole(Math.max(0, viewingCustomerDisplayBalance.snapshotDue - viewingCustomerDisplayBalance.snapshotStoreCredit))}</span>
                                   <span>Ledger: ₹{formatMoneyWhole(viewingCustomerDisplayBalance.netReceivable)}</span>
                                   <span>Repair available</span>
                               </div>

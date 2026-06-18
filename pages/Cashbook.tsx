@@ -524,7 +524,13 @@ export default function Cashbook() {
     const ledgerReceivableKpi = scopeRows.reduce((sum, r) => sum + r.receivableIncrease - r.receivableDecrease, 0);
     const ledgerPayableKpi = scopeRows.reduce((sum, r) => sum + r.payableIncrease - r.payableDecrease, 0);
 
-    const canonicalSnapshot: any = getCanonicalCustomerBalanceSnapshot(safeCustomers, safeTransactions);
+    let canonicalSnapshot: any = null;
+    let canonicalSnapshotError = '';
+    try {
+      canonicalSnapshot = getCanonicalCustomerBalanceSnapshot(safeCustomers, safeTransactions, safeUpfrontOrders);
+    } catch (error) {
+      canonicalSnapshotError = error instanceof Error ? error.message : 'Ledger calculation unavailable.';
+    }
     const balances: Map<string, any> = canonicalSnapshot?.balances instanceof Map ? canonicalSnapshot.balances : new Map<string, any>();
 
     const dashboardEquivalentReceivableRows = safeCustomers.map((customer) => {
@@ -557,7 +563,7 @@ export default function Cashbook() {
     if (CASHBOOK_RECONCILE_DEBUG && typeof window !== 'undefined') {
     }
 
-    return { cash, bank, receivable: ledgerReceivableKpi, payable: ledgerPayableKpi };
+    return { cash, bank, receivable: canonicalSnapshotError ? 0 : ledgerReceivableKpi, payable: ledgerPayableKpi, ledgerCalculationError: canonicalSnapshotError };
   }, [currentWindowRows, safeCustomers, safeTransactions, safePurchaseOrders]);
   const availableCashForManualOut = useMemo(() => Math.max(0, Number(kpi.cash || 0)), [kpi.cash]);
 
@@ -734,7 +740,7 @@ export default function Cashbook() {
     <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
       <div className="rounded border p-3 bg-emerald-50"><div>Net Cash Movement</div><div className="text-xl font-bold text-emerald-700">{fmt(kpi.cash)}</div></div>
       <div className="rounded border p-3 bg-blue-50"><div>Net Bank Movement</div><div className="text-xl font-bold text-blue-700">{fmt(kpi.bank)}</div></div>
-      <div className="rounded border p-3 bg-orange-50"><div>Customer/Party Receivable</div><div className="text-xl font-bold text-orange-700">{fmt(kpi.receivable)}</div></div>
+      <div className="rounded border p-3 bg-orange-50"><div>Customer/Party Receivable</div><div className="text-xl font-bold text-orange-700">{kpi.ledgerCalculationError ? 'Ledger calculation unavailable' : fmt(kpi.receivable)}</div>{kpi.ledgerCalculationError && <div className="mt-1 text-xs text-amber-700">Canonical replay failed; stored customer snapshots are not shown as trusted balances.</div>}</div>
       <div className="rounded border p-3 bg-rose-50"><div>Customer/Party Payable</div><div className="text-xl font-bold text-rose-700">{fmt(kpi.payable)}</div></div>
     </div>
 

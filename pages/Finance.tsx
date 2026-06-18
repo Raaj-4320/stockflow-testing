@@ -1286,9 +1286,13 @@ export default function Finance() {
   const creditCustomers = useMemo(() => data.customers.filter(c => (canonicalCustomerBalanceById.get(c.id)?.canonicalDue || 0) > 0).sort((a, b) => (canonicalCustomerBalanceById.get(b.id)?.canonicalDue || 0) - (canonicalCustomerBalanceById.get(a.id)?.canonicalDue || 0)), [data.customers, canonicalCustomerBalanceById]);
 
   const dueStoreCreditSummary = useMemo(() => {
-    const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions);
-    return { totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit };
-  }, [data.customers, data.transactions]);
+    try {
+      const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions, data.upfrontOrders || []);
+      return { status: 'ok' as const, totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit, errorMessage: '' };
+    } catch (error) {
+      return { status: 'error' as const, totalDue: 0, totalStoreCredit: 0, errorMessage: error instanceof Error ? error.message : 'Ledger calculation unavailable.' };
+    }
+  }, [data.customers, data.transactions, data.upfrontOrders]);
 
   const scopedCashbookTransactions = useMemo(() => {
     if (cashbookScope === 'all') return data.transactions;
@@ -1891,8 +1895,8 @@ export default function Finance() {
     { Metric: 'Gross Sales', Value: cashbookRollups.grossSales.toFixed(2) },
     { Metric: 'Returns', Value: cashbookRollups.salesReturns.toFixed(2) },
     { Metric: 'Credit Due Created', Value: cashbookRollups.creditDueCreated.toFixed(2) },
-    { Metric: 'Current Due', Value: dueStoreCreditSummary.totalDue.toFixed(2) },
-    { Metric: 'Current Store Credit', Value: dueStoreCreditSummary.totalStoreCredit.toFixed(2) },
+    { Metric: 'Current Due', Value: dueStoreCreditSummary.status === 'ok' ? dueStoreCreditSummary.totalDue.toFixed(2) : 'Ledger calculation unavailable' },
+    { Metric: 'Current Store Credit', Value: dueStoreCreditSummary.status === 'ok' ? dueStoreCreditSummary.totalStoreCredit.toFixed(2) : 'Ledger calculation unavailable' },
     { Metric: 'Cash In', Value: cashbookRollups.cashIn.toFixed(2) },
     { Metric: 'Cash Out', Value: cashbookRollups.cashOut.toFixed(2) },
     { Metric: 'Net Cash Movement', Value: (cashbookRollups.cashIn - cashbookRollups.cashOut).toFixed(2) },
@@ -2497,6 +2501,13 @@ export default function Finance() {
           <div className="text-destructive text-sm bg-destructive/10 border border-destructive/20 p-3 rounded-lg flex items-center gap-2">
             <AlertCircle className="w-4 h-4" />
             {errors}
+          </div>
+        )}
+
+        {dueStoreCreditSummary.status === 'error' && (
+          <div className="text-amber-800 text-sm bg-amber-50 border border-amber-200 p-3 rounded-lg flex items-center gap-2">
+            <AlertCircle className="w-4 h-4" />
+            Ledger calculation unavailable. Current due and store credit totals are hidden until canonical replay succeeds.
           </div>
         )}
 

@@ -37,6 +37,7 @@ import { emitFinanceSnapshot } from '../utils/financeDebugLogger';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { getFriendlyErrorMessage, logStockFlowError } from './errorMessages';
 import { safeText } from '../utils/productText';
+import { enforceAppStateInvariants, InvariantOverride } from './invariants';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -1151,22 +1152,49 @@ const getClampedStoreCreditUsed = (transaction: Transaction, customer: Customer)
   return Math.min(requested, total, available);
 };
 
-const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Transaction[]): { totalDue: number; storeCredit: number; activeSalesTotal: number; activePaymentsTotal: number; activeReturnsTotal: number } => {
+const getCanonicalLedgerEffectiveTransactionType = (tx: Transaction): 'sale' | 'payment' | 'return' | 'customer_credit' | 'customer_cash_out' | 'unknown' => {
+  const normalize = (value: unknown) => String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+  const originalType = normalize(tx.type);
+  const referenceType = normalize((tx as any).referenceTransactionType);
+
+  if (originalType === 'historical reference') {
+    if (referenceType === 'payment' || referenceType === 'credit received' || referenceType === 'receipt') return 'payment';
+    if (referenceType === 'sale' || referenceType === 'sell') return 'sale';
+    if (referenceType === 'return' || referenceType === 'sales return') return 'return';
+    return 'unknown';
+  }
+
+  if (originalType === 'sale') return 'sale';
+  if (originalType === 'payment') return 'payment';
+  if (originalType === 'return') return 'return';
+  if (originalType === 'customer credit') return 'customer_credit';
+  if (originalType === 'customer cash out') return 'customer_cash_out';
+  return 'unknown';
+};
+
+const getCanonicalLedgerEventTime = (event: { date?: string; id?: string }): number => {
+  const parsed = event.date ? new Date(event.date).getTime() : Number.NaN;
+  if (Number.isFinite(parsed)) return parsed;
+  const hinted = getTimestampHintFromTransactionId(event.id || '');
+  return Number.isFinite(hinted) ? hinted : 0;
+};
+
+const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Transaction[], upfrontOrders: UpfrontOrder[] = [], customers: Pick<Customer, 'id' | 'name'>[] = []): { totalDue: number; storeCredit: number; activeSalesTotal: number; activePaymentsTotal: number; activeReturnsTotal: number } => {
   let runningDue = 0;
   let runningStoreCredit = 0;
   let activeSalesTotal = 0;
   let activePaymentsTotal = 0;
   let activeReturnsTotal = 0;
+  const processed: Transaction[] = [];
 
-  const customerTransactionsAsc = transactions
-    .filter(tx => tx.customerId === customerId)
-    .sort((a, b) => {
-      const aTime = Number.isFinite(new Date(a.date).getTime()) ? new Date(a.date).getTime() : getTimestampHintFromTransactionId(a.id);
-      const bTime = Number.isFinite(new Date(b.date).getTime()) ? new Date(b.date).getTime() : getTimestampHintFromTransactionId(b.id);
-      const safeATime = Number.isFinite(aTime) ? aTime : 0;
-      const safeBTime = Number.isFinite(bTime) ? bTime : 0;
-      return safeATime - safeBTime;
-    });
+  const customerTransactions = transactions.filter(tx => tx.customerId === customerId);
+  const upfrontEffects = buildUpfrontOrderLedgerEffects(upfrontOrders.filter(order => order.customerId === customerId), customers)
+    .filter(effect => effect.type !== 'legacy_custom_order_info');
+  const events = [
+    ...customerTransactions.map(tx => ({ kind: 'transaction' as const, id: tx.id, date: tx.date, priority: getCanonicalLedgerEffectiveTransactionType(tx) === 'sale' ? 2 : getCanonicalLedgerEffectiveTransactionType(tx) === 'return' ? 3 : 4, tx })),
+    ...upfrontEffects.map(effect => ({ kind: 'upfront' as const, id: effect.id, date: effect.date, priority: effect.type === 'custom_order_receivable' ? 0 : 1, effect })),
+  ].sort((a, b) => getCanonicalLedgerEventTime(a) - getCanonicalLedgerEventTime(b) || a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
+
   const customerLedgerDebugEnabled = (() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -1179,92 +1207,102 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
   })();
   const customerLedgerDebugRows: Array<Record<string, unknown>> = [];
 
-  customerTransactionsAsc
-    .forEach((tx, index) => {
-      const amount = Math.abs(toFiniteNumber(tx.total, 0));
-      const priorTransactions = customerTransactionsAsc.slice(0, index);
-      if (tx.type === 'sale' || tx.type === 'historical_reference') {
-        const settlement = tx.type === 'historical_reference'
-          ? getHistoricalAwareSaleSettlement(tx)
-          : getSaleSettlementBreakdown(tx);
-        const historicalIsNonFinancial = tx.type === 'historical_reference' && Boolean((tx as any).displayOnly || (tx as any).nonFinancial);
-        const createdStoreCredit = tx.type === 'sale'
-          ? getRequestedStoreCreditCreated(tx)
-          : 0;
-        const consumedStoreCredit = Math.min(
-          getRequestedStoreCreditUsed(tx),
-          Math.abs(toFiniteNumber(tx.total, 0)),
-          toFiniteNonNegative(runningStoreCredit)
-        );
-        const explicitAppliedToReceivable = tx.type === 'sale'
-          ? Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0))
-          : 0;
-        if (!historicalIsNonFinancial) {
-          activeSalesTotal += amount;
-          runningDue = roundCurrency(runningDue + settlement.creditDue);
-          if (explicitAppliedToReceivable > 0) {
-            runningDue = roundCurrency(Math.max(0, runningDue - Math.min(runningDue, explicitAppliedToReceivable)));
-          }
-          runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit) + createdStoreCredit);
-        }
-        if (customerLedgerDebugEnabled) {
-          customerLedgerDebugRows.push({
-            txId: tx.id,
-            type: tx.type,
-            reason: historicalIsNonFinancial ? 'historical_non_financial_skipped' : 'sale_like_due_applied',
-            dueDelta: historicalIsNonFinancial ? 0 : settlement.creditDue,
-            appliedToReceivableDelta: historicalIsNonFinancial ? 0 : -Math.min(runningDue, explicitAppliedToReceivable),
-            storeCreditDelta: historicalIsNonFinancial ? 0 : (createdStoreCredit - consumedStoreCredit),
-            createdStoreCredit,
-            consumedStoreCredit,
-            runningDue,
-            runningStoreCredit,
-          });
-        }
-      } else if (tx.type === 'payment') {
-        activePaymentsTotal += amount;
-        const explicitApplied = Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0));
-        const explicitStoreCredit = Math.max(0, toFiniteNumber((tx as any).storeCreditCreated, 0));
-        const paymentToDue = explicitApplied > 0 ? Math.min(amount, explicitApplied) : Math.min(runningDue, amount);
-        runningDue = roundCurrency(Math.max(0, runningDue - paymentToDue));
-        const paymentRemainder = roundCurrency(explicitApplied > 0 || explicitStoreCredit > 0 ? Math.max(0, explicitStoreCredit || (amount - paymentToDue)) : Math.max(0, amount - paymentToDue));
-        if (paymentRemainder > 0) runningStoreCredit = roundCurrency(runningStoreCredit + paymentRemainder);
-        if (customerLedgerDebugEnabled) {
-          customerLedgerDebugRows.push({
-            txId: tx.id,
-            type: tx.type,
-            reason: 'payment_applied',
-            explicitApplied,
-            explicitStoreCredit,
-            paymentToDue,
-            paymentRemainder,
-            runningDue,
-            runningStoreCredit,
-          });
-        }
-      } else if (tx.type === 'return') {
-        activeReturnsTotal += amount;
-        const reconciliation = getReturnReconciliationAmounts(tx, priorTransactions, runningDue);
-        runningDue = roundCurrency(Math.max(0, runningDue - reconciliation.dueReduction));
-        runningStoreCredit = roundCurrency(runningStoreCredit + reconciliation.storeCreditIncrease);
-      } else if (tx.type === 'customer_credit') {
-        runningDue = roundCurrency(runningDue + amount);
-      } else if (tx.type === 'customer_cash_out') {
-        const explicitStoreCreditUsed = Math.max(0, toFiniteNumber((tx as any).storeCreditUsed, Number.NaN));
-        const inferredStoreCreditUsed = Math.min(runningStoreCredit, amount);
-        const storeCreditUsed = Number.isFinite(explicitStoreCreditUsed) ? Math.min(explicitStoreCreditUsed, amount, runningStoreCredit) : inferredStoreCreditUsed;
-        const receivableIncrease = roundCurrency(Math.max(0, amount - storeCreditUsed));
-        runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - storeCreditUsed));
+  events.forEach((event) => {
+    if (event.kind === 'upfront') {
+      const effect = event.effect;
+      const receivableIncrease = roundCurrency(Math.max(0, toFiniteNumber(effect.receivableIncrease, 0)));
+      const paymentAmount = roundCurrency(Math.max(0, toFiniteNumber(effect.receivableDecrease, 0)));
+      if (effect.type === 'custom_order_receivable') {
         runningDue = roundCurrency(runningDue + receivableIncrease);
+      } else {
+        const applied = Math.min(runningDue, paymentAmount);
+        runningDue = roundCurrency(Math.max(0, runningDue - applied));
+        runningStoreCredit = roundCurrency(runningStoreCredit + Math.max(0, paymentAmount - applied));
       }
-    });
+      if (customerLedgerDebugEnabled) customerLedgerDebugRows.push({ id: effect.id, type: effect.type, runningDue, runningStoreCredit });
+      return;
+    }
+
+    const tx = event.tx;
+    const amount = Math.abs(toFiniteNumber(tx.total, 0));
+    const effectiveType = getCanonicalLedgerEffectiveTransactionType(tx);
+
+    if (effectiveType === 'sale') {
+      const settlement = tx.type === 'historical_reference' ? getHistoricalAwareSaleSettlement(tx) : getSaleSettlementBreakdown(tx);
+      activeSalesTotal += amount;
+      const consumedStoreCredit = Math.min(getRequestedStoreCreditUsed(tx), amount, runningStoreCredit);
+      const createdStoreCredit = getRequestedStoreCreditCreated(tx);
+      runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit) + createdStoreCredit);
+      runningDue = roundCurrency(runningDue + Math.max(0, settlement.creditDue));
+      processed.push(tx);
+      if (customerLedgerDebugEnabled) customerLedgerDebugRows.push({ txId: tx.id, type: tx.type, effectiveType, dueDelta: settlement.creditDue, storeCreditDelta: createdStoreCredit - consumedStoreCredit, runningDue, runningStoreCredit });
+      return;
+    }
+
+    if (effectiveType === 'payment') {
+      activePaymentsTotal += amount;
+      const applied = Math.min(runningDue, amount);
+      runningDue = roundCurrency(Math.max(0, runningDue - applied));
+      runningStoreCredit = roundCurrency(runningStoreCredit + Math.max(0, amount - applied));
+      processed.push(tx);
+      if (customerLedgerDebugEnabled) customerLedgerDebugRows.push({ txId: tx.id, type: tx.type, effectiveType, paymentAmount: amount, applied, runningDue, runningStoreCredit });
+      return;
+    }
+
+    if (effectiveType === 'return') {
+      activeReturnsTotal += amount;
+      const reconciliation = getCanonicalReturnAllocation(tx, processed, runningDue);
+      const dueReduction = Math.min(runningDue, Math.max(0, reconciliation.dueReduction || amount));
+      runningDue = roundCurrency(Math.max(0, runningDue - dueReduction));
+      runningStoreCredit = roundCurrency(runningStoreCredit + Math.max(0, reconciliation.storeCreditIncrease));
+      processed.push(tx);
+      if (customerLedgerDebugEnabled) customerLedgerDebugRows.push({ txId: tx.id, type: tx.type, effectiveType, dueReduction, storeCreditIncrease: reconciliation.storeCreditIncrease, runningDue, runningStoreCredit });
+      return;
+    }
+
+    if (effectiveType === 'customer_credit') {
+      runningDue = roundCurrency(runningDue + amount);
+      if (customerLedgerDebugEnabled) customerLedgerDebugRows.push({ txId: tx.id, type: tx.type, effectiveType, amount, runningDue, runningStoreCredit });
+      return;
+    }
+
+    if (effectiveType === 'customer_cash_out') {
+      const requestedStoreCreditUsed = Math.max(0, toFiniteNumber((tx as any).storeCreditUsed || amount, 0));
+      const storeCreditUsed = Math.min(requestedStoreCreditUsed, amount, runningStoreCredit);
+      const receivableIncrease = roundCurrency(Math.max(0, amount - storeCreditUsed));
+      runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - storeCreditUsed));
+      runningDue = roundCurrency(runningDue + receivableIncrease);
+      if (customerLedgerDebugEnabled) customerLedgerDebugRows.push({ txId: tx.id, type: tx.type, effectiveType, storeCreditUsed, receivableIncrease, runningDue, runningStoreCredit });
+    }
+  });
+
   if (customerLedgerDebugEnabled && customerLedgerDebugRows.length) {
-    console.log('[CUSTOMER_LEDGER_DEBUG]', { customerId, rows: customerLedgerDebugRows });
+    const customer = customers.find(c => c.id === customerId) as Customer | undefined;
+    const storedDue = toFiniteNonNegative(customer?.totalDue);
+    console.log('[CUSTOMER_LEDGER_DEBUG]', { customerId, storedDue, calculatedDue: runningDue, difference: roundCurrency(runningDue - storedDue), rows: customerLedgerDebugRows });
   }
 
   const totalDue = roundCurrency(Math.max(0, runningDue));
   const storeCredit = roundCurrency(Math.max(0, runningStoreCredit));
   return { totalDue, storeCredit, activeSalesTotal, activePaymentsTotal, activeReturnsTotal };
+};
+const applyCanonicalCustomerBalanceSnapshots = (customers: Customer[], transactions: Transaction[], upfrontOrders: UpfrontOrder[], customerIds?: Iterable<string>): Customer[] => {
+  const affectedIds = customerIds ? new Set(Array.from(customerIds).filter(Boolean)) : null;
+  if (affectedIds && affectedIds.size === 0) return customers;
+  const snapshot = getCanonicalCustomerBalanceSnapshot(customers, transactions, upfrontOrders);
+  return customers.map(customer => {
+    if (affectedIds && !affectedIds.has(customer.id)) return customer;
+    const balance = snapshot.balances.get(customer.id);
+    if (!balance) return customer;
+    return {
+      ...customer,
+      totalDue: balance.totalDue,
+      storeCredit: balance.storeCredit,
+      customerLedgerRecalculatedAt: new Date().toISOString(),
+      customerLedgerRecalculationVersion: 'canonical_customer_ledger_v1',
+      customerLedgerRecalculationSource: 'canonical_customer_ledger_replay',
+    } as Customer;
+  });
 };
 
 
@@ -1280,15 +1318,18 @@ export const getHistoricalAwareSaleSettlement = (transaction: Transaction): { ca
   return { cashPaid: amount, onlinePaid: 0, creditDue: 0 };
 };
 
-export const getCanonicalCustomerBalanceSnapshot = (customers: Customer[], transactions: Transaction[]) => {
-  const customersWithLedger = new Set(transactions.filter(tx => Boolean(tx.customerId)).map(tx => tx.customerId as string));
+export const getCanonicalCustomerBalanceSnapshot = (customers: Customer[], transactions: Transaction[], upfrontOrders: UpfrontOrder[] = []) => {
+  const customersWithLedger = new Set([
+    ...transactions.filter(tx => Boolean(tx.customerId)).map(tx => tx.customerId as string),
+    ...upfrontOrders.filter(order => Boolean(order.customerId)).map(order => order.customerId),
+  ]);
   let totalDue = 0;
   let totalStoreCredit = 0;
   const balances = new Map<string, { totalDue: number; storeCredit: number }>();
 
   customers.forEach(customer => {
     if (customersWithLedger.has(customer.id)) {
-      const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, transactions);
+      const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, transactions, upfrontOrders, customers);
       balances.set(customer.id, { totalDue: rebuilt.totalDue, storeCredit: rebuilt.storeCredit });
       totalDue += rebuilt.totalDue;
       totalStoreCredit += rebuilt.storeCredit;
@@ -3812,7 +3853,18 @@ export const safeFinancePersistState = async (patch: FinancePersistPatch, option
   }
 };
 
-export const saveData = async (data: AppState, options?: { throwOnError?: boolean; allowDestructive?: boolean; reason?: string; auditOperation?: AuditOperation }) => {
+export const saveData = async (data: AppState, options?: { throwOnError?: boolean; allowDestructive?: boolean; reason?: string; auditOperation?: AuditOperation; invariantOverride?: InvariantOverride }) => {
+  const invariantResult = enforceAppStateInvariants(data, { operation: options?.reason || 'saveData', override: options?.invariantOverride });
+  if (invariantResult.blocked) {
+    const err = new Error(invariantResult.requiresOverride ? 'Invariant violation requires admin override before saving.' : 'Critical invariant violation blocked save.');
+    emitDataOpStatus({ phase: DATA_OP_PHASES.ERROR, op: options?.reason || 'saveData', entity: 'state', error: err.message });
+    void writeAuditEvent('BLOCKED_WRITE', { reason: `${options?.reason || 'saveData'}_invariant_blocked`, invariantResult });
+    if (options?.throwOnError) throw err;
+    return;
+  }
+  if (options?.invariantOverride && invariantResult.violations.length > 0) {
+    void writeAuditEvent(options?.auditOperation || 'UPDATE', { reason: `${options?.reason || 'saveData'}_invariant_override`, override: options.invariantOverride, invariantResult });
+  }
   if (!data || typeof data !== 'object') {
     const err = new Error('Invalid save payload: expected state object.');
     emitDataOpStatus({ phase: DATA_OP_PHASES.ERROR, op: options?.reason || 'saveData', entity: 'state', error: err.message });
@@ -4675,7 +4727,8 @@ export const addUpfrontOrder = (order: UpfrontOrder): AppState => {
 
     const existingOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders, 'addUpfrontOrder_existing');
     const newOrders = [...existingOrders, sanitizeUpfrontOrderForPersist(normalizedOrder)];
-    const newState = { ...data, upfrontOrders: newOrders };
+    const newCustomers = applyCanonicalCustomerBalanceSnapshots(data.customers, data.transactions, newOrders, [normalizedOrder.customerId]);
+    const newState = { ...data, customers: newCustomers, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'addUpfrontOrder', auditOperation: 'CREATE' });
     emitBehaviorStateChange({ type: 'order_created', entityId: normalizedOrder.id, to: normalizedOrder.status, metadata: { customerId: normalizedOrder.customerId, totalCost: normalizedOrder.totalCost } });
     return newState;
@@ -4690,10 +4743,12 @@ export const updateUpfrontOrder = (order: UpfrontOrder): AppState => {
 
     assertUpfrontOrderPayload(order, new Set(data.customers.map(c => c.id)));
 
-    const newOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders.map(o => o.id === order.id ? order : o), 'updateUpfrontOrder');
-    const newState = { ...data, upfrontOrders: newOrders };
-    void saveData(newState, { reason: 'updateUpfrontOrder', auditOperation: 'UPDATE' });
     const previous = data.upfrontOrders.find(o => o.id === order.id);
+    const affectedCustomerIds = new Set([previous?.customerId, order.customerId].filter((id): id is string => Boolean(id)));
+    const newOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders.map(o => o.id === order.id ? order : o), 'updateUpfrontOrder');
+    const newCustomers = applyCanonicalCustomerBalanceSnapshots(data.customers, data.transactions, newOrders, affectedCustomerIds);
+    const newState = { ...data, customers: newCustomers, upfrontOrders: newOrders };
+    void saveData(newState, { reason: 'updateUpfrontOrder', auditOperation: 'UPDATE' });
     emitBehaviorStateChange({ type: 'order_status_updated', entityId: order.id, from: previous?.status, to: order.status, metadata: { customerId: order.customerId } });
     return newState;
 };
@@ -4742,7 +4797,8 @@ export const collectUpfrontPayment = (orderId: string, amount: number): AppState
     };
 
     const newOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o), 'collectUpfrontPayment');
-    const newState = { ...data, upfrontOrders: newOrders };
+    const newCustomers = applyCanonicalCustomerBalanceSnapshots(data.customers, data.transactions, newOrders, [order.customerId]);
+    const newState = { ...data, customers: newCustomers, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'collectUpfrontPayment', auditOperation: 'UPDATE' });
     emitBehaviorStateChange({ type: 'payment_collected', entityId: orderId, from: order.status, to: newStatus, metadata: { amount, remainingAmount: Math.max(0, newRemaining) } });
     return newState;
@@ -6436,7 +6492,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
         totalDue = updated.totalDue;
         storeCredit = updated.storeCredit;
       }
-      const rebuiltBalance = rebuildCustomerBalanceFromLedger(c.id, newTransactions);
+      const rebuiltBalance = rebuildCustomerBalanceFromLedger(c.id, newTransactions, data.upfrontOrders || [], newCustomers);
       totalDue = rebuiltBalance.totalDue;
       storeCredit = rebuiltBalance.storeCredit;
       newCustomers[customerIndex] = {
@@ -6621,7 +6677,7 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
   const affectedCustomerIds = new Set(incoming.map(tx => tx.customerId).filter((id): id is string => Boolean(id)));
   const mergedCustomers = data.customers.map(customer => {
     if (!affectedCustomerIds.has(customer.id)) return customer;
-    const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, merged);
+    const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, merged, data.upfrontOrders || [], data.customers);
     return {
       ...customer,
       totalDue: rebuilt.totalDue,
@@ -6921,7 +6977,7 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
         if (!latest) return current;
         return new Date(current).getTime() > new Date(latest).getTime() ? current : latest;
       }, null);
-    const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, nextTransactions);
+    const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, nextTransactions, stateWithoutOriginal.upfrontOrders || [], stateWithoutOriginal.customers);
     return {
       ...customer,
       totalSpend: salesTotal - returnsTotal,
