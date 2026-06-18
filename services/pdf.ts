@@ -3,6 +3,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer, Product, StoreProfile } from '../types';
 import { loadData } from './storage';
+import { getCanonicalCustomerBalanceResult } from './customerBalanceView';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from './numberFormat';
 import { normalizeTransactionItems } from '../utils/transactionItems';
@@ -868,8 +869,15 @@ export const generateReceiptPDFDataUrl = (
 };
 
 export const printThermalInvoice = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
-    const { profile } = loadData();
+    const data = loadData();
+    const { profile } = data;
     const customer = customers.find(c => c.id === transaction.customerId);
+    const canonicalBalance = customer ? getCanonicalCustomerBalanceResult(customer, data.transactions || [], data.upfrontOrders || []) : null;
+    const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `₹${formatMoneyWhole(canonicalBalance.currentDue)}` : 'Ledger unavailable';
+    const previousBalanceValue = canonicalBalance?.status === 'ok'
+      ? Math.max(0, canonicalBalance.currentDue + (transaction.paymentMethod === 'Credit' ? -transaction.total : 0))
+      : 0;
+    const previousBalanceLabel = canonicalBalance?.status === 'ok' ? `₹${formatMoneyWhole(previousBalanceValue)}` : 'Ledger unavailable';
     
     // Utility: Number to words (Simple version)
     const numberToWords = (num: number) => {
@@ -1077,11 +1085,11 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
       </div>
       <div class="row">
         <span>Prev Bal</span>
-        <span>₹${customer?.totalDue ? formatMoneyWhole(customer.totalDue + (transaction.paymentMethod === 'Credit' ? -transaction.total : 0)) : '0'}</span>
+        <span>${previousBalanceLabel}</span>
       </div>
       <div class="row">
         <span>Curr Bal</span>
-        <span>₹${customer?.totalDue ? formatMoneyWhole(customer.totalDue) : '0'}</span>
+        <span>${currentBalanceLabel}</span>
       </div>
     </div>
   </div>
