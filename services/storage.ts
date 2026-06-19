@@ -5678,6 +5678,45 @@ export type MissingProductPurchaseHistoryRowsAnalysis = {
   missingCount: number;
 };
 
+export type PurchaseOrderProductHistoryTraceLine = {
+  lineIndex: number;
+  productId: string;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  variant: string;
+  color: string;
+  productFound: boolean;
+  resolvedProductId: string | null;
+  resolvedProductName: string | null;
+  productPurchaseHistoryCount: number;
+  matchingHistoryRows: Array<NonNullable<Product['purchaseHistory']>[number]>;
+  matchingHistoryRowFound: boolean;
+};
+
+export type PurchaseOrderProductHistoryTraceResult = {
+  purchaseOrderId: string;
+  purchaseOrderFound: boolean;
+  purchaseOrder: {
+    id: string;
+    date: string;
+    partyId: string;
+    partyName: string;
+    total: number;
+    lineCount: number;
+  } | null;
+  lines: PurchaseOrderProductHistoryTraceLine[];
+  verdict:
+    | 'purchase_order_missing'
+    | 'product_missing'
+    | 'history_row_missing'
+    | 'history_row_present'
+    | 'product_id_mismatch'
+    | 'unknown';
+  recommendedNextStep: string;
+};
+
 export const analyzeMissingProductPurchaseHistoryRows = (): MissingProductPurchaseHistoryRowsAnalysis => {
   const data = loadData();
   const products = Array.isArray(data.products) ? data.products : [];
@@ -5746,6 +5785,88 @@ export const analyzeMissingProductPurchaseHistoryRows = (): MissingProductPurcha
     scannedLines,
     missingRows,
     missingCount: missingRows.length,
+  };
+};
+
+export const tracePurchaseOrderProductHistoryLink = (purchaseOrderId: string): PurchaseOrderProductHistoryTraceResult => {
+  const normalizedId = String(purchaseOrderId || '').trim();
+  const data = loadData();
+  const products = Array.isArray(data.products) ? data.products : [];
+  const purchaseOrders = Array.isArray(data.purchaseOrders) ? data.purchaseOrders : [];
+  const order = purchaseOrders.find((row) => String(row?.id || '').trim() === normalizedId) || null;
+
+  if (!order) {
+    return {
+      purchaseOrderId: normalizedId,
+      purchaseOrderFound: false,
+      purchaseOrder: null,
+      lines: [],
+      verdict: 'purchase_order_missing',
+      recommendedNextStep: 'Confirm the currently loaded business data includes this purchase order before tracing product linkage.',
+    };
+  }
+
+  const productsById = new Map(products.map((product) => [String(product.id || '').trim(), product]));
+  const lines: PurchaseOrderProductHistoryTraceLine[] = (order.lines || []).map((line, lineIndex) => {
+    const normalizedProductId = String(line?.productId || '').trim();
+    const product = normalizedProductId ? productsById.get(normalizedProductId) : undefined;
+    const purchaseHistory = Array.isArray(product?.purchaseHistory) ? product.purchaseHistory : [];
+    const matchingHistoryRows = purchaseHistory.filter((historyRow) => String(historyRow.purchaseOrderId || '').trim() === normalizedId);
+
+    return {
+      lineIndex,
+      productId: normalizedProductId,
+      productName: String(line?.productName || product?.name || ''),
+      quantity: Math.max(0, Number(line?.quantity || 0)),
+      unitPrice: Math.max(0, Number(line?.unitCost || 0)),
+      lineTotal: Math.max(0, Number(line?.totalCost || 0)),
+      variant: String(line?.variant || ''),
+      color: String(line?.color || ''),
+      productFound: Boolean(product),
+      resolvedProductId: product ? String(product.id || '') : null,
+      resolvedProductName: product ? String(product.name || '') : null,
+      productPurchaseHistoryCount: purchaseHistory.length,
+      matchingHistoryRows,
+      matchingHistoryRowFound: matchingHistoryRows.length > 0,
+    };
+  });
+
+  const hasMissingProduct = lines.some((line) => !line.productFound);
+  const hasProductIdMismatch = lines.some((line) => line.productFound && line.resolvedProductId !== line.productId);
+  const hasMissingHistoryRow = lines.some((line) => line.productFound && !line.matchingHistoryRowFound);
+  const hasPresentHistoryRow = lines.length > 0 && lines.every((line) => line.productFound && line.matchingHistoryRowFound);
+
+  let verdict: PurchaseOrderProductHistoryTraceResult['verdict'] = 'unknown';
+  let recommendedNextStep = 'Inspect the currently opened product modal and compare it against this purchase order line by line.';
+
+  if (hasMissingProduct) {
+    verdict = 'product_missing';
+    recommendedNextStep = 'Find why the purchase order references a product that is not present in the currently loaded products dataset.';
+  } else if (hasProductIdMismatch) {
+    verdict = 'product_id_mismatch';
+    recommendedNextStep = 'Compare the purchase order productId against the product currently being viewed in the Purchase History modal.';
+  } else if (hasMissingHistoryRow) {
+    verdict = 'history_row_missing';
+    recommendedNextStep = 'Restore the missing embedded product.purchaseHistory row from the purchase order in a separate repair step.';
+  } else if (hasPresentHistoryRow) {
+    verdict = 'history_row_present';
+    recommendedNextStep = 'The embedded row exists, so inspect modal state selection and rendering for a UI/state bug.';
+  }
+
+  return {
+    purchaseOrderId: normalizedId,
+    purchaseOrderFound: true,
+    purchaseOrder: {
+      id: order.id,
+      date: String(order.orderDate || order.createdAt || ''),
+      partyId: String(order.partyId || ''),
+      partyName: String(order.partyName || ''),
+      total: Math.max(0, Number(order.totalAmount || 0)),
+      lineCount: Array.isArray(order.lines) ? order.lines.length : 0,
+    },
+    lines,
+    verdict,
+    recommendedNextStep,
   };
 };
 
