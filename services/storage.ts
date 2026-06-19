@@ -28,7 +28,7 @@ import {
   OperatorUser,
 } from '../types';
 import { db, auth } from './firebase';
-import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
+import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, getDoc, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
 import { financeLog } from './financeLogger';
@@ -128,6 +128,16 @@ let syncGeneration = 0;
 
 const emitBehaviorStateChange = (detail: { type: string; from?: string; to?: string; entityId?: string; metadata?: Record<string, unknown> }) => {
   window.dispatchEvent(new CustomEvent('app-state-change', { detail }));
+};
+
+const shouldTraceDevFlag = (flag: string) => {
+  if (!Boolean((import.meta as any).env?.DEV) || typeof window === 'undefined') return false;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get(flag) === '1' || window.localStorage.getItem(flag) === '1';
+  } catch {
+    return false;
+  }
 };
 
 export const STORAGE_FLOW_REGISTRY = Object.freeze({
@@ -5903,6 +5913,7 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
   const data = loadData();
   const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
   if (!existing) throw new Error('Supplier payment not found.');
+  const shouldTraceSupplierPaymentEdit = shouldTraceDevFlag('TRACE_SUPPLIER_PAYMENT_EDIT');
   const linkedCredits = (data.partyCreditLedger || []).filter((entry) => entry.type === 'supplier_overpayment' && (
     entry.sourcePaymentId === paymentId
     || (existing.voucherNo && entry.sourceVoucherNo === existing.voucherNo)
@@ -5936,8 +5947,9 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
   nextEntry.allocations = allocations;
   const nextSupplierPayments = (data.supplierPayments || []).map((item) => item.id === paymentId ? nextEntry : item);
   const nextPartyCreditLedger = (data.partyCreditLedger || []).filter((entry) => !linkedCredits.some((linked) => linked.id === entry.id));
+  let recreatedCreditEntry: PartyCreditLedgerEntry | null = null;
   if (partyCreditCreated > 0) {
-    nextPartyCreditLedger.unshift({
+    recreatedCreditEntry = {
       id: linkedCredits[0]?.id || `pcl-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
       partyId: existing.partyId,
       partyName: existing.partyName,
@@ -5952,9 +5964,134 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
       usageHistory: [],
       createdAt: linkedCredits[0]?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+    };
+    nextPartyCreditLedger.unshift(recreatedCreditEntry);
+  }
+  const affectedOrderIds = Array.from(new Set([
+    ...((existing.allocations || []).map((allocation) => allocation.orderId).filter(Boolean)),
+    ...allocations.map((allocation) => allocation.orderId).filter(Boolean),
+    ...(data.purchaseOrders || [])
+      .filter((order) => (order.paymentHistory || []).some((payment: any) => payment.supplierPaymentId === paymentId))
+      .map((order) => order.id),
+  ]));
+  if (shouldTraceSupplierPaymentEdit) {
+    console.log('[SUPPLIER_PAYMENT_EDIT_TRACE_BEFORE_SAVE]', {
+      paymentId,
+      partyId: existing.partyId,
+      affectedPurchaseOrderIds: affectedOrderIds,
+      beforeAmount: Number(existing.amount || 0),
+      afterAmount: Number(nextEntry.amount || 0),
+      purchaseOrdersCountBefore: (data.purchaseOrders || []).length,
+      purchaseOrdersCountAfter: nextOrders.length,
+      supplierPaymentsCountBefore: (data.supplierPayments || []).length,
+      supplierPaymentsCountAfter: nextSupplierPayments.length,
+      partyCreditLedgerCountBefore: (data.partyCreditLedger || []).length,
+      partyCreditLedgerCountAfter: nextPartyCreditLedger.length,
     });
   }
-  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCreditLedger }, { throwOnError: true, reason: 'updateSupplierPayment', auditOperation: 'UPDATE' });
+  if (db) {
+    const user = await assertCloudWriteReady('updateSupplierPayment');
+    const paymentRef = doc(db!, 'stores', user.uid, 'supplierPayments', paymentId);
+    const orderRefs = affectedOrderIds.map((orderId) => doc(db!, 'stores', user.uid, 'purchaseOrders', orderId));
+    const creditRefs = linkedCredits.map((entry) => doc(db!, 'stores', user.uid, 'partyCreditLedger', entry.id));
+    const recreatedCreditRef = recreatedCreditEntry ? doc(db!, 'stores', user.uid, 'partyCreditLedger', recreatedCreditEntry.id) : null;
+    const affectedOrders = nextOrders.filter((order) => affectedOrderIds.includes(order.id));
+
+    await runFirestoreTransaction(db!, async (firestoreTx) => {
+      firestoreTx.set(paymentRef, sanitizeData(nextEntry), { merge: true });
+      affectedOrders.forEach((order) => {
+        firestoreTx.set(doc(db!, 'stores', user.uid, 'purchaseOrders', order.id), sanitizeData(order), { merge: true });
+      });
+      linkedCredits.forEach((entry) => {
+        if (recreatedCreditEntry && entry.id === recreatedCreditEntry.id) return;
+        firestoreTx.delete(doc(db!, 'stores', user.uid, 'partyCreditLedger', entry.id));
+      });
+      if (recreatedCreditRef && recreatedCreditEntry) {
+        firestoreTx.set(recreatedCreditRef, sanitizeData(recreatedCreditEntry), { merge: true });
+      }
+    });
+
+    const persistedPaymentSnap = await getDoc(paymentRef);
+    const persistedOrderSnaps = await Promise.all(orderRefs.map((ref) => getDoc(ref)));
+    const persistedCreditSnaps = await Promise.all(creditRefs.map((ref) => getDoc(ref)));
+    const persistedPayment = persistedPaymentSnap.exists() ? ({ ...(persistedPaymentSnap.data() as SupplierPaymentLedgerEntry), id: persistedPaymentSnap.id }) : null;
+    const persistedOrders = persistedOrderSnaps
+      .filter((snap) => snap.exists())
+      .map((snap) => ({ ...(snap.data() as PurchaseOrder), id: snap.id }));
+    const persistedOrdersById = new Map(persistedOrders.map((order) => [order.id, order]));
+    const orderVerificationOk = affectedOrders.every((expectedOrder) => {
+      const persistedOrder = persistedOrdersById.get(expectedOrder.id);
+      if (!persistedOrder) return false;
+      const persistedPaymentRefs = (persistedOrder.paymentHistory || []).filter((payment: any) => payment.supplierPaymentId === paymentId);
+      const expectedPaymentRefs = (expectedOrder.paymentHistory || []).filter((payment: any) => payment.supplierPaymentId === paymentId);
+      return persistedOrder.partyId === expectedOrder.partyId
+        && Math.abs(Number(persistedOrder.totalPaid || 0) - Number(expectedOrder.totalPaid || 0)) < 0.01
+        && Math.abs(Number(persistedOrder.remainingAmount || 0) - Number(expectedOrder.remainingAmount || 0)) < 0.01
+        && persistedPaymentRefs.length === expectedPaymentRefs.length;
+    });
+    const explicitCreditCheck = recreatedCreditEntry
+      ? await getDoc(recreatedCreditRef!)
+      : null;
+    const creditVerificationOk = linkedCredits.every((entry, idx) => {
+      const snap = persistedCreditSnaps[idx];
+      if (recreatedCreditEntry && entry.id === recreatedCreditEntry.id) {
+        return snap.exists()
+          && Math.abs(Number((snap.data() as PartyCreditLedgerEntry).remainingAmount || 0) - Number(recreatedCreditEntry.remainingAmount || 0)) < 0.01
+          && String((snap.data() as PartyCreditLedgerEntry).partyId || '') === String(existing.partyId || '');
+      }
+      return !snap.exists();
+    });
+    const recreatedCreditDocOk = recreatedCreditEntry
+      ? explicitCreditCheck?.exists()
+        && Math.abs(Number((explicitCreditCheck.data() as PartyCreditLedgerEntry).remainingAmount || 0) - Number(recreatedCreditEntry.remainingAmount || 0)) < 0.01
+        && String((explicitCreditCheck.data() as PartyCreditLedgerEntry).partyId || '') === String(existing.partyId || '')
+      : true;
+    if (!persistedPayment
+      || Math.abs(Number(persistedPayment.amount || 0) - Number(nextEntry.amount || 0)) >= 0.01
+      || String(persistedPayment.partyId || '') !== String(existing.partyId || '')
+      || !orderVerificationOk
+      || !creditVerificationOk
+      || !recreatedCreditDocOk) {
+      throw new Error(`Supplier payment update verification failed for payment ${paymentId}. Please refresh and contact support before retrying.`);
+    }
+
+    subcollectionSupplierPaymentsCache = [persistedPayment, ...subcollectionSupplierPaymentsCache.filter((item) => item.id !== paymentId)];
+    subcollectionPurchaseOrdersCache = [
+      ...persistedOrders,
+      ...subcollectionPurchaseOrdersCache.filter((item) => !affectedOrderIds.includes(item.id)),
+    ];
+    const linkedCreditIds = new Set(linkedCredits.map((entry) => entry.id));
+    subcollectionPartyCreditLedgerCache = [
+      ...(recreatedCreditEntry && explicitCreditCheck?.exists() ? [{ ...(explicitCreditCheck.data() as PartyCreditLedgerEntry), id: recreatedCreditEntry.id }] : []),
+      ...subcollectionPartyCreditLedgerCache.filter((item) => !linkedCreditIds.has(item.id)),
+    ];
+    applyMergedPurchaseHydrationToMemory(user.uid, 'updateSupplierPayment_cloud_commit');
+    await writeAuditEvent('UPDATE', {
+      reason: 'updateSupplierPayment_subcollection',
+      paymentId,
+      partyId: existing.partyId,
+      affectedPurchaseOrderIds: affectedOrderIds,
+      beforeAmount: Number(existing.amount || 0),
+      afterAmount: Number(nextEntry.amount || 0),
+    });
+    if (shouldTraceSupplierPaymentEdit) {
+      const afterSaveData = loadData();
+      const persistedPaymentFromState = (afterSaveData.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
+      console.log('[SUPPLIER_PAYMENT_EDIT_TRACE_AFTER_SAVE]', {
+        paymentId,
+        partyId: existing.partyId,
+        affectedPurchaseOrderIds: affectedOrderIds,
+        beforeAmount: Number(existing.amount || 0),
+        afterAmount: Number(nextEntry.amount || 0),
+        supplierPaymentFoundAfterSave: Boolean(persistedPaymentFromState),
+        purchaseOrdersCountAfterSave: (afterSaveData.purchaseOrders || []).length,
+        supplierPaymentsCountAfterSave: (afterSaveData.supplierPayments || []).length,
+        partyCreditLedgerCountAfterSave: (afterSaveData.partyCreditLedger || []).length,
+      });
+    }
+  } else {
+    await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCreditLedger }, { throwOnError: true, reason: 'updateSupplierPayment', auditOperation: 'UPDATE' });
+  }
   return nextEntry;
 };
 
@@ -5962,6 +6099,7 @@ export const deleteSupplierPayment = async (paymentId: string) => {
   const data = loadData();
   const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
   if (!existing) throw new Error('Supplier payment not found.');
+  const shouldTraceSupplierPaymentDelete = shouldTraceDevFlag('TRACE_SUPPLIER_PAYMENT_DELETE');
   const linkedCredits = (data.partyCreditLedger || []).filter((entry) => entry.type === 'supplier_overpayment' && (
     entry.sourcePaymentId === paymentId
     || (existing.voucherNo && entry.sourceVoucherNo === existing.voucherNo)
@@ -5976,11 +6114,106 @@ export const deleteSupplierPayment = async (paymentId: string) => {
   const strippedOrders = stripSupplierPaymentAllocations(data.purchaseOrders || [], paymentId);
   const nextSupplierPayments = (data.supplierPayments || []).map((item) => item.id === paymentId ? { ...item, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : item);
   const nextPartyCredits = (data.partyCreditLedger || []).filter((entry) => !linkedCredits.some((linked) => linked.id === entry.id));
-  await saveData({ ...data, purchaseOrders: strippedOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'deleteSupplierPayment', auditOperation: 'DELETE' });
+  const affectedOrderIds = Array.from(new Set([
+    ...((existing.allocations || []).map((allocation) => allocation.orderId).filter(Boolean)),
+    ...(data.purchaseOrders || [])
+      .filter((order) => (order.paymentHistory || []).some((payment: any) => payment.supplierPaymentId === paymentId))
+      .map((order) => order.id),
+  ]));
+  if (shouldTraceSupplierPaymentDelete) {
+    console.log('[SUPPLIER_PAYMENT_DELETE_TRACE_BEFORE_SAVE]', {
+      paymentId,
+      partyId: existing.partyId,
+      affectedPurchaseOrderIds: affectedOrderIds,
+      beforeAmount: Number(existing.amount || 0),
+      afterAmount: 0,
+      purchaseOrdersCountBefore: (data.purchaseOrders || []).length,
+      purchaseOrdersCountAfter: strippedOrders.length,
+      supplierPaymentsCountBefore: (data.supplierPayments || []).length,
+      supplierPaymentsCountAfter: nextSupplierPayments.length,
+      partyCreditLedgerCountBefore: (data.partyCreditLedger || []).length,
+      partyCreditLedgerCountAfter: nextPartyCredits.length,
+    });
+  }
+  if (db) {
+    const user = await assertCloudWriteReady('deleteSupplierPayment');
+    const paymentRef = doc(db!, 'stores', user.uid, 'supplierPayments', paymentId);
+    const affectedOrders = strippedOrders.filter((order) => affectedOrderIds.includes(order.id));
+    const orderRefs = affectedOrderIds.map((orderId) => doc(db!, 'stores', user.uid, 'purchaseOrders', orderId));
+    const creditRefs = linkedCredits.map((entry) => doc(db!, 'stores', user.uid, 'partyCreditLedger', entry.id));
+    const deletedPaymentEntry = nextSupplierPayments.find((item) => item.id === paymentId) as SupplierPaymentLedgerEntry;
+
+    await runFirestoreTransaction(db!, async (firestoreTx) => {
+      firestoreTx.set(paymentRef, sanitizeData(deletedPaymentEntry), { merge: true });
+      affectedOrders.forEach((order) => {
+        firestoreTx.set(doc(db!, 'stores', user.uid, 'purchaseOrders', order.id), sanitizeData(order), { merge: true });
+      });
+      linkedCredits.forEach((entry) => {
+        firestoreTx.delete(doc(db!, 'stores', user.uid, 'partyCreditLedger', entry.id));
+      });
+    });
+
+    const persistedPaymentSnap = await getDoc(paymentRef);
+    const persistedOrderSnaps = await Promise.all(orderRefs.map((ref) => getDoc(ref)));
+    const persistedCreditSnaps = await Promise.all(creditRefs.map((ref) => getDoc(ref)));
+    const persistedPayment = persistedPaymentSnap.exists() ? ({ ...(persistedPaymentSnap.data() as SupplierPaymentLedgerEntry), id: persistedPaymentSnap.id }) : null;
+    const persistedOrders = persistedOrderSnaps.filter((snap) => snap.exists()).map((snap) => ({ ...(snap.data() as PurchaseOrder), id: snap.id }));
+    const persistedOrdersById = new Map(persistedOrders.map((order) => [order.id, order]));
+    const orderVerificationOk = affectedOrders.every((expectedOrder) => {
+      const persistedOrder = persistedOrdersById.get(expectedOrder.id);
+      if (!persistedOrder) return false;
+      const persistedPaymentRefs = (persistedOrder.paymentHistory || []).filter((payment: any) => payment.supplierPaymentId === paymentId);
+      return persistedOrder.partyId === expectedOrder.partyId
+        && Math.abs(Number(persistedOrder.totalPaid || 0) - Number(expectedOrder.totalPaid || 0)) < 0.01
+        && Math.abs(Number(persistedOrder.remainingAmount || 0) - Number(expectedOrder.remainingAmount || 0)) < 0.01
+        && persistedPaymentRefs.length === 0;
+    });
+    const creditVerificationOk = persistedCreditSnaps.every((snap) => !snap.exists());
+    if (!persistedPayment
+      || !persistedPayment.deletedAt
+      || String(persistedPayment.partyId || '') !== String(existing.partyId || '')
+      || !orderVerificationOk
+      || !creditVerificationOk) {
+      throw new Error(`Supplier payment delete verification failed for payment ${paymentId}. Please refresh and contact support before retrying.`);
+    }
+
+    subcollectionSupplierPaymentsCache = [persistedPayment, ...subcollectionSupplierPaymentsCache.filter((item) => item.id !== paymentId)];
+    subcollectionPurchaseOrdersCache = [
+      ...persistedOrders,
+      ...subcollectionPurchaseOrdersCache.filter((item) => !affectedOrderIds.includes(item.id)),
+    ];
+    const linkedCreditIds = new Set(linkedCredits.map((entry) => entry.id));
+    subcollectionPartyCreditLedgerCache = subcollectionPartyCreditLedgerCache.filter((item) => !linkedCreditIds.has(item.id));
+    applyMergedPurchaseHydrationToMemory(user.uid, 'deleteSupplierPayment_cloud_commit');
+    await writeAuditEvent('DELETE', {
+      reason: 'deleteSupplierPayment_subcollection',
+      paymentId,
+      partyId: existing.partyId,
+      affectedPurchaseOrderIds: affectedOrderIds,
+    });
+    if (shouldTraceSupplierPaymentDelete) {
+      const afterSaveData = loadData();
+      const persistedPaymentFromState = (afterSaveData.supplierPayments || []).find((item) => item.id === paymentId);
+      console.log('[SUPPLIER_PAYMENT_DELETE_TRACE_AFTER_SAVE]', {
+        paymentId,
+        partyId: existing.partyId,
+        affectedPurchaseOrderIds: affectedOrderIds,
+        beforeAmount: Number(existing.amount || 0),
+        afterAmount: 0,
+        supplierPaymentMarkedDeletedAfterSave: Boolean(persistedPaymentFromState?.deletedAt),
+        purchaseOrdersCountAfterSave: (afterSaveData.purchaseOrders || []).length,
+        supplierPaymentsCountAfterSave: (afterSaveData.supplierPayments || []).length,
+        partyCreditLedgerCountAfterSave: (afterSaveData.partyCreditLedger || []).length,
+      });
+    }
+  } else {
+    await saveData({ ...data, purchaseOrders: strippedOrders, supplierPayments: nextSupplierPayments, partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'deleteSupplierPayment', auditOperation: 'DELETE' });
+  }
 };
 
 export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orderId: string; paymentId: string }>) => {
   const data = loadData();
+  const shouldTraceSupplierPaymentDelete = shouldTraceDevFlag('TRACE_SUPPLIER_PAYMENT_DELETE');
   const byOrder = new Map<string, Set<string>>();
   allocations.forEach((item) => {
     if (!item.orderId || !item.paymentId) return;
@@ -6002,7 +6235,73 @@ export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orde
       updatedAt: new Date().toISOString(),
     };
   });
-  await saveData({ ...data, purchaseOrders: nextOrders }, { throwOnError: true, reason: 'deleteLegacySupplierPaymentGroup', auditOperation: 'DELETE' });
+  const affectedOrderIds = Array.from(byOrder.keys());
+  if (shouldTraceSupplierPaymentDelete) {
+    console.log('[SUPPLIER_PAYMENT_DELETE_TRACE_BEFORE_SAVE]', {
+      paymentId: 'legacy_group',
+      partyId: null,
+      affectedPurchaseOrderIds: affectedOrderIds,
+      beforeAmount: null,
+      afterAmount: null,
+      purchaseOrdersCountBefore: (data.purchaseOrders || []).length,
+      purchaseOrdersCountAfter: nextOrders.length,
+      supplierPaymentsCountBefore: (data.supplierPayments || []).length,
+      supplierPaymentsCountAfter: (data.supplierPayments || []).length,
+      partyCreditLedgerCountBefore: (data.partyCreditLedger || []).length,
+      partyCreditLedgerCountAfter: (data.partyCreditLedger || []).length,
+    });
+  }
+  if (db) {
+    const user = await assertCloudWriteReady('deleteLegacySupplierPaymentGroup');
+    const affectedOrders = nextOrders.filter((order) => affectedOrderIds.includes(order.id));
+    const orderRefs = affectedOrderIds.map((orderId) => doc(db!, 'stores', user.uid, 'purchaseOrders', orderId));
+    await runFirestoreTransaction(db!, async (firestoreTx) => {
+      affectedOrders.forEach((order) => {
+        firestoreTx.set(doc(db!, 'stores', user.uid, 'purchaseOrders', order.id), sanitizeData(order), { merge: true });
+      });
+    });
+    const persistedOrderSnaps = await Promise.all(orderRefs.map((ref) => getDoc(ref)));
+    const persistedOrders = persistedOrderSnaps.filter((snap) => snap.exists()).map((snap) => ({ ...(snap.data() as PurchaseOrder), id: snap.id }));
+    const persistedOrdersById = new Map(persistedOrders.map((order) => [order.id, order]));
+    const orderVerificationOk = affectedOrders.every((expectedOrder) => {
+      const persistedOrder = persistedOrdersById.get(expectedOrder.id);
+      if (!persistedOrder) return false;
+      const removedIds = byOrder.get(expectedOrder.id) || new Set<string>();
+      const stillPresent = (persistedOrder.paymentHistory || []).some((payment: any) => removedIds.has(payment.id));
+      return !stillPresent
+        && Math.abs(Number(persistedOrder.totalPaid || 0) - Number(expectedOrder.totalPaid || 0)) < 0.01
+        && Math.abs(Number(persistedOrder.remainingAmount || 0) - Number(expectedOrder.remainingAmount || 0)) < 0.01
+        && persistedOrder.partyId === expectedOrder.partyId;
+    });
+    if (!orderVerificationOk) {
+      throw new Error('Legacy supplier payment group delete verification failed. Please refresh and contact support before retrying.');
+    }
+    subcollectionPurchaseOrdersCache = [
+      ...persistedOrders,
+      ...subcollectionPurchaseOrdersCache.filter((item) => !affectedOrderIds.includes(item.id)),
+    ];
+    applyMergedPurchaseHydrationToMemory(user.uid, 'deleteLegacySupplierPaymentGroup_cloud_commit');
+    await writeAuditEvent('DELETE', {
+      reason: 'deleteLegacySupplierPaymentGroup_subcollection',
+      affectedPurchaseOrderIds: affectedOrderIds,
+      paymentIds: allocations.map((item) => item.paymentId).filter(Boolean),
+    });
+    if (shouldTraceSupplierPaymentDelete) {
+      const afterSaveData = loadData();
+      console.log('[SUPPLIER_PAYMENT_DELETE_TRACE_AFTER_SAVE]', {
+        paymentId: 'legacy_group',
+        partyId: null,
+        affectedPurchaseOrderIds: affectedOrderIds,
+        beforeAmount: null,
+        afterAmount: null,
+        purchaseOrdersCountAfterSave: (afterSaveData.purchaseOrders || []).length,
+        supplierPaymentsCountAfterSave: (afterSaveData.supplierPayments || []).length,
+        partyCreditLedgerCountAfterSave: (afterSaveData.partyCreditLedger || []).length,
+      });
+    }
+  } else {
+    await saveData({ ...data, purchaseOrders: nextOrders }, { throwOnError: true, reason: 'deleteLegacySupplierPaymentGroup', auditOperation: 'DELETE' });
+  }
 };
 
 
@@ -6026,6 +6325,7 @@ export const editInventoryPurchaseHistoryEntry = async (
   const orderIndex = orders.findIndex((o) => o.id === history.purchaseOrderId);
   if (orderIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Linked purchase order not found.', { purchaseOrderId: history.purchaseOrderId });
   const order = orders[orderIndex];
+  const shouldTracePurchaseEdit = shouldTraceDevFlag('TRACE_PURCHASE_EDIT');
 
   const newQty = Math.max(0, Number(patch.quantity || 0));
   const newUnitPrice = Math.max(0, Number(patch.unitPrice || 0));
@@ -6116,8 +6416,9 @@ export const editInventoryPurchaseHistoryEntry = async (
   const editCreditId = `pce-edit-${order.id}`;
   const existingCredits = Array.isArray((data as any).partyCreditLedger) ? ([...(data as any).partyCreditLedger] as PartyCreditLedgerEntry[]) : [];
   const nextPartyCreditLedger = existingCredits.filter((entry) => entry.id !== editCreditId);
+  let editCreditEntry: PartyCreditLedgerEntry | null = null;
   if (overpaidAmount > 0) {
-    nextPartyCreditLedger.unshift({
+    editCreditEntry = {
       id: editCreditId,
       partyId: order.partyId,
       partyName: order.partyName,
@@ -6130,12 +6431,133 @@ export const editInventoryPurchaseHistoryEntry = async (
       createdAt: now,
       updatedAt: now,
       note: `Overpayment after purchase edit for ${order.billNumber || order.id}`,
-    } as PartyCreditLedgerEntry);
+    } as PartyCreditLedgerEntry;
+    nextPartyCreditLedger.unshift(editCreditEntry);
   }
 
   products[productIndex] = nextProduct;
   orders[orderIndex] = nextOrder;
+  const forensicSnapshot = {
+    purchaseOrderId: order.id,
+    purchaseHistoryId,
+    productId,
+    partyId: order.partyId,
+    oldAmount: Number((Math.max(0, Number(history.quantity || 0)) * Math.max(0, Number(history.unitPrice || 0))).toFixed(2)),
+    newAmount: Number((newQty * newUnitPrice).toFixed(2)),
+  };
+  if (shouldTracePurchaseEdit) {
+    console.log('[PURCHASE_EDIT_TRACE_BEFORE_SAVE]', {
+      mode: db ? 'cloud' : 'local',
+      ...forensicSnapshot,
+      originalStatus: order.status,
+      nextStatus: nextOrder.status,
+      originalTotalAmount: Number(order.totalAmount || 0),
+      nextTotalAmount: Number(nextOrder.totalAmount || 0),
+      originalQuantity: Number(history.quantity || 0),
+      nextQuantity: Number(newQty || 0),
+      originalUnitPrice: Number(history.unitPrice || 0),
+      nextUnitPrice: Number(newUnitPrice || 0),
+      purchaseOrdersCountBefore: (data.purchaseOrders || []).length,
+      purchaseOrdersCountAfter: orders.length,
+      productPurchaseHistoryCountBefore: (product.purchaseHistory || []).length,
+      productPurchaseHistoryCountAfter: (nextProduct.purchaseHistory || []).length,
+      editedOrderFoundAfterPrepare: orders.some((item) => item.id === order.id),
+      editedHistoryFoundAfterPrepare: (nextProduct.purchaseHistory || []).some((item) => item.id === purchaseHistoryId),
+      usesSaveDataRootPipeline: !db,
+    });
+  }
+  if (db) {
+    const user = await assertCloudWriteReady('editInventoryPurchaseHistoryEntry');
+    const productRef = doc(db!, 'stores', user.uid, 'products', nextProduct.id);
+    const orderRef = doc(db!, 'stores', user.uid, 'purchaseOrders', nextOrder.id);
+    const creditRef = doc(db!, 'stores', user.uid, 'partyCreditLedger', editCreditId);
+
+    await runFirestoreTransaction(db!, async (firestoreTx) => {
+      firestoreTx.set(productRef, sanitizeData(nextProduct), { merge: true });
+      firestoreTx.set(orderRef, sanitizeData(nextOrder), { merge: true });
+      if (editCreditEntry) firestoreTx.set(creditRef, sanitizeData(editCreditEntry), { merge: true });
+      else firestoreTx.delete(creditRef);
+    });
+
+    const [persistedProductSnap, persistedOrderSnap, persistedCreditSnap] = await Promise.all([
+      getDoc(productRef),
+      getDoc(orderRef),
+      getDoc(creditRef),
+    ]);
+    const persistedProduct = persistedProductSnap.exists() ? ({ ...(persistedProductSnap.data() as Product), id: persistedProductSnap.id }) : null;
+    const persistedOrder = persistedOrderSnap.exists() ? ({ ...(persistedOrderSnap.data() as PurchaseOrder), id: persistedOrderSnap.id }) : null;
+    const persistedCredit = persistedCreditSnap.exists() ? ({ ...(persistedCreditSnap.data() as PartyCreditLedgerEntry), id: persistedCreditSnap.id }) : null;
+    const persistedHistory = (persistedProduct?.purchaseHistory || []).find((item) => item.id === purchaseHistoryId);
+    const persistedPartyLinkOk = persistedOrder?.partyId === order.partyId && String(persistedOrder?.partyName || '') === String(order.partyName || '');
+    const persistedAmountOk = persistedOrder ? Math.abs(Number(persistedOrder.totalAmount || 0) - totalAmount) < 0.01 : false;
+    const persistedHistoryOk = Boolean(
+      persistedHistory
+      && Math.abs(Number(persistedHistory.quantity || 0) - newQty) < 0.0001
+      && Math.abs(Number(persistedHistory.unitPrice || 0) - newUnitPrice) < 0.0001
+    );
+    const persistedCreditOk = editCreditEntry
+      ? Boolean(persistedCredit && Math.abs(Number(persistedCredit.remainingAmount || 0) - overpaidAmount) < 0.01)
+      : !persistedCredit;
+    if (!persistedOrder || !persistedProduct || !persistedHistoryOk || !persistedPartyLinkOk || !persistedAmountOk || !persistedCreditOk) {
+      throw new Error(`Purchase edit verification failed after cloud save for order ${order.id}. Please refresh and contact support before retrying.`);
+    }
+
+    subcollectionProductsCache = mergeProductsForTransition([], [persistedProduct, ...subcollectionProductsCache.filter((item) => item.id !== persistedProduct.id)]);
+    subcollectionPurchaseOrdersCache = [persistedOrder, ...subcollectionPurchaseOrdersCache.filter((item) => item.id !== persistedOrder.id)];
+    subcollectionPartyCreditLedgerCache = editCreditEntry
+      ? [persistedCredit as PartyCreditLedgerEntry, ...subcollectionPartyCreditLedgerCache.filter((item) => item.id !== editCreditId)]
+      : subcollectionPartyCreditLedgerCache.filter((item) => item.id !== editCreditId);
+    applyMergedProductsToMemory(user.uid, 'editInventoryPurchaseHistoryEntry_cloud_commit');
+    applyMergedPurchaseHydrationToMemory(user.uid, 'editInventoryPurchaseHistoryEntry_cloud_commit');
+    await writeAuditEvent('UPDATE', {
+      reason: 'editInventoryPurchaseHistoryEntry_subcollection',
+      ...forensicSnapshot,
+      overpaidAmount: Number(overpaidAmount.toFixed(2)),
+      productPersisted: true,
+      purchaseOrderPersisted: true,
+      partyCreditPersisted: editCreditEntry ? true : false,
+    });
+    if (shouldTracePurchaseEdit) {
+      const afterSaveData = loadData();
+      const persistedOrderFromState = (afterSaveData.purchaseOrders || []).find((item) => item.id === order.id);
+      const persistedProductFromState = (afterSaveData.products || []).find((item) => item.id === productId);
+      const persistedHistoryFromState = (persistedProductFromState?.purchaseHistory || []).find((item) => item.id === purchaseHistoryId);
+      console.log('[PURCHASE_EDIT_TRACE_AFTER_SAVE]', {
+        mode: 'cloud',
+        ...forensicSnapshot,
+        purchaseOrdersCountAfterSave: (afterSaveData.purchaseOrders || []).length,
+        productsCountAfterSave: (afterSaveData.products || []).length,
+        editedOrderFoundAfterSave: Boolean(persistedOrderFromState),
+        editedHistoryFoundAfterSave: Boolean(persistedHistoryFromState),
+        persistedOrderTotalAmount: persistedOrderFromState ? Number(persistedOrderFromState.totalAmount || 0) : null,
+        persistedOrderStatus: persistedOrderFromState?.status || null,
+        persistedHistoryQuantity: persistedHistoryFromState ? Number(persistedHistoryFromState.quantity || 0) : null,
+        persistedHistoryUnitPrice: persistedHistoryFromState ? Number(persistedHistoryFromState.unitPrice || 0) : null,
+      });
+    }
+    return loadData().products || [];
+  }
   await saveData({ ...data, products, purchaseOrders: orders, partyCreditLedger: nextPartyCreditLedger }, { throwOnError: true, reason: 'editInventoryPurchaseHistoryEntry', auditOperation: 'UPDATE' });
+  if (shouldTracePurchaseEdit) {
+    const afterSaveData = loadData();
+    const persistedOrder = (afterSaveData.purchaseOrders || []).find((item) => item.id === order.id);
+    const persistedProduct = (afterSaveData.products || []).find((item) => item.id === productId);
+    const persistedHistory = (persistedProduct?.purchaseHistory || []).find((item) => item.id === purchaseHistoryId);
+    console.log('[PURCHASE_EDIT_TRACE_AFTER_SAVE]', {
+      mode: db ? 'cloud' : 'local',
+      productId,
+      purchaseHistoryId,
+      purchaseOrderId: order.id,
+      purchaseOrdersCountAfterSave: (afterSaveData.purchaseOrders || []).length,
+      productsCountAfterSave: (afterSaveData.products || []).length,
+      editedOrderFoundAfterSave: Boolean(persistedOrder),
+      editedHistoryFoundAfterSave: Boolean(persistedHistory),
+      persistedOrderTotalAmount: persistedOrder ? Number(persistedOrder.totalAmount || 0) : null,
+      persistedOrderStatus: persistedOrder?.status || null,
+      persistedHistoryQuantity: persistedHistory ? Number(persistedHistory.quantity || 0) : null,
+      persistedHistoryUnitPrice: persistedHistory ? Number(persistedHistory.unitPrice || 0) : null,
+    });
+  }
   return products;
 };
 
