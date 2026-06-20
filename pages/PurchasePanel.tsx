@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, SupplierPaymentLedgerEntry } from '../types';
-import { applyConfirmedPurchasePartyOrderOnlyMerge, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, searchPurchaseOrdersRuntime, updatePurchaseOrder, updatePurchaseParty, MissingProductPurchaseHistoryDryRunResult, PurchaseOrderRuntimeSearchResult } from '../services/storage';
+import { applyConfirmedPurchasePartyOrderOnlyMerge, applyMissingProductPurchaseHistoryRowsSafePatches, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, searchPurchaseOrdersRuntime, updatePurchaseOrder, updatePurchaseParty, ApplyMissingProductPurchaseHistorySafeRestoreResult, MissingProductPurchaseHistoryDryRunResult, PurchaseOrderRuntimeSearchResult } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -514,6 +514,9 @@ export default function PurchasePanel() {
   const [purchaseRowsPage, setPurchaseRowsPage] = useState(1);
   const [purchaseViewProduct, setPurchaseViewProduct] = useState<Product | null>(null);
   const [repairDryRunResult, setRepairDryRunResult] = useState<MissingProductPurchaseHistoryDryRunResult | null>(null);
+  const [repairRollbackPreviewDownloadedAt, setRepairRollbackPreviewDownloadedAt] = useState('');
+  const [isApplyingRepairSafePatches, setIsApplyingRepairSafePatches] = useState(false);
+  const [repairApplyResult, setRepairApplyResult] = useState<ApplyMissingProductPurchaseHistorySafeRestoreResult | null>(null);
   const [purchaseRuntimeSearchOrderId, setPurchaseRuntimeSearchOrderId] = useState('po-admin-1781847887520');
   const [purchaseRuntimeSearchProductName, setPurchaseRuntimeSearchProductName] = useState('Breathe Right Nasal Strips - 26 Pcs');
   const [purchaseRuntimeSearchSupplierName, setPurchaseRuntimeSearchSupplierName] = useState('Jenilbhai');
@@ -1530,6 +1533,8 @@ export default function PurchasePanel() {
     setPurchaseViewProduct(productById.get(productId) || null);
   };
   const openRepairDryRun = () => {
+    setRepairApplyResult(null);
+    setRepairRollbackPreviewDownloadedAt('');
     setRepairDryRunResult(repairMissingProductPurchaseHistoryRowsDryRun());
   };
   const openPurchaseRuntimeSearch = () => {
@@ -1584,6 +1589,29 @@ export default function PurchasePanel() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+    setRepairRollbackPreviewDownloadedAt(repairDryRunResult.generatedAt);
+  };
+  const applyRepairSafePatches = async () => {
+    if (!repairDryRunResult) return;
+    if (!repairDryRunResult.safePatches.length || repairDryRunResult.unsafeCount > 0) return;
+    if (repairRollbackPreviewDownloadedAt !== repairDryRunResult.generatedAt) {
+      window.alert('Download the rollback preview JSON before applying the safe restore.');
+      return;
+    }
+    const confirmed = window.confirm('This will only append missing product purchase-history rows. It will not change stock, purchase orders, supplier ledgers, cashbook, or payable.');
+    if (!confirmed) return;
+
+    setIsApplyingRepairSafePatches(true);
+    setRepairApplyResult(null);
+    try {
+      const result = await applyMissingProductPurchaseHistoryRowsSafePatches(repairDryRunResult.safePatches);
+      refresh();
+      const rerun = repairMissingProductPurchaseHistoryRowsDryRun();
+      setRepairDryRunResult(rerun);
+      setRepairApplyResult(result);
+    } finally {
+      setIsApplyingRepairSafePatches(false);
+    }
   };
   const downloadPurchaseRuntimeSearchJson = () => {
     if (!purchaseRuntimeSearchResult) return;
@@ -2327,10 +2355,31 @@ export default function PurchasePanel() {
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" onClick={downloadRepairDryRunJson}>Download Dry-run JSON</Button>
               <Button size="sm" variant="outline" onClick={downloadRepairRollbackPreviewJson}>Download Rollback Preview JSON</Button>
+              <Button
+                size="sm"
+                onClick={applyRepairSafePatches}
+                disabled={!repairDryRunResult.safePatches.length || repairDryRunResult.unsafeCount > 0 || isApplyingRepairSafePatches || repairRollbackPreviewDownloadedAt !== repairDryRunResult.generatedAt}
+              >
+                {isApplyingRepairSafePatches ? 'Applying Safe Restore...' : 'Apply Safe Restore'}
+              </Button>
             </div>
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
               Read-only dry-run only. No products, purchase orders, ledgers, stock, expenses, or Firestore documents were changed.
             </div>
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+              Download the rollback preview JSON before applying. This will only append missing product purchase-history rows. It will not change stock, purchase orders, supplier ledgers, cashbook, or payable.
+            </div>
+            {repairApplyResult && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                <div className="font-semibold">Safe restore result</div>
+                <div className="mt-1">Missing rows: {repairApplyResult.currentMissingCountBefore} â†’ {repairApplyResult.currentMissingCountAfter}. Current safe dry-run rows at apply start: {repairApplyResult.currentSafeCount}.</div>
+                <div className="mt-1">Applied: {repairApplyResult.appliedCount} · Skipped: {repairApplyResult.skippedCount} · Failed: {repairApplyResult.failedCount}</div>
+                <div className="mt-1">Purchase orders unchanged: {repairApplyResult.purchaseOrdersCountBefore} → {repairApplyResult.purchaseOrdersCountAfter}. Transactions unchanged: {repairApplyResult.transactionsCountBefore} → {repairApplyResult.transactionsCountAfter}.</div>
+                {!!repairApplyResult.appliedPurchaseOrderIds.length && <div className="mt-1 break-words">Applied order IDs: {repairApplyResult.appliedPurchaseOrderIds.join(', ')}</div>}
+                {!!repairApplyResult.skipped.length && <div className="mt-1 break-words">Skipped: {repairApplyResult.skipped.map((item) => `${item.purchaseOrderId} (${item.reason})`).join(', ')}</div>}
+                {!!repairApplyResult.failed.length && <div className="mt-1 break-words">Failed: {repairApplyResult.failed.map((item) => `${item.purchaseOrderId} (${item.reason})`).join(', ')}</div>}
+              </div>
+            )}
             <div className="grid gap-3 md:grid-cols-2">
               <div className="rounded-xl border bg-white p-3">
                 <div className="font-semibold text-slate-900">Correlation counts</div>

@@ -490,6 +490,36 @@ const upsertProductInSubcollection = async (product: Product, reason: string) =>
   await setDoc(doc(db!, 'stores', user.uid, 'products', product.id), sanitizeData(product), { merge: true });
 };
 
+const appendProductPurchaseHistoryRowInSubcollection = async (
+  productId: string,
+  historyRow: NonNullable<Product['purchaseHistory']>[number],
+  reason = 'product_history_restore'
+): Promise<{ product: Product; applied: boolean }> => {
+  const user = await assertCloudWriteReady(reason);
+  const productRef = doc(db!, 'stores', user.uid, 'products', productId);
+  const productSnap = await getDoc(productRef);
+  if (!productSnap.exists()) {
+    throw new Error('product_document_not_found');
+  }
+
+  const currentProduct = sanitizeVariantColorStock(sanitizeProductPayload({
+    ...(productSnap.data() as Product),
+    id: productSnap.id,
+  }));
+  const currentHistory = Array.isArray(currentProduct.purchaseHistory) ? currentProduct.purchaseHistory : [];
+  const alreadyExists = currentHistory.some((row) => String(row.purchaseOrderId || '').trim() === String(historyRow.purchaseOrderId || '').trim());
+  if (alreadyExists) {
+    return { product: currentProduct, applied: false };
+  }
+
+  const nextProduct: Product = {
+    ...currentProduct,
+    purchaseHistory: [...currentHistory, historyRow],
+  };
+  await setDoc(productRef, sanitizeData({ purchaseHistory: nextProduct.purchaseHistory }), { merge: true });
+  return { product: nextProduct, applied: true };
+};
+
 const deleteProductInSubcollection = async (productId: string, reason: string) => {
   const user = await assertCloudWriteReady(reason);
   await deleteDoc(doc(db!, 'stores', user.uid, 'products', productId));
@@ -5780,6 +5810,31 @@ export type MissingProductPurchaseHistoryDryRunResult = {
   correlationCounts: MissingProductPurchaseHistoryDryRunCorrelationCounts;
 };
 
+export type ApplyMissingProductPurchaseHistorySafeRestoreIssue = {
+  purchaseOrderId: string;
+  productId: string;
+  productName: string;
+  reason: string;
+};
+
+export type ApplyMissingProductPurchaseHistorySafeRestoreResult = {
+  generatedAt: string;
+  requestedCount: number;
+  currentSafeCount: number;
+  currentMissingCountBefore: number;
+  currentMissingCountAfter: number;
+  appliedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  appliedPurchaseOrderIds: string[];
+  skipped: ApplyMissingProductPurchaseHistorySafeRestoreIssue[];
+  failed: ApplyMissingProductPurchaseHistorySafeRestoreIssue[];
+  purchaseOrdersCountBefore: number;
+  purchaseOrdersCountAfter: number;
+  transactionsCountBefore: number;
+  transactionsCountAfter: number;
+};
+
 export type PurchaseOrderRuntimeSearchCriteria = {
   purchaseOrderId?: string;
   productName?: string;
@@ -6393,6 +6448,181 @@ export const searchPurchaseOrdersRuntime = (criteria: PurchaseOrderRuntimeSearch
     verdict,
     recommendedNextStep,
   };
+};
+
+export const applyMissingProductPurchaseHistoryRowsSafePatches = async (
+  patches: MissingProductPurchaseHistoryDryRunPatch[] = [],
+): Promise<ApplyMissingProductPurchaseHistorySafeRestoreResult> => {
+  const requestedPatches = Array.isArray(patches) ? patches : [];
+  const startingData = loadData();
+  const currentDryRun = repairMissingProductPurchaseHistoryRowsDryRun();
+  const currentSafePatchMap = new Map<string, MissingProductPurchaseHistoryDryRunPatch>(
+    currentDryRun.safePatches.map((patch) => [`${String(patch.productId || '').trim()}::${String(patch.purchaseOrderId || '').trim()}`, patch] as const)
+  );
+  const currentUnsafePatchKeys = new Set(
+    currentDryRun.unsafePatches.map((patch) => `${String(patch.productId || '').trim()}::${String(patch.purchaseOrderId || '').trim()}`)
+  );
+  const result: ApplyMissingProductPurchaseHistorySafeRestoreResult = {
+    generatedAt: new Date().toISOString(),
+    requestedCount: requestedPatches.length,
+    currentSafeCount: currentDryRun.safeCount,
+    currentMissingCountBefore: currentDryRun.missingCount,
+    currentMissingCountAfter: currentDryRun.missingCount,
+    appliedCount: 0,
+    skippedCount: 0,
+    failedCount: 0,
+    appliedPurchaseOrderIds: [],
+    skipped: [],
+    failed: [],
+    purchaseOrdersCountBefore: Array.isArray(startingData.purchaseOrders) ? startingData.purchaseOrders.length : 0,
+    purchaseOrdersCountAfter: Array.isArray(startingData.purchaseOrders) ? startingData.purchaseOrders.length : 0,
+    transactionsCountBefore: Array.isArray(startingData.transactions) ? startingData.transactions.length : 0,
+    transactionsCountAfter: Array.isArray(startingData.transactions) ? startingData.transactions.length : 0,
+  };
+
+  for (const patch of requestedPatches) {
+    const issueBase = {
+      purchaseOrderId: String(patch?.purchaseOrderId || ''),
+      productId: String(patch?.productId || ''),
+      productName: String(patch?.productName || ''),
+    };
+    const patchKey = `${issueBase.productId}::${issueBase.purchaseOrderId}`;
+
+    try {
+      if (!patch?.productId || !patch?.purchaseOrderId) {
+        result.skipped.push({ ...issueBase, reason: 'patch_missing_product_or_purchase_order_id' });
+        continue;
+      }
+      if (!patch.historyRowToAdd?.purchaseOrderId) {
+        result.skipped.push({ ...issueBase, reason: 'history_row_missing_purchase_order_id' });
+        continue;
+      }
+      if (String(patch.historyRowToAdd.purchaseOrderId || '').trim() !== String(patch.purchaseOrderId || '').trim()) {
+        result.skipped.push({ ...issueBase, reason: 'history_row_purchase_order_id_mismatch' });
+        continue;
+      }
+      if (!(Number.isFinite(patch.quantity) && patch.quantity > 0)) {
+        result.skipped.push({ ...issueBase, reason: 'patch_quantity_invalid' });
+        continue;
+      }
+      if (!(Number.isFinite(patch.totalAmount) && patch.totalAmount >= 0)) {
+        result.skipped.push({ ...issueBase, reason: 'patch_total_amount_invalid' });
+        continue;
+      }
+      if (!db) {
+        result.failed.push({ ...issueBase, reason: 'cloud_product_document_write_required' });
+        continue;
+      }
+      if (currentUnsafePatchKeys.has(patchKey)) {
+        result.skipped.push({ ...issueBase, reason: 'patch_currently_unsafe_in_latest_dry_run' });
+        continue;
+      }
+
+      const currentSafePatch = currentSafePatchMap.get(patchKey);
+      if (!currentSafePatch) {
+        const liveData = loadData();
+        const currentProduct = (liveData.products || []).find((product) => String(product.id || '').trim() === issueBase.productId);
+        const currentHistory = Array.isArray(currentProduct?.purchaseHistory) ? currentProduct.purchaseHistory : [];
+        const alreadyExists = currentHistory.some((row) => String(row.purchaseOrderId || '').trim() === issueBase.purchaseOrderId);
+        result.skipped.push({ ...issueBase, reason: alreadyExists ? 'purchase_history_row_already_present' : 'patch_not_present_in_latest_safe_dry_run' });
+        continue;
+      }
+
+      const liveData = loadData();
+      const currentProduct = (liveData.products || []).find((product) => String(product.id || '').trim() === String(currentSafePatch.productId || '').trim());
+      if (!currentProduct) {
+        result.skipped.push({ ...issueBase, reason: 'product_not_found' });
+        continue;
+      }
+      if (String(currentProduct.id || '').trim() !== String(currentSafePatch.productId || '').trim()) {
+        result.skipped.push({ ...issueBase, reason: 'product_id_mismatch' });
+        continue;
+      }
+
+      const currentHistory = Array.isArray(currentProduct.purchaseHistory) ? currentProduct.purchaseHistory : [];
+      const alreadyExists = currentHistory.some((row) => String(row.purchaseOrderId || '').trim() === String(currentSafePatch.purchaseOrderId || '').trim());
+      if (alreadyExists) {
+        result.skipped.push({ ...issueBase, reason: 'purchase_history_row_already_present' });
+        continue;
+      }
+
+      const nextHistoryRow: NonNullable<Product['purchaseHistory']>[number] = {
+        ...currentSafePatch.historyRowToAdd,
+        id: String(currentSafePatch.historyRowToAdd.id || `repair-ph-${currentSafePatch.purchaseOrderId}-${currentSafePatch.productId}`),
+        purchaseOrderId: String(currentSafePatch.purchaseOrderId || '').trim(),
+        date: String(currentSafePatch.historyRowToAdd.date || currentSafePatch.date || ''),
+        variant: String(currentSafePatch.historyRowToAdd.variant || ''),
+        color: String(currentSafePatch.historyRowToAdd.color || ''),
+        quantity: Math.max(0, Number(currentSafePatch.historyRowToAdd.quantity || currentSafePatch.quantity || 0)),
+        unitPrice: Math.max(0, Number(currentSafePatch.historyRowToAdd.unitPrice || currentSafePatch.unitPrice || 0)),
+        previousStock: Math.max(0, Number(currentSafePatch.historyRowToAdd.previousStock || currentProduct.stock || 0)),
+        previousBuyPrice: Math.max(0, Number(currentSafePatch.historyRowToAdd.previousBuyPrice || currentProduct.buyPrice || 0)),
+        nextBuyPrice: Math.max(0, Number(currentSafePatch.historyRowToAdd.nextBuyPrice || currentProduct.buyPrice || 0)),
+        paymentMethod: currentSafePatch.historyRowToAdd.paymentMethod,
+        paidAmount: currentSafePatch.historyRowToAdd.paidAmount === undefined ? undefined : Math.max(0, Number(currentSafePatch.historyRowToAdd.paidAmount || 0)),
+        partyName: currentSafePatch.historyRowToAdd.partyName || currentSafePatch.partyName,
+        notes: currentSafePatch.historyRowToAdd.notes,
+        reference: currentSafePatch.historyRowToAdd.reference,
+      };
+
+      const directWriteResult = await appendProductPurchaseHistoryRowInSubcollection(currentProduct.id, nextHistoryRow, 'product_history_restore');
+      if (!directWriteResult.applied) {
+        result.skipped.push({ ...issueBase, reason: 'purchase_history_row_already_present' });
+        continue;
+      }
+      const nextProduct = directWriteResult.product;
+      const nextProducts = (liveData.products || []).map((product) => product.id === nextProduct.id ? nextProduct : product);
+      subcollectionProductsCache = mergeProductsForTransition([], [nextProduct, ...subcollectionProductsCache.filter((product) => product.id !== nextProduct.id)]);
+      memoryState = { ...memoryState, products: nextProducts };
+      emitLocalStorageUpdate();
+
+      const persistedProduct = (loadData().products || []).find((product) => String(product.id || '').trim() === String(patch.productId || '').trim());
+      const persistedHistory = Array.isArray(persistedProduct?.purchaseHistory) ? persistedProduct!.purchaseHistory! : [];
+      const persistedRow = persistedHistory.find((row) => String(row.purchaseOrderId || '').trim() === String(patch.purchaseOrderId || '').trim());
+      if (!persistedProduct || !persistedRow) {
+        result.failed.push({ ...issueBase, reason: 'post_write_verification_failed' });
+        continue;
+      }
+
+      void writeAuditEvent('UPDATE', {
+        reason: 'product_history_restore',
+        productId: currentSafePatch.productId,
+        productName: currentSafePatch.productName,
+        purchaseOrderId: currentSafePatch.purchaseOrderId,
+        appendedHistoryRowId: nextHistoryRow.id,
+      });
+      result.appliedCount += 1;
+      result.appliedPurchaseOrderIds.push(String(currentSafePatch.purchaseOrderId || '').trim());
+    } catch (error) {
+      result.failed.push({
+        ...issueBase,
+        reason: error instanceof Error ? error.message : 'unknown_apply_failure',
+      });
+    }
+  }
+
+  result.skippedCount = result.skipped.length;
+  result.failedCount = result.failed.length;
+  const endingData = loadData();
+  result.purchaseOrdersCountAfter = Array.isArray(endingData.purchaseOrders) ? endingData.purchaseOrders.length : 0;
+  result.transactionsCountAfter = Array.isArray(endingData.transactions) ? endingData.transactions.length : 0;
+  result.currentMissingCountAfter = repairMissingProductPurchaseHistoryRowsDryRun().missingCount;
+
+  if (auth?.currentUser && db) {
+    await writeAuditEvent('UPDATE', {
+      reason: 'product_history_restore',
+      requestedCount: result.requestedCount,
+      currentSafeCount: result.currentSafeCount,
+      currentMissingCountBefore: result.currentMissingCountBefore,
+      currentMissingCountAfter: result.currentMissingCountAfter,
+      appliedCount: result.appliedCount,
+      skippedCount: result.skippedCount,
+      failedCount: result.failedCount,
+      appliedPurchaseOrderIds: result.appliedPurchaseOrderIds,
+    });
+  }
+
+  return result;
 };
 
 export const repairMissingProductPurchaseHistoryRowsDryRun = (): MissingProductPurchaseHistoryDryRunResult => {
