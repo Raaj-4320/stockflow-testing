@@ -1628,6 +1628,59 @@ export default function Admin() {
 
     return result;
   }, [products, searchTerm, sortOption, categoryFilter]);
+  const purchaseOrderRowsForAudit = useMemo(
+    () => loadData().purchaseOrders || [],
+    [products]
+  );
+  const inventoryPurchaseHistoryAuditRows = useMemo(() => {
+    return filteredProducts.map((product) => {
+      const audit = compareProductPurchaseHistoryForProduct(product, purchaseOrderRowsForAudit);
+      const implication = audit.missingLegacyCount > 0 && audit.legacyCount === 0
+        ? 'Canonical purchase orders exist but embedded purchase history is blank.'
+        : audit.orphanLegacyCount > 0 && audit.canonicalCount === 0
+          ? 'Embedded purchase history exists without canonical purchase-order coverage.'
+          : audit.missingLinkCount > 0
+            ? 'Embedded rows have broken or inconsistent purchase-order links.'
+            : audit.quantityMismatchCount > 0 || audit.amountMismatchCount > 0
+              ? 'Canonical and embedded rows disagree on quantity or amount.'
+              : 'Canonical and embedded purchase history are aligned.';
+
+      return { product, audit, implication };
+    });
+  }, [filteredProducts, purchaseOrderRowsForAudit]);
+  const inventoryPurchaseHistoryAuditSummary = useMemo(() => {
+    return inventoryPurchaseHistoryAuditRows.reduce((summary, row) => {
+      summary.productsScanned += 1;
+      summary.canonicalRows += row.audit.canonicalCount;
+      summary.embeddedRows += row.audit.legacyCount;
+      summary.totalIssues += row.audit.issueCount;
+      if (row.audit.issueCount > 0) summary.productsWithIssues += 1;
+      if (row.audit.missingLegacyCount > 0) summary.productsMissingLegacy += 1;
+      if (row.audit.orphanLegacyCount > 0) summary.productsWithOrphans += 1;
+      if (row.audit.missingLinkCount > 0) summary.productsWithLinkIssues += 1;
+      if (row.audit.quantityMismatchCount > 0 || row.audit.amountMismatchCount > 0) summary.productsWithValueMismatch += 1;
+      return summary;
+    }, {
+      productsScanned: 0,
+      productsWithIssues: 0,
+      productsMissingLegacy: 0,
+      productsWithOrphans: 0,
+      productsWithLinkIssues: 0,
+      productsWithValueMismatch: 0,
+      canonicalRows: 0,
+      embeddedRows: 0,
+      totalIssues: 0,
+    });
+  }, [inventoryPurchaseHistoryAuditRows]);
+  const inventoryPurchaseHistoryAuditTopRows = useMemo(() => {
+    return [...inventoryPurchaseHistoryAuditRows]
+      .sort((a, b) => {
+        if (b.audit.issueCount !== a.audit.issueCount) return b.audit.issueCount - a.audit.issueCount;
+        if (b.audit.canonicalCount !== a.audit.canonicalCount) return b.audit.canonicalCount - a.audit.canonicalCount;
+        return getProductName(a.product).localeCompare(getProductName(b.product));
+      })
+      .slice(0, 30);
+  }, [inventoryPurchaseHistoryAuditRows]);
   const inventoryTotalPages = Math.max(1, Math.ceil(filteredProducts.length / INVENTORY_PAGE_SIZE));
   const paginatedProducts = useMemo(
     () => filteredProducts.slice((inventoryPage - 1) * INVENTORY_PAGE_SIZE, inventoryPage * INVENTORY_PAGE_SIZE),
@@ -2085,6 +2138,132 @@ export default function Admin() {
       </div>
       {inventoryViewTab === 'inventory' ? (
       <>
+      <Card className="border-slate-200 bg-slate-50/60">
+        <CardHeader className="pb-3">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <CardTitle className="text-lg">Purchase History Reconciliation Dashboard</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Read-only comparison of canonical purchase-order-derived rows vs embedded product.purchaseHistory rows for the current Inventory filter set.
+              </p>
+            </div>
+            <Badge variant={inventoryPurchaseHistoryAuditSummary.totalIssues > 0 ? 'outline' : 'success'}>
+              {inventoryPurchaseHistoryAuditSummary.totalIssues > 0
+                ? `${inventoryPurchaseHistoryAuditSummary.productsWithIssues}/${inventoryPurchaseHistoryAuditSummary.productsScanned} products need review`
+                : 'All filtered products aligned'}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <div className="rounded-lg border bg-white p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Products Scanned</div>
+              <div className="mt-1 text-2xl font-bold text-slate-900">{inventoryPurchaseHistoryAuditSummary.productsScanned}</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Products With Issues</div>
+              <div className="mt-1 text-2xl font-bold text-amber-700">{inventoryPurchaseHistoryAuditSummary.productsWithIssues}</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Canonical Rows</div>
+              <div className="mt-1 text-2xl font-bold text-slate-900">{inventoryPurchaseHistoryAuditSummary.canonicalRows}</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Embedded Rows</div>
+              <div className="mt-1 text-2xl font-bold text-slate-900">{inventoryPurchaseHistoryAuditSummary.embeddedRows}</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Missing Legacy Coverage</div>
+              <div className="mt-1 text-2xl font-bold text-amber-700">{inventoryPurchaseHistoryAuditSummary.productsMissingLegacy}</div>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Value / Link Issues</div>
+              <div className="mt-1 text-2xl font-bold text-rose-700">
+                {inventoryPurchaseHistoryAuditSummary.productsWithLinkIssues + inventoryPurchaseHistoryAuditSummary.productsWithValueMismatch}
+              </div>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border bg-white">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40">
+                <tr>
+                  <th className="p-3 text-left">Product</th>
+                  <th className="p-3 text-right">Canonical</th>
+                  <th className="p-3 text-right">Embedded</th>
+                  <th className="p-3 text-right">Issues</th>
+                  <th className="p-3 text-left">Primary Gap</th>
+                  <th className="p-3 text-left">Implication</th>
+                  <th className="p-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {inventoryPurchaseHistoryAuditTopRows.map(({ product, audit, implication }) => {
+                  const primaryGap = audit.missingLegacyCount > 0
+                    ? 'Missing embedded rows'
+                    : audit.orphanLegacyCount > 0
+                      ? 'Orphan embedded rows'
+                      : audit.missingLinkCount > 0
+                        ? 'Broken purchase links'
+                        : audit.quantityMismatchCount > 0 || audit.amountMismatchCount > 0
+                          ? 'Value mismatch'
+                          : 'Aligned';
+
+                  return (
+                    <tr key={product.id} className="border-t align-top">
+                      <td className="p-3">
+                        <div className="font-medium">{getProductName(product)}</div>
+                        <div className="text-xs text-muted-foreground">{getProductBarcode(product)}</div>
+                      </td>
+                      <td className="p-3 text-right">{audit.canonicalCount}</td>
+                      <td className="p-3 text-right">{audit.legacyCount}</td>
+                      <td className="p-3 text-right font-semibold">{audit.issueCount}</td>
+                      <td className="p-3">
+                        <Badge variant={audit.issueCount > 0 ? 'outline' : 'success'}>{primaryGap}</Badge>
+                      </td>
+                      <td className="p-3 text-xs text-muted-foreground">{implication}</td>
+                      <td className="p-3 text-right">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setPurchaseTarget(product);
+                            setPurchaseQty('');
+                            setPurchasePrice('');
+                            setPurchaseNextBuyPrice('');
+                            setPurchaseReference('');
+                            setPurchaseNotes('');
+                            setPurchasePartyName('');
+                            setSelectedPurchasePartyId('');
+                            setPurchaseCashPaid('');
+                            setPurchaseBankPaid('');
+                            setPurchasePaymentNote('');
+                            setPurchaseModalTab('history');
+                            setPurchaseHistoryVariantFilter('all');
+                            setPurchaseError(null);
+                          }}
+                        >
+                          Open History
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {!inventoryPurchaseHistoryAuditTopRows.length && (
+                  <tr>
+                    <td className="p-6 text-center text-muted-foreground" colSpan={7}>
+                      No products available for purchase-history comparison in the current filter set.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Showing the top 30 filtered products, ordered by highest mismatch count first. Use search/category filters above to narrow the audit scope.
+          </p>
+        </CardContent>
+      </Card>
       <div className="border rounded-xl bg-card overflow-visible">
         <div className="overflow-x-auto overflow-y-visible">
           <table className="w-full text-sm">
