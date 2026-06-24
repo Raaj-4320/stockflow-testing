@@ -56,6 +56,18 @@ const roundMoney = (value: unknown): number => {
 };
 
 const positiveMoney = (value: unknown): number => Math.max(0, roundMoney(value));
+const normalizeDueAndStoreCredit = (due: number, credit: number): { due: number; credit: number; netReceivable: number } => {
+  const safeDue = positiveMoney(due);
+  const safeCredit = positiveMoney(credit);
+  if (safeDue > safeCredit) {
+    const normalizedDue = roundMoney(safeDue - safeCredit);
+    return { due: normalizedDue, credit: 0, netReceivable: normalizedDue };
+  }
+  if (safeCredit > safeDue) {
+    return { due: 0, credit: roundMoney(safeCredit - safeDue), netReceivable: 0 };
+  }
+  return { due: 0, credit: 0, netReceivable: 0 };
+};
 
 const normalizeKind = (value: unknown) => String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
 
@@ -96,10 +108,13 @@ export const getEffectiveTransactionType = (tx: Transaction): EffectiveTransacti
   return 'unknown';
 };
 
-export const buildCorrectCustomerLedgerPreview = (
+type LedgerReplayPolicy = 'legacy' | 'normalized_v2';
+
+const buildCustomerLedgerPreviewForPolicy = (
   customer: Customer,
   transactions: Transaction[],
-  upfrontOrders: UpfrontOrder[] = []
+  upfrontOrders: UpfrontOrder[] = [],
+  policy: LedgerReplayPolicy = 'normalized_v2'
 ): CorrectCustomerLedgerPreview => {
   const warnings: CorrectCustomerLedgerWarning[] = [];
   const rows: CorrectCustomerLedgerRow[] = [];
@@ -135,9 +150,11 @@ export const buildCorrectCustomerLedgerPreview = (
       } else {
         const applied = Math.min(runningDue, paymentAmount);
         impact = -applied;
-        storeCreditCreated = roundMoney(Math.max(0, paymentAmount - applied));
+        storeCreditCreated = policy === 'legacy' ? roundMoney(Math.max(0, paymentAmount - applied)) : 0;
         runningDue = roundMoney(Math.max(0, runningDue - applied));
-        runningStoreCredit = roundMoney(runningStoreCredit + storeCreditCreated);
+        if (storeCreditCreated > 0) {
+          runningStoreCredit = roundMoney(runningStoreCredit + storeCreditCreated);
+        }
       }
       rows.push({
         id: effect.id,
@@ -345,9 +362,16 @@ export const buildCorrectCustomerLedgerPreview = (
   const storedCurrentDue = positiveMoney(customer.totalDue);
   const storedStoreCredit = positiveMoney(customer.storeCredit);
   const storedNetReceivable = roundMoney(Math.max(0, storedCurrentDue - storedStoreCredit));
-  const correctedCurrentDue = roundMoney(Math.max(0, runningDue));
-  const correctedStoreCredit = roundMoney(Math.max(0, runningStoreCredit));
-  const correctedNetReceivable = roundMoney(Math.max(0, correctedCurrentDue - correctedStoreCredit));
+  const normalizedBalances = policy === 'normalized_v2'
+    ? normalizeDueAndStoreCredit(runningDue, runningStoreCredit)
+    : {
+      due: roundMoney(Math.max(0, runningDue)),
+      credit: roundMoney(Math.max(0, runningStoreCredit)),
+      netReceivable: roundMoney(Math.max(0, Math.max(0, runningDue) - Math.max(0, runningStoreCredit))),
+    };
+  const correctedCurrentDue = normalizedBalances.due;
+  const correctedStoreCredit = normalizedBalances.credit;
+  const correctedNetReceivable = normalizedBalances.netReceivable;
   const difference = roundMoney(correctedNetReceivable - storedNetReceivable);
 
   if (Math.abs(storedCurrentDue - correctedCurrentDue) > 0.01) {
@@ -381,6 +405,18 @@ export const buildCorrectCustomerLedgerPreview = (
   };
 };
 
+export const buildLegacyCustomerLedgerPreview = (
+  customer: Customer,
+  transactions: Transaction[],
+  upfrontOrders: UpfrontOrder[] = []
+): CorrectCustomerLedgerPreview => buildCustomerLedgerPreviewForPolicy(customer, transactions, upfrontOrders, 'legacy');
+
+export const buildCorrectCustomerLedgerPreview = (
+  customer: Customer,
+  transactions: Transaction[],
+  upfrontOrders: UpfrontOrder[] = []
+): CorrectCustomerLedgerPreview => buildCustomerLedgerPreviewForPolicy(customer, transactions, upfrontOrders, 'normalized_v2');
+
 
 export type CanonicalCustomerLedgerData = Pick<AppState, 'customers' | 'transactions' | 'upfrontOrders'>;
 
@@ -412,6 +448,32 @@ export type CustomerLedgerBalanceAnalysis = {
   totalWarnings: number;
   ledgers: CorrectCustomerLedgerPreview[];
   issues: CustomerLedgerBalanceIssue[];
+};
+
+export type CustomerLedgerPolicyChangeRow = {
+  customerId: string;
+  customerName: string;
+  currentDue: number;
+  currentStoreCredit: number;
+  currentNetReceivable: number;
+  newDue: number;
+  newStoreCredit: number;
+  newNetReceivable: number;
+  difference: number;
+  warningCount: number;
+};
+
+export type CustomerLedgerPolicyChangeDryRun = {
+  generatedAt: string;
+  totalCustomers: number;
+  affectedCustomers: number;
+  totalCurrentDue: number;
+  totalCurrentStoreCredit: number;
+  totalCurrentNetReceivable: number;
+  totalNewDue: number;
+  totalNewStoreCredit: number;
+  totalNewNetReceivable: number;
+  rows: CustomerLedgerPolicyChangeRow[];
 };
 
 export type CustomerLedgerBalanceDryRun = {
@@ -514,6 +576,48 @@ export const analyzeCustomerLedgerBalances = (
     totalWarnings: ledgers.reduce((sum, ledger) => sum + ledger.warnings.length, 0),
     ledgers,
     issues,
+  };
+};
+
+export const analyzeCustomerLedgerPolicyChangeDryRun = (
+  data?: Partial<CanonicalCustomerLedgerData>
+): CustomerLedgerPolicyChangeDryRun => {
+  const ledgerData = resolveCustomerLedgerData(data);
+  const rows = ledgerData.customers.map((customer) => {
+    const current = buildLegacyCustomerLedgerPreview(customer, ledgerData.transactions, ledgerData.upfrontOrders);
+    const next = buildCorrectCustomerLedgerPreview(customer, ledgerData.transactions, ledgerData.upfrontOrders);
+    return {
+      customerId: customer.id,
+      customerName: customer.name,
+      currentDue: current.summary.correctedCurrentDue,
+      currentStoreCredit: current.summary.correctedStoreCredit,
+      currentNetReceivable: current.summary.correctedNetReceivable,
+      newDue: next.summary.correctedCurrentDue,
+      newStoreCredit: next.summary.correctedStoreCredit,
+      newNetReceivable: next.summary.correctedNetReceivable,
+      difference: roundMoney(next.summary.correctedNetReceivable - current.summary.correctedNetReceivable),
+      warningCount: next.warnings.length,
+    };
+  });
+  const affectedRows = rows
+    .filter((row) => (
+      Math.abs(row.currentDue - row.newDue) > 0.01
+      || Math.abs(row.currentStoreCredit - row.newStoreCredit) > 0.01
+      || Math.abs(row.currentNetReceivable - row.newNetReceivable) > 0.01
+    ))
+    .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference) || a.customerName.localeCompare(b.customerName));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalCustomers: rows.length,
+    affectedCustomers: affectedRows.length,
+    totalCurrentDue: roundMoney(rows.reduce((sum, row) => sum + row.currentDue, 0)),
+    totalCurrentStoreCredit: roundMoney(rows.reduce((sum, row) => sum + row.currentStoreCredit, 0)),
+    totalCurrentNetReceivable: roundMoney(rows.reduce((sum, row) => sum + row.currentNetReceivable, 0)),
+    totalNewDue: roundMoney(rows.reduce((sum, row) => sum + row.newDue, 0)),
+    totalNewStoreCredit: roundMoney(rows.reduce((sum, row) => sum + row.newStoreCredit, 0)),
+    totalNewNetReceivable: roundMoney(rows.reduce((sum, row) => sum + row.newNetReceivable, 0)),
+    rows: affectedRows,
   };
 };
 

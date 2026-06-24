@@ -24,7 +24,7 @@ import {
   getLegacyOnlyPurchaseHistoryRowsForProduct,
   getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct,
 } from '../services/purchaseHistoryView';
-import { buildCorrectCustomerLedgerPreview } from '../services/customerLedger';
+import { analyzeCustomerLedgerPolicyChangeDryRun, buildCorrectCustomerLedgerPreview } from '../services/customerLedger';
 import { getCanonicalCustomerBalanceResult } from '../services/customerBalanceView';
 import { can } from '../src/auth/simplePermissions';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
@@ -589,8 +589,15 @@ export default function Admin() {
       },
     };
   }, [customers, transactions, upfrontOrders]);
+  const customerBalancePolicyDryRun = useMemo(
+    () => analyzeCustomerLedgerPolicyChangeDryRun({ customers, transactions, upfrontOrders }),
+    [customers, transactions, upfrontOrders]
+  );
   const handleExportCustomerBalanceAuditJson = () => {
-    const blob = new Blob([JSON.stringify(customerBalanceAudit.exportPayload, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({
+      ...customerBalanceAudit.exportPayload,
+      policyDryRun: customerBalancePolicyDryRun,
+    }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -2594,6 +2601,62 @@ export default function Admin() {
                 </div>
               </div>
             </CardHeader>
+          </Card>
+
+          <Card className="border-blue-200 bg-blue-50/50">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <CardTitle className="text-base text-blue-950">Canonical Replay Policy Dry-run</CardTitle>
+                  <p className="text-xs text-blue-900/80">Compares the previous canonical replay against the new normalized replay. Read-only preview only.</p>
+                </div>
+                <Badge variant="outline">{customerBalancePolicyDryRun.affectedCustomers} affected customers</Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-0">
+              <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Customers</div><div className="mt-1 text-xl font-black">{customerBalancePolicyDryRun.totalCustomers}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Affected</div><div className="mt-1 text-xl font-black text-amber-700">{customerBalancePolicyDryRun.affectedCustomers}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current Due</div><div className="mt-1 text-xl font-black">₹{customerBalancePolicyDryRun.totalCurrentDue.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New Due</div><div className="mt-1 text-xl font-black text-blue-700">₹{customerBalancePolicyDryRun.totalNewDue.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current Store Credit</div><div className="mt-1 text-xl font-black">₹{customerBalancePolicyDryRun.totalCurrentStoreCredit.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New Store Credit</div><div className="mt-1 text-xl font-black text-emerald-700">₹{customerBalancePolicyDryRun.totalNewStoreCredit.toFixed(2)}</div></div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[980px] text-xs">
+                  <thead className="bg-white/80 text-slate-600">
+                    <tr>
+                      <th className="p-2 text-left">Customer</th>
+                      <th className="p-2 text-right">Current Due</th>
+                      <th className="p-2 text-right">Current Store Credit</th>
+                      <th className="p-2 text-right">Current Net</th>
+                      <th className="p-2 text-right">New Due</th>
+                      <th className="p-2 text-right">New Store Credit</th>
+                      <th className="p-2 text-right">New Net</th>
+                      <th className="p-2 text-right">Difference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerBalancePolicyDryRun.rows.slice(0, 20).map((row) => (
+                      <tr key={row.customerId} className="border-t bg-white">
+                        <td className="p-2 font-semibold">{row.customerName}</td>
+                        <td className="p-2 text-right">₹{row.currentDue.toFixed(2)}</td>
+                        <td className="p-2 text-right">₹{row.currentStoreCredit.toFixed(2)}</td>
+                        <td className="p-2 text-right">₹{row.currentNetReceivable.toFixed(2)}</td>
+                        <td className="p-2 text-right text-blue-700">₹{row.newDue.toFixed(2)}</td>
+                        <td className="p-2 text-right text-emerald-700">₹{row.newStoreCredit.toFixed(2)}</td>
+                        <td className="p-2 text-right font-semibold">₹{row.newNetReceivable.toFixed(2)}</td>
+                        <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{row.difference.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                    {customerBalancePolicyDryRun.rows.length === 0 && (
+                      <tr><td colSpan={8} className="p-4 text-center text-muted-foreground">No customers change under the new canonical replay policy.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {customerBalancePolicyDryRun.rows.length > 20 && <div className="text-[11px] text-muted-foreground">Showing first 20 affected customers in the dry-run table. Export JSON for the full audit dataset.</div>}
+            </CardContent>
           </Card>
 
           <Card className="border-slate-200">
