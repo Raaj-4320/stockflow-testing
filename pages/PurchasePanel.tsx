@@ -5,10 +5,17 @@ import { PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, Purc
 import { applyConfirmedPurchasePartyOrderOnlyMerge, applyMissingProductPurchaseHistoryRowsSafePatches, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, searchPurchaseOrdersRuntime, updatePurchaseOrder, updatePurchaseParty, ApplyMissingProductPurchaseHistorySafeRestoreResult, MissingProductPurchaseHistoryDryRunResult, PurchaseOrderRuntimeSearchResult } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
-import { getProductStockRows } from '../services/productVariants';
+import { getProductStockRows, NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, ClipboardList, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, Truck, User, X } from 'lucide-react';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { buildPurchasePartyLedger } from '../services/purchaseLedger';
+import {
+  LegacyProductPurchaseHistoryFallbackRow,
+  PurchaseOrderDerivedHistoryRow,
+  getBrokenPurchaseLinkRowsForProduct,
+  getLegacyOnlyPurchaseHistoryRowsForProduct,
+  getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct,
+} from '../services/purchaseHistoryView';
 import { can, isAdmin } from '../src/auth/simplePermissions';
 import { useRoleSession } from '../src/auth/roleSession';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
@@ -416,6 +423,80 @@ function SummaryCard({ label, value }: { label: string; value: string }) {
     <div className="rounded-2xl border border-slate-200 bg-white p-3">
       <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
       <div className="mt-1 text-sm font-semibold text-slate-900">{value}</div>
+    </div>
+  );
+}
+
+const formatVariantValue = (value?: string | null, fallback = '—') => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return fallback;
+  return trimmed;
+};
+
+function PurchaseHistoryCards({ productName, rows }: { productName: string; rows: PurchaseOrderDerivedHistoryRow[] }) {
+  return (
+    <div className="space-y-2">
+      {rows.map((row) => {
+        const lineTotal = Math.max(0, Number(row.lineTotal || (row.quantity * row.unitPrice) || 0));
+        return (
+          <div key={row.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-semibold text-slate-900">{productName}</div>
+              <div className="text-slate-500">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</div>
+            </div>
+            {row.productName && row.productName !== productName && (
+              <div className="mt-1 text-[11px] text-amber-700">Order product name: <span className="font-medium">{row.productName}</span></div>
+            )}
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              <SummaryCard label="Qty" value={formatNumber(Math.max(0, Number(row.quantity || 0)), 0)} />
+              <SummaryCard label="Unit Cost" value={`₹${formatNumber(Math.max(0, Number(row.unitPrice || 0)))}`} />
+              <SummaryCard label="Line Total" value={`₹${formatNumber(lineTotal)}`} />
+            </div>
+            <div className="mt-2 text-[11px] text-slate-600">
+              Variant: <span className="font-medium text-slate-900">{formatVariantValue(row.variant, NO_VARIANT)}</span> · Color: <span className="font-medium text-slate-900">{formatVariantValue(row.color, NO_COLOR)}</span>
+            </div>
+            <div className="mt-2 grid gap-1 text-[11px] text-slate-600">
+              <div>Party: <span className="font-medium text-slate-900">{row.partyName || '—'}</span></div>
+              <div>Purchase Order: <span className="font-medium text-slate-900">{row.purchaseOrderLabel || row.purchaseOrderId || '—'}</span></div>
+              <div>Reference: <span className="font-medium text-slate-900">{row.reference || '—'}</span></div>
+              <div>Notes: <span className="font-medium text-slate-900">{row.notes || '—'}</span></div>
+              <div>Paid: <span className="font-medium text-slate-900">₹{formatNumber(Math.max(0, Number(row.orderPaid || 0)))}</span> · Remaining: <span className="font-medium text-slate-900">₹{formatNumber(Math.max(0, Number(row.remainingPayable || 0)))}</span></div>
+            </div>
+            <div className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-500">
+              Edit/delete for purchase-order history will be handled from Purchase Orders.
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LegacyAuditHistoryCards({ productName, rows }: { productName: string; rows: LegacyProductPurchaseHistoryFallbackRow[] }) {
+  return (
+    <div className="space-y-2">
+      {rows.map((row) => (
+        <div key={row.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold text-slate-900">{productName}</div>
+            <div className="text-slate-500">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</div>
+          </div>
+          <div className="mt-2 rounded-xl border border-amber-200 bg-white px-3 py-2 text-[11px] text-amber-900">
+            Legacy-only history row — not part of canonical purchase ledger.
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-3">
+            <SummaryCard label="Qty" value={formatNumber(Math.max(0, Number(row.quantity || 0)), 0)} />
+            <SummaryCard label="Unit Cost" value={`₹${formatNumber(Math.max(0, Number(row.unitPrice || 0)))}`} />
+            <SummaryCard label="Line Total" value={`₹${formatNumber(Math.max(0, Number(row.lineTotal || (row.quantity * row.unitPrice) || 0)))}`} />
+          </div>
+          <div className="mt-2 grid gap-1 text-[11px] text-slate-600">
+            <div>Purchase Order: <span className="font-medium text-slate-900">{row.purchaseOrderLabel || row.purchaseOrderId || 'Not linked'}</span></div>
+            <div>Party: <span className="font-medium text-slate-900">{row.partyName || '—'}</span></div>
+            <div>Reference: <span className="font-medium text-slate-900">{row.reference || '—'}</span></div>
+            <div>Notes: <span className="font-medium text-slate-900">{row.notes || '—'}</span></div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1586,6 +1667,20 @@ export default function PurchasePanel() {
     if (!productId) return;
     setPurchaseViewProduct(productById.get(productId) || null);
   };
+  const purchaseViewProductHistoryRows = useMemo(() => {
+    if (!purchaseViewProduct) return [];
+    return getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseViewProduct, orders)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [purchaseViewProduct, orders]);
+  const purchaseViewProductBrokenLinks = useMemo(() => {
+    if (!purchaseViewProduct) return [];
+    return getBrokenPurchaseLinkRowsForProduct(purchaseViewProduct, orders)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [purchaseViewProduct, orders]);
+  const purchaseViewProductLegacyOnlyRows = useMemo(() => {
+    if (!purchaseViewProduct) return [];
+    return getLegacyOnlyPurchaseHistoryRowsForProduct(purchaseViewProduct, orders);
+  }, [purchaseViewProduct, orders]);
   const openRepairDryRun = () => {
     setRepairApplyResult(null);
     setRepairRollbackPreviewDownloadedAt('');
@@ -2144,7 +2239,7 @@ export default function PurchasePanel() {
               <SummaryCard label="Total Remaining" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalRemaining)}`} />
               <SummaryCard label="Total Credit Applied" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalCreditApplied)}`} />
               <SummaryCard label="Total Credit Created" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalCreditCreated)}`} />
-              <SummaryCard label="Needs Link Review" value={`${filteredPurchaseDiagnosticSummary.linkReviewCount}`} />
+              <SummaryCard label="Broken Purchase Links" value={`${filteredPurchaseDiagnosticSummary.linkReviewCount}`} />
               <SummaryCard label="Number of Orders" value={`${filteredPurchaseDiagnosticSummary.orderCount}`} />
               <SummaryCard label="Number of Lines" value={`${filteredPurchaseDiagnosticSummary.lineCount}`} />
             </div>
@@ -2269,10 +2364,10 @@ export default function PurchasePanel() {
                       <td className="p-2 max-w-[180px] whitespace-pre-wrap break-words">{row.notes || '—'}</td>
                       <td className="p-2">
                         <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.productFound ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{row.productFound ? 'Product found' : 'Product missing'}</div>
-                        <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.productHistoryLinked ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{row.productHistoryLinked ? 'Purchase record linked' : 'Link review needed'}</div>
+                        <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.productHistoryLinked ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{row.productHistoryLinked ? 'Canonical row linked' : 'Broken purchase link'}</div>
                         {row.linkReviewReason === 'product_id_mismatch_name_match' && (
                           <div className="mt-1 rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">
-                            Needs Link Review: name matches {row.matchedByNameProductName || 'existing product'}
+                            Broken Purchase Link: name matches {row.matchedByNameProductName || 'existing product'}
                           </div>
                         )}
                         <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.partyFound ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{row.partyFound ? 'Party found' : 'Party missing'}</div>
@@ -2653,9 +2748,9 @@ export default function PurchasePanel() {
                         <td className="p-2">
                           <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.productExists ? 'Product found' : 'Product missing'}</div>
                           <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.partyExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.partyExists ? 'Party found' : 'Party missing'}</div>
-                          <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productPurchaseHistoryContainsOrderId ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{candidate.productPurchaseHistoryContainsOrderId ? 'Purchase record linked' : 'Link review needed'}</div>
+                          <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productPurchaseHistoryContainsOrderId ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{candidate.productPurchaseHistoryContainsOrderId ? 'Canonical row linked' : 'Broken purchase link'}</div>
                           {candidate.productHistoryHasRowButPurchaseOrderMissing && (
-                            <div className="mt-1 inline-flex rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">Stored row only</div>
+                            <div className="mt-1 inline-flex rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">Legacy snapshot only</div>
                           )}
                         </td>
                         <td className="p-2">{candidate.matchReasons.join(', ') || 'Matched by current filters'}</td>
@@ -2689,8 +2784,40 @@ export default function PurchasePanel() {
                 <SummaryCard label="Product ID" value={purchaseViewProduct.id} />
                 <SummaryCard label="Current Stock" value={formatNumber(Math.max(0, Number(purchaseViewProduct.stock || 0)), 0)} />
                 <SummaryCard label="Buy Price" value={`₹${formatNumber(Math.max(0, Number(purchaseViewProduct.buyPrice || 0)))}`} />
-                <SummaryCard label="Stored Purchase Rows" value={`${purchaseViewProduct.purchaseHistory?.length || 0}`} />
+                <SummaryCard label="Purchase History Rows" value={`${purchaseViewProductHistoryRows.length}`} />
               </div>
+              <div className="space-y-2">
+                <div className="font-semibold text-slate-900">Purchase History</div>
+                {!purchaseViewProductHistoryRows.length ? (
+                  <div className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No purchase history found for this product yet.</div>
+                ) : (
+                  <div className="max-h-[320px] overflow-y-auto rounded-2xl border border-slate-200 p-2">
+                    <PurchaseHistoryCards productName={purchaseViewProduct.name} rows={purchaseViewProductHistoryRows} />
+                  </div>
+                )}
+              </div>
+              {!!purchaseViewProductBrokenLinks.length && (
+                <div className="space-y-2">
+                  <div className="font-semibold text-amber-800">Broken Purchase Links</div>
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    These purchase orders matched the product name, but their `productId` could not be trusted. They are excluded from normal Purchase History.
+                  </div>
+                  <div className="max-h-[280px] overflow-y-auto rounded-2xl border border-slate-200 p-2">
+                    <PurchaseHistoryCards productName={purchaseViewProduct.name} rows={purchaseViewProductBrokenLinks} />
+                  </div>
+                </div>
+              )}
+              {!!purchaseViewProductLegacyOnlyRows.length && (
+                <div className="space-y-2">
+                  <div className="font-semibold text-amber-800">Legacy Snapshot Audit</div>
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    Legacy-only snapshot rows stay here for audit and recovery. They are not part of the canonical purchase ledger.
+                  </div>
+                  <div className="max-h-[280px] overflow-y-auto rounded-2xl border border-slate-200 p-2">
+                    <LegacyAuditHistoryCards productName={purchaseViewProduct.name} rows={purchaseViewProductLegacyOnlyRows} />
+                  </div>
+                </div>
+              )}
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
                 <div><span className="font-semibold">Name:</span> {purchaseViewProduct.name}</div>
                 <div><span className="font-semibold">Barcode:</span> {getProductBarcode(purchaseViewProduct) || '—'}</div>

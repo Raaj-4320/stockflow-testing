@@ -285,6 +285,26 @@ export default function Customers() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!customers.length || typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('showCorrectLedger') !== '1') return;
+    const auditCustomerId = String(params.get('auditCustomerId') || '').trim();
+    setShowCorrectLedgerView(true);
+    if (auditCustomerId) {
+      const targetCustomer = customers.find((customer) => customer.id === auditCustomerId);
+      if (targetCustomer) {
+        setSearchQuery(targetCustomer.name || '');
+        setExpandedCorrectCustomerIds((prev) => prev.includes(auditCustomerId) ? prev : [...prev, auditCustomerId]);
+      }
+    }
+    params.delete('showCorrectLedger');
+    params.delete('auditCustomerId');
+    const nextSearch = params.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash || ''}`;
+    window.history.replaceState({}, '', nextUrl);
+  }, [customers]);
+
   const highValueThreshold = useMemo(() => {
     if (customers.length < 3) return Infinity;
     const sorted = [...customers].sort((a, b) => b.totalSpend - a.totalSpend);

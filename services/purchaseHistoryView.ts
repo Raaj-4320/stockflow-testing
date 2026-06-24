@@ -394,6 +394,63 @@ export const getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct = (
   });
 };
 
+export const getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct = (
+  product: Product | null,
+  orders: PurchaseOrder[]
+): PurchaseOrderDerivedHistoryRow[] => {
+  return getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(product, orders)
+    .filter((row) => row.linkStatus === 'resolved');
+};
+
+export const getBrokenPurchaseLinkRowsForProduct = (
+  product: Product | null,
+  orders: PurchaseOrder[]
+): PurchaseOrderDerivedHistoryRow[] => {
+  return getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(product, orders)
+    .filter((row) => row.linkStatus === 'needs_review');
+};
+
+export const getLegacyOnlyPurchaseHistoryRowsForProduct = (
+  product: Product | null,
+  orders: PurchaseOrder[]
+): LegacyProductPurchaseHistoryFallbackRow[] => {
+  if (!product) return [];
+
+  const legacyRows = Array.isArray(product.purchaseHistory) ? product.purchaseHistory : [];
+  if (!legacyRows.length) return [];
+
+  const matchedLegacyIds = new Set(
+    getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(product, orders)
+      .map((row) => row.legacyHistoryId)
+      .filter((value): value is string => Boolean(value))
+  );
+  const orderById = new Map(
+    (orders || []).map((order) => [String(order.id || '').trim(), order] as const)
+  );
+
+  return legacyRows
+    .filter((row) => !matchedLegacyIds.has(String(row.id || '').trim()))
+    .map((row) => {
+      const purchaseOrderId = normalizeHistoryOrderId(row);
+      const linkedOrder = purchaseOrderId ? orderById.get(purchaseOrderId) : undefined;
+      const orderTotal = linkedOrder ? Math.max(0, toSafeNumber(linkedOrder.totalAmount)) : null;
+      const orderPaid = linkedOrder ? Math.max(0, toSafeNumber(linkedOrder.totalPaid)) : null;
+      const remainingPayable = linkedOrder
+        ? Math.max(0, toSafeNumber(linkedOrder.remainingAmount ?? (orderTotal || 0) - (orderPaid || 0)))
+        : null;
+
+      return buildLegacyFallbackRow(product.id, row, {
+        orphanedLegacyRow: !linkedOrder,
+        purchaseOrderLabel: String(linkedOrder?.billNumber || linkedOrder?.id || purchaseOrderId || '').trim() || null,
+        orderTotal,
+        orderPaid,
+        remainingPayable,
+        paymentBreakdown: linkedOrder ? getPurchaseOrderPaymentBreakdown(linkedOrder) : undefined,
+      });
+    })
+    .sort((a, b) => new Date(b.date || '').getTime() - new Date(a.date || '').getTime());
+};
+
 export const getProductPurchaseHistoryDisplayRowsForProduct = (
   product: Product | null,
   orders: PurchaseOrder[]

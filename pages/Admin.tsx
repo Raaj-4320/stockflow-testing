@@ -1,8 +1,9 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
-import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
+import { Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction, UpfrontOrder } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
 import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder, uploadImageFileToCloudinary, analyzeMissingProductPurchaseHistoryRows, MissingProductPurchaseHistoryRowsAnalysis, tracePurchaseOrderProductHistoryLink, PurchaseOrderProductHistoryTraceResult } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
@@ -15,11 +16,29 @@ import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
-import { PurchaseOrderDerivedHistoryRow, compareProductPurchaseHistoryForProduct, getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct } from '../services/purchaseHistoryView';
+import {
+  LegacyProductPurchaseHistoryFallbackRow,
+  PurchaseOrderDerivedHistoryRow,
+  compareProductPurchaseHistoryForProduct,
+  getBrokenPurchaseLinkRowsForProduct,
+  getLegacyOnlyPurchaseHistoryRowsForProduct,
+  getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct,
+} from '../services/purchaseHistoryView';
+import { buildCorrectCustomerLedgerPreview } from '../services/customerLedger';
+import { getCanonicalCustomerBalanceResult } from '../services/customerBalanceView';
 import { can } from '../src/auth/simplePermissions';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
 
 const SHOW_FORENSIC_ANALYZER = Boolean((import.meta as any).env?.DEV);
+const BALANCE_AUDIT_SOURCE_LABELS = {
+  overpayment: 'Overpayment',
+  return_credit: 'Return Credit',
+  cash_change_saved: 'Cash Change Saved',
+  advance_order_payment: 'Advance Order Payment',
+  manual_adjustment: 'Manual Adjustment',
+  unknown: 'Unknown',
+} as const;
+type BalanceAuditSourceKey = keyof typeof BALANCE_AUDIT_SOURCE_LABELS;
 
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   useEscapeLayer(open, onCancel, { priority: 120 });
@@ -28,8 +47,12 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel
 }
 
 export default function Admin() {
+  const navigate = useNavigate();
   const INVENTORY_PAGE_SIZE = 25;
   const [products, setProducts] = useState<Product[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [storeName, setStoreName] = useState('StockFlow');
   const [storeProfile, setStoreProfile] = useState<any>(null);
@@ -140,7 +163,11 @@ export default function Admin() {
   const [isPhotoUploading, setIsPhotoUploading] = useState(false);
   const photoFileInputRef = useRef<HTMLInputElement>(null);
 
-  const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage' | 'purchase-history-reconciliation'>('inventory');
+  const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage' | 'purchase-history-reconciliation' | 'customer-balance-audit'>('inventory');
+  const [expandedBalanceAuditViolationIds, setExpandedBalanceAuditViolationIds] = useState<string[]>([]);
+  const [expandedBalanceAuditOrderIds, setExpandedBalanceAuditOrderIds] = useState<string[]>([]);
+  const [expandedBalanceAuditSourceKeys, setExpandedBalanceAuditSourceKeys] = useState<string[]>([]);
+  const [expandedBalanceAuditSimulationIds, setExpandedBalanceAuditSimulationIds] = useState<string[]>([]);
   const [openActionMenuProductId, setOpenActionMenuProductId] = useState<string | null>(null);
   const [editingLocationProductId, setEditingLocationProductId] = useState<string | null>(null);
   const [locationDraft, setLocationDraft] = useState({ locationZone: '', locationRow: '', locationRack: '', locationShelf: '' });
@@ -277,6 +304,9 @@ export default function Admin() {
   const refreshData = () => {
     const data = loadData();
     setProducts(data.products);
+    setCustomers(Array.isArray(data.customers) ? data.customers : []);
+    setTransactions(Array.isArray(data.transactions) ? data.transactions : []);
+    setUpfrontOrders(Array.isArray(data.upfrontOrders) ? data.upfrontOrders : []);
     setCategories(data.categories);
     setStoreName(data.profile.storeName || 'StockFlow');
     setStoreProfile(data.profile || null);
@@ -370,6 +400,207 @@ export default function Admin() {
   };
 
   const displayProductText = (value: any, fallback = 'not set yet') => safeText(value, fallback);
+  const getUpfrontOrderTotal = (order: UpfrontOrder): number => {
+    const total = Number((order as any).finalTotal ?? order.totalCost ?? (((order as any).orderTotalCustomer || 0) + ((order as any).expenseAmount || 0)));
+    return Number.isFinite(total) ? Math.max(0, total) : 0;
+  };
+  const roundAuditMoney = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+  const toggleExpandedValue = (value: string, setter: React.Dispatch<React.SetStateAction<string[]>>) => {
+    setter((prev) => (prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]));
+  };
+  const customerBalanceAudit = useMemo(() => {
+    const canonicalBalanceByCustomerId = new Map<string, ReturnType<typeof getCanonicalCustomerBalanceResult>>();
+    const ledgerPreviewByCustomerId = new Map<string, ReturnType<typeof buildCorrectCustomerLedgerPreview>>();
+    const openOrders = upfrontOrders.filter((order) => Math.max(0, Number(order.remainingAmount || 0)) > 0.005);
+    const openOrderCustomerIds = new Set(openOrders.map((order) => order.customerId).filter(Boolean));
+    const sourceEntries: Array<{
+      id: string;
+      customerId: string;
+      customerName: string;
+      source: BalanceAuditSourceKey;
+      amount: number;
+      date: string;
+      ref: string;
+      description: string;
+    }> = [];
+
+    const nonUpfrontBalanceByCustomerId = new Map<string, { due: number; storeCredit: number }>();
+    const legacyOrderInfoByCustomerId = new Map<string, number>();
+
+    customers.forEach((customer) => {
+      const canonicalBalance = getCanonicalCustomerBalanceResult(customer, transactions, upfrontOrders);
+      const preview = buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders);
+      canonicalBalanceByCustomerId.set(customer.id, canonicalBalance);
+      ledgerPreviewByCustomerId.set(customer.id, preview);
+
+      let nonUpfrontDue = 0;
+      let nonUpfrontStoreCredit = 0;
+      preview.rows.forEach((row) => {
+        if (row.originalType !== 'upfront_order') {
+          nonUpfrontDue = roundAuditMoney(Math.max(0, nonUpfrontDue + Number(row.receivableImpact || 0)));
+          nonUpfrontStoreCredit = roundAuditMoney(Math.max(0, nonUpfrontStoreCredit - Number(row.storeCreditUsed || 0)) + Math.max(0, Number(row.storeCreditCreated || 0)));
+        }
+        const created = Math.max(0, Number(row.storeCreditCreated || 0));
+        if (created <= 0.005) return;
+        let source: BalanceAuditSourceKey = 'unknown';
+        if (row.originalType === 'upfront_order' && row.referenceType === 'custom_order_payment') source = 'advance_order_payment';
+        else if (row.effectiveType === 'return') source = 'return_credit';
+        else if (row.originalType === 'sale') source = 'cash_change_saved';
+        else if (row.effectiveType === 'payment') source = 'overpayment';
+        else if (row.effectiveType === 'customer_credit' || row.effectiveType === 'customer_cash_out') source = 'manual_adjustment';
+        sourceEntries.push({
+          id: row.id,
+          customerId: customer.id,
+          customerName: customer.name,
+          source,
+          amount: created,
+          date: row.date,
+          ref: row.ref,
+          description: row.description,
+        });
+      });
+
+      nonUpfrontBalanceByCustomerId.set(customer.id, { due: nonUpfrontDue, storeCredit: nonUpfrontStoreCredit });
+      const legacyOrderCount = upfrontOrders.filter((order) => order.customerId === customer.id && (!Array.isArray(order.paymentHistory) || order.paymentHistory.length === 0)).length;
+      if (legacyOrderCount > 0) legacyOrderInfoByCustomerId.set(customer.id, legacyOrderCount);
+    });
+
+    const sourceSummary = (Object.keys(BALANCE_AUDIT_SOURCE_LABELS) as BalanceAuditSourceKey[]).map((source) => {
+      const entries = sourceEntries.filter((entry) => entry.source === source);
+      return {
+        source,
+        label: BALANCE_AUDIT_SOURCE_LABELS[source],
+        count: entries.length,
+        totalAmount: roundAuditMoney(entries.reduce((sum, entry) => sum + entry.amount, 0)),
+        customerCount: new Set(entries.map((entry) => entry.customerId)).size,
+        entries,
+      };
+    });
+
+    const dueCreditViolations = customers
+      .filter((customer) => Math.max(0, Number(customer.totalDue || 0)) > 0.005 && Math.max(0, Number(customer.storeCredit || 0)) > 0.005)
+      .map((customer) => {
+        const canonicalBalance = canonicalBalanceByCustomerId.get(customer.id);
+        const storedDue = Math.max(0, Number(customer.totalDue || 0));
+        const storedStoreCredit = Math.max(0, Number(customer.storeCredit || 0));
+        const storedNet = roundAuditMoney(Math.max(0, storedDue - storedStoreCredit));
+        const canonicalNet = canonicalBalance?.status === 'ok' ? canonicalBalance.netReceivable : 0;
+        return {
+          customerId: customer.id,
+          customerName: customer.name,
+          phone: customer.phone || '',
+          storedDue,
+          storedStoreCredit,
+          canonicalDue: canonicalBalance?.status === 'ok' ? canonicalBalance.currentDue : 0,
+          canonicalStoreCredit: canonicalBalance?.status === 'ok' ? canonicalBalance.storeCredit : 0,
+          canonicalNet,
+          difference: roundAuditMoney(canonicalNet - storedNet),
+          warnings: ledgerPreviewByCustomerId.get(customer.id)?.warnings || [],
+          openOrders: openOrders.filter((order) => order.customerId === customer.id),
+        };
+      })
+      .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference) || a.customerName.localeCompare(b.customerName));
+
+    const openAdvanceOrders = openOrders
+      .map((order) => ({
+        id: order.id,
+        customerId: order.customerId,
+        customerName: (order as any).customerName || customers.find((customer) => customer.id === order.customerId)?.name || 'Unknown Customer',
+        status: String(order.status || 'unpaid'),
+        orderNo: String((order as any).orderNumber || (order as any).orderNo || order.id.slice(-6)),
+        orderTotal: getUpfrontOrderTotal(order),
+        advancePaid: Math.max(0, Number(order.advancePaid || 0)),
+        remaining: Math.max(0, Number(order.remainingAmount || 0)),
+        paymentHistoryCount: Array.isArray(order.paymentHistory) ? order.paymentHistory.length : 0,
+        productName: String(order.productName || 'Custom Order'),
+        notes: String(order.notes || ''),
+      }))
+      .sort((a, b) => b.remaining - a.remaining || a.customerName.localeCompare(b.customerName));
+
+    const simulationRows = customers.map((customer) => {
+      const current = canonicalBalanceByCustomerId.get(customer.id);
+      const preview = ledgerPreviewByCustomerId.get(customer.id);
+      const nonUpfront = nonUpfrontBalanceByCustomerId.get(customer.id) || { due: 0, storeCredit: 0 };
+      const customerOpenOrders = openAdvanceOrders.filter((order) => order.customerId === customer.id);
+      const simulatedDue = roundAuditMoney(nonUpfront.due + customerOpenOrders.reduce((sum, order) => sum + order.remaining, 0));
+      const simulatedStoreCredit = roundAuditMoney(nonUpfront.storeCredit);
+      const simulatedNet = roundAuditMoney(Math.max(0, simulatedDue - simulatedStoreCredit));
+      const currentDue = current?.status === 'ok' ? current.currentDue : 0;
+      const currentStoreCredit = current?.status === 'ok' ? current.storeCredit : 0;
+      const currentNet = current?.status === 'ok' ? current.netReceivable : 0;
+      const difference = roundAuditMoney(simulatedNet - currentNet);
+      const advanceOrderCreditEntries = sourceEntries.filter((entry) => entry.customerId === customer.id && entry.source === 'advance_order_payment');
+      const unknownEntries = sourceEntries.filter((entry) => entry.customerId === customer.id && entry.source === 'unknown');
+      const legacyOrderCount = legacyOrderInfoByCustomerId.get(customer.id) || 0;
+      const risk: 'Safe' | 'Review' | 'Unknown' = unknownEntries.length > 0 || legacyOrderCount > 0 || (preview?.warnings.length || 0) > 0
+        ? 'Unknown'
+        : Math.abs(difference) > 0.01 || (currentDue > 0.005 && currentStoreCredit > 0.005) || advanceOrderCreditEntries.length > 0
+          ? 'Review'
+          : 'Safe';
+      return {
+        customerId: customer.id,
+        customerName: customer.name,
+        phone: customer.phone || '',
+        currentDue,
+        currentStoreCredit,
+        currentNet,
+        simulatedDue,
+        simulatedStoreCredit,
+        simulatedNet,
+        difference,
+        risk,
+        advanceOrderCreditTotal: roundAuditMoney(advanceOrderCreditEntries.reduce((sum, entry) => sum + entry.amount, 0)),
+        unknownCreditTotal: roundAuditMoney(unknownEntries.reduce((sum, entry) => sum + entry.amount, 0)),
+        openOrders: customerOpenOrders,
+        warningCount: preview?.warnings.length || 0,
+      };
+    }).filter((row) => row.currentDue > 0.005 && row.currentStoreCredit > 0.005 || Math.abs(row.difference) > 0.01 || row.advanceOrderCreditTotal > 0.005 || row.unknownCreditTotal > 0.005)
+      .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference) || a.customerName.localeCompare(b.customerName));
+
+    return {
+      summary: {
+        totalCustomers: customers.length,
+        dueAndCreditCustomers: dueCreditViolations.length,
+        openAdvanceOrders: openAdvanceOrders.length,
+        totalOpenOrderValue: roundAuditMoney(openAdvanceOrders.reduce((sum, order) => sum + order.orderTotal, 0)),
+        totalAdvancePaid: roundAuditMoney(openAdvanceOrders.reduce((sum, order) => sum + order.advancePaid, 0)),
+        totalRemaining: roundAuditMoney(openAdvanceOrders.reduce((sum, order) => sum + order.remaining, 0)),
+        unknownCreditSourceCount: sourceSummary.find((row) => row.source === 'unknown')?.count || 0,
+      },
+      dueCreditViolations,
+      openAdvanceOrders,
+      sourceSummary,
+      simulationRows,
+      exportPayload: {
+        generatedAt: new Date().toISOString(),
+        summary: {
+          totalCustomers: customers.length,
+          dueAndCreditCustomers: dueCreditViolations.length,
+          openAdvanceOrders: openAdvanceOrders.length,
+          totalOpenOrderValue: roundAuditMoney(openAdvanceOrders.reduce((sum, order) => sum + order.orderTotal, 0)),
+          totalAdvancePaid: roundAuditMoney(openAdvanceOrders.reduce((sum, order) => sum + order.advancePaid, 0)),
+          totalRemaining: roundAuditMoney(openAdvanceOrders.reduce((sum, order) => sum + order.remaining, 0)),
+          unknownCreditSourceCount: sourceSummary.find((row) => row.source === 'unknown')?.count || 0,
+        },
+        dueCreditViolations,
+        openAdvanceOrders,
+        sourceSummary: sourceSummary.map(({ source, label, count, totalAmount, customerCount }) => ({ source, label, count, totalAmount, customerCount })),
+        simulationRows,
+      },
+    };
+  }, [customers, transactions, upfrontOrders]);
+  const handleExportCustomerBalanceAuditJson = () => {
+    const blob = new Blob([JSON.stringify(customerBalanceAudit.exportPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `customer-balance-audit-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  const openCustomerCorrectLedger = (customerId: string) => {
+    navigate(`/customers?showCorrectLedger=1&auditCustomerId=${encodeURIComponent(customerId)}`);
+  };
 
   const getSuggestedStock = (totalPurchase: any, totalSold: any) => {
     const purchase = toNonNegativeNumber(totalPurchase);
@@ -452,8 +683,8 @@ export default function Admin() {
           const paymentSummary = h.paymentBreakdown || { cash: 0, online: 0, partyCredit: 0 };
           const partyName = h.partyName || 'Not linked / Unknown';
           const poLabel = h.purchaseOrderLabel || h.purchaseOrderId || '—';
-          const canUseLegacyActions = Boolean(h.legacyHistoryId) && h.linkStatus === 'resolved';
           const isReviewRow = h.linkStatus === 'needs_review';
+          const purchaseOrderActionHelp = 'Edit/delete for purchase-order history will be handled from Purchase Orders.';
 
           return (
         <div key={h.id} className="rounded-lg border bg-muted/10 p-3 text-xs space-y-2">
@@ -506,22 +737,55 @@ export default function Admin() {
           </div>
           <div className="pt-1">
             <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" disabled={!canUseLegacyActions} onClick={() => { if (canUseLegacyActions) openEditPurchaseHistoryEntry(h.legacyHistoryId!); }}>Edit Purchase</Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!canUseLegacyActions || !h.purchaseOrderId || isReviewRow}
-                onClick={() => { if (canUseLegacyActions) void handleDeletePurchaseHistoryEntry(h.legacyHistoryId!); }}
-                title={isReviewRow ? 'Unresolved purchase link rows cannot be edited or reversed.' : !canUseLegacyActions ? 'Legacy history row is not available yet for this canonical purchase row.' : !h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
-              >
-                Delete Purchase Entry
-              </Button>
+              <div className="rounded border bg-background px-2 py-1 text-[11px] text-muted-foreground">View only</div>
+              <Button size="sm" variant="outline" disabled title={purchaseOrderActionHelp}>Edit Purchase</Button>
+              <Button size="sm" variant="outline" disabled title={purchaseOrderActionHelp}>Delete Purchase Entry</Button>
             </div>
           </div>
         </div>
           );
         })()
       ))}
+    </div>
+  );
+
+  const renderLegacyAuditHistoryCards = (
+    productName: string,
+    rows: LegacyProductPurchaseHistoryFallbackRow[]
+  ) => (
+    <div className="space-y-2">
+      {rows.map((row) => {
+        const lineTotal = Number((toNonNegativeNumber(row.lineTotal || (toNonNegativeNumber(row.quantity) * toNonNegativeNumber(row.unitPrice)))).toFixed(2));
+        return (
+          <div key={row.id} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3 text-xs space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="font-semibold">{productName}</div>
+                <Badge variant="outline">Legacy-only history row</Badge>
+              </div>
+              <div className="text-muted-foreground">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</div>
+            </div>
+            <div className="rounded border border-amber-200 bg-white px-2 py-1 text-[11px] text-amber-900">
+              Legacy-only history row — not part of canonical purchase ledger.
+            </div>
+            <div className="text-muted-foreground">
+              <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(row.variant, NO_VARIANT)} &nbsp;â€¢&nbsp;
+              <span className="font-medium text-foreground">Color:</span> {formatVariantColorValue(row.color, NO_COLOR)}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Qty</div><div className="font-semibold">{toNonNegativeNumber(row.quantity)}</div></div>
+              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">â‚¹{toNonNegativeNumber(row.unitPrice).toFixed(2)}</div></div>
+              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">â‚¹{lineTotal.toFixed(2)}</div></div>
+            </div>
+            <div className="space-y-1 text-[11px]">
+              <div><span className="text-muted-foreground">Reference:</span> {row.reference || 'â€”'}</div>
+              <div><span className="text-muted-foreground">Notes:</span> {row.notes || 'â€”'}</div>
+              <div><span className="text-muted-foreground">Linked Purchase Order:</span> {row.purchaseOrderLabel || row.purchaseOrderId || 'Not linked'}</div>
+              <div><span className="text-muted-foreground">Party:</span> {row.partyName || 'â€”'}</div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 
@@ -828,30 +1092,15 @@ export default function Admin() {
   );
 
   const canonicalPurchaseHistoryRows = useMemo(
-    () => getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseTarget, loadData().purchaseOrders || []),
+    () => getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseTarget, loadData().purchaseOrders || []),
     [purchaseTarget]
   );
-  // Target model freeze:
-  // Inventory purchase history is in transition to a purchase-order-derived view.
-  // Until the migration is complete, embedded `product.purchaseHistory` remains a
-  // compatibility snapshot for legacy display/fallback only. It should not be
-  // treated as the primary source of truth for purchase display data.
   const purchaseHistoryRows = useMemo(() => {
     if (!purchaseTarget) return [];
     const rows = [...canonicalPurchaseHistoryRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     if (purchaseHistoryVariantFilter === 'all') return rows;
     return rows.filter((row) => `${row.variant || NO_VARIANT}::${row.color || NO_COLOR}` === purchaseHistoryVariantFilter);
   }, [purchaseTarget, purchaseHistoryVariantFilter, canonicalPurchaseHistoryRows]);
-
-  const resolvedPurchaseHistoryRows = useMemo(
-    () => purchaseHistoryRows.filter((row) => row.linkStatus === 'resolved'),
-    [purchaseHistoryRows]
-  );
-
-  const linkReviewPurchaseHistoryRows = useMemo(
-    () => purchaseHistoryRows.filter((row) => row.linkStatus === 'needs_review'),
-    [purchaseHistoryRows]
-  );
 
   const purchaseHistoryVariantOptions = useMemo(() => {
     if (!purchaseTarget) return [];
@@ -869,8 +1118,19 @@ export default function Admin() {
 
   const viewingPurchaseHistoryRows = useMemo(() => {
     if (!viewingProduct) return [];
-    return getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(viewingProduct, loadData().purchaseOrders || [])
+    return getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(viewingProduct, loadData().purchaseOrders || [])
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [viewingProduct]);
+
+  const viewingBrokenPurchaseHistoryRows = useMemo(() => {
+    if (!viewingProduct) return [];
+    return getBrokenPurchaseLinkRowsForProduct(viewingProduct, loadData().purchaseOrders || [])
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [viewingProduct]);
+
+  const viewingLegacyOnlyPurchaseHistoryRows = useMemo(() => {
+    if (!viewingProduct) return [];
+    return getLegacyOnlyPurchaseHistoryRowsForProduct(viewingProduct, loadData().purchaseOrders || []);
   }, [viewingProduct]);
 
   useEffect(() => {
@@ -1032,6 +1292,7 @@ export default function Admin() {
       quantity: qty,
       unitCost: unitPrice,
       totalCost: totalAmount,
+      lineTotal: totalAmount,
     };
     const order: PurchaseOrder = {
       id: orderId,
@@ -2041,6 +2302,41 @@ export default function Admin() {
 	               </CardContent>
 		          </Card>
               </>
+            ) : inventoryViewTab === 'customer-balance-audit' ? (
+              <>
+              <Card className="bg-indigo-50/60 border-indigo-100 shadow-sm">
+                <CardContent className="p-4">
+                  <p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Total Customers</p>
+                  <p className="mt-1 text-2xl font-bold text-indigo-950">{customerBalanceAudit.summary.totalCustomers}</p>
+                </CardContent>
+              </Card>
+              <Card className="bg-amber-50/60 border-amber-100 shadow-sm">
+                <CardContent className="p-4">
+                  <p className="text-xs font-bold uppercase tracking-widest text-amber-600">Due + Credit Violations</p>
+                  <p className="mt-1 text-2xl font-bold text-amber-950">{customerBalanceAudit.summary.dueAndCreditCustomers}</p>
+                </CardContent>
+              </Card>
+              <Card className="bg-sky-50/60 border-sky-100 shadow-sm">
+                <CardContent className="p-4">
+                  <p className="text-xs font-bold uppercase tracking-widest text-sky-600">Open Advance Orders</p>
+                  <p className="mt-1 text-2xl font-bold text-sky-950">{customerBalanceAudit.summary.openAdvanceOrders}</p>
+                  <div className="mt-1 text-xs text-sky-800">Open value ₹{customerBalanceAudit.summary.totalOpenOrderValue.toFixed(2)}</div>
+                </CardContent>
+              </Card>
+              <Card className="bg-emerald-50/60 border-emerald-100 shadow-sm">
+                <CardContent className="p-4">
+                  <p className="text-xs font-bold uppercase tracking-widest text-emerald-600">Advance Paid</p>
+                  <p className="mt-1 text-2xl font-bold text-emerald-950">₹{customerBalanceAudit.summary.totalAdvancePaid.toFixed(2)}</p>
+                  <div className="mt-1 text-xs text-emerald-800">Remaining ₹{customerBalanceAudit.summary.totalRemaining.toFixed(2)}</div>
+                </CardContent>
+              </Card>
+              <Card className="bg-rose-50/60 border-rose-100 shadow-sm">
+                <CardContent className="p-4">
+                  <p className="text-xs font-bold uppercase tracking-widest text-rose-600">Unknown Credit Sources</p>
+                  <p className="mt-1 text-2xl font-bold text-rose-950">{customerBalanceAudit.summary.unknownCreditSourceCount}</p>
+                </CardContent>
+              </Card>
+              </>
             ) : (
               <>
               <Card className="bg-rose-50/50 border-rose-100 shadow-sm relative overflow-hidden group">
@@ -2139,6 +2435,7 @@ export default function Admin() {
         <Button size="sm" variant={inventoryViewTab === 'inventory' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('inventory')}>Inventory</Button>
         <Button size="sm" variant={inventoryViewTab === 'lost-damage' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('lost-damage')}>Lost & Damage</Button>
         <Button size="sm" variant={inventoryViewTab === 'purchase-history-reconciliation' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('purchase-history-reconciliation')}>Purchase History Reconciliation Dashboard</Button>
+        <Button size="sm" variant={inventoryViewTab === 'customer-balance-audit' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('customer-balance-audit')}>Customer Balance Audit</Button>
       </div>
       {inventoryViewTab === 'inventory' ? (
       <>
@@ -2280,6 +2577,302 @@ export default function Admin() {
         </div>
       )}
       </>
+	      ) : inventoryViewTab === 'customer-balance-audit' ? (
+        <div className="space-y-4">
+          <Card className="border-slate-200 bg-slate-50/70">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <CardTitle className="text-lg">Customer Balance Audit</CardTitle>
+                  <p className="text-sm text-muted-foreground">Admin-only runtime audit against the currently loaded live app state. Read-only, no repair, no writes.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{customerBalanceAudit.summary.totalCustomers} customers scanned</Badge>
+                  <Button size="sm" variant="outline" onClick={handleExportCustomerBalanceAuditJson}>
+                    <Download className="mr-2 h-4 w-4" /> Export JSON
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+          </Card>
+
+          <Card className="border-slate-200">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Due + Credit Violations</CardTitle>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[980px] text-xs">
+                  <thead className="bg-slate-50 text-slate-600">
+                    <tr>
+                      <th className="p-2 text-left">Customer</th>
+                      <th className="p-2 text-right">Stored Due</th>
+                      <th className="p-2 text-right">Stored Store Credit</th>
+                      <th className="p-2 text-right">Canonical Due</th>
+                      <th className="p-2 text-right">Canonical Store Credit</th>
+                      <th className="p-2 text-right">Net Receivable</th>
+                      <th className="p-2 text-right">Difference</th>
+                      <th className="p-2 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerBalanceAudit.dueCreditViolations.map((row) => {
+                      const expanded = expandedBalanceAuditViolationIds.includes(row.customerId);
+                      return (
+                        <React.Fragment key={row.customerId}>
+                          <tr className="cursor-pointer border-t hover:bg-slate-50/70" onClick={() => toggleExpandedValue(row.customerId, setExpandedBalanceAuditViolationIds)}>
+                            <td className="p-2">
+                              <div className="font-semibold">{row.customerName}</div>
+                              <div className="text-[11px] text-muted-foreground">{row.phone || 'No phone'}</div>
+                            </td>
+                            <td className="p-2 text-right">₹{row.storedDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-emerald-700">₹{row.storedStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">₹{row.canonicalDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">₹{row.canonicalStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">₹{row.canonicalNet.toFixed(2)}</td>
+                            <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{row.difference.toFixed(2)}</td>
+                            <td className="p-2 text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openCustomerCorrectLedger(row.customerId);
+                                }}
+                              >
+                                Open Correct Ledger
+                              </Button>
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr className="border-t bg-slate-50/60">
+                              <td colSpan={8} className="p-3 text-xs">
+                                <div className="grid gap-2 md:grid-cols-3">
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Stored Net</div>
+                                    <div className="mt-1 text-muted-foreground">₹{Math.max(0, row.storedDue - row.storedStoreCredit).toFixed(2)}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Open Advance Orders</div>
+                                    <div className="mt-1 text-muted-foreground">{row.openOrders.length}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Ledger Warnings</div>
+                                    <div className="mt-1 text-muted-foreground">{row.warnings.length}</div>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                    {customerBalanceAudit.dueCreditViolations.length === 0 && (
+                      <tr><td colSpan={8} className="p-4 text-center text-muted-foreground">No customers currently have both Due and Store Credit stored at the same time.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Open Advance Orders</CardTitle>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[940px] text-xs">
+                  <thead className="bg-slate-50 text-slate-600">
+                    <tr>
+                      <th className="p-2 text-left">Customer</th>
+                      <th className="p-2 text-left">Order No</th>
+                      <th className="p-2 text-left">Status</th>
+                      <th className="p-2 text-right">Order Total</th>
+                      <th className="p-2 text-right">Advance Paid</th>
+                      <th className="p-2 text-right">Remaining</th>
+                      <th className="p-2 text-right">Payment History Count</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerBalanceAudit.openAdvanceOrders.map((order) => {
+                      const expanded = expandedBalanceAuditOrderIds.includes(order.id);
+                      return (
+                        <React.Fragment key={order.id}>
+                          <tr className="cursor-pointer border-t hover:bg-slate-50/70" onClick={() => toggleExpandedValue(order.id, setExpandedBalanceAuditOrderIds)}>
+                            <td className="p-2 font-semibold">{order.customerName}</td>
+                            <td className="p-2">{order.orderNo}</td>
+                            <td className="p-2"><Badge variant="outline">{order.status}</Badge></td>
+                            <td className="p-2 text-right">₹{order.orderTotal.toFixed(2)}</td>
+                            <td className="p-2 text-right">₹{order.advancePaid.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold text-amber-700">₹{order.remaining.toFixed(2)}</td>
+                            <td className="p-2 text-right">{order.paymentHistoryCount}</td>
+                          </tr>
+                          {expanded && (
+                            <tr className="border-t bg-slate-50/60">
+                              <td colSpan={7} className="p-3 text-xs">
+                                <div className="grid gap-2 md:grid-cols-2">
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Product</div>
+                                    <div className="mt-1 text-muted-foreground">{order.productName}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Notes</div>
+                                    <div className="mt-1 text-muted-foreground">{order.notes || 'No notes'}</div>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                    {customerBalanceAudit.openAdvanceOrders.length === 0 && (
+                      <tr><td colSpan={7} className="p-4 text-center text-muted-foreground">No open advance/custom/upfront orders found in the loaded state.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Store Credit Source Classification</CardTitle>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px] text-xs">
+                  <thead className="bg-slate-50 text-slate-600">
+                    <tr>
+                      <th className="p-2 text-left">Source</th>
+                      <th className="p-2 text-right">Contributions</th>
+                      <th className="p-2 text-right">Customers</th>
+                      <th className="p-2 text-right">Total Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerBalanceAudit.sourceSummary.map((group) => {
+                      const expanded = expandedBalanceAuditSourceKeys.includes(group.source);
+                      return (
+                        <React.Fragment key={group.source}>
+                          <tr className="cursor-pointer border-t hover:bg-slate-50/70" onClick={() => toggleExpandedValue(group.source, setExpandedBalanceAuditSourceKeys)}>
+                            <td className="p-2 font-semibold">{group.label}</td>
+                            <td className="p-2 text-right">{group.count}</td>
+                            <td className="p-2 text-right">{group.customerCount}</td>
+                            <td className="p-2 text-right font-semibold">₹{group.totalAmount.toFixed(2)}</td>
+                          </tr>
+                          {expanded && (
+                            <tr className="border-t bg-slate-50/60">
+                              <td colSpan={4} className="p-3">
+                                {!group.entries.length ? (
+                                  <div className="text-xs text-muted-foreground">No contributions in this group.</div>
+                                ) : (
+                                  <div className="space-y-2">
+                                    {group.entries.slice(0, 12).map((entry) => (
+                                      <div key={entry.id} className="flex items-center justify-between rounded-lg border bg-white px-3 py-2 text-xs">
+                                        <div>
+                                          <div className="font-semibold">{entry.customerName}</div>
+                                          <div className="text-muted-foreground">{entry.description}</div>
+                                        </div>
+                                        <div className="text-right">
+                                          <div className="font-semibold">₹{entry.amount.toFixed(2)}</div>
+                                          <div className="text-muted-foreground">{entry.ref}</div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {group.entries.length > 12 && <div className="text-[11px] text-muted-foreground">Showing first 12 contributions in this group.</div>}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Simulation</CardTitle>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1080px] text-xs">
+                  <thead className="bg-slate-50 text-slate-600">
+                    <tr>
+                      <th className="p-2 text-left">Customer</th>
+                      <th className="p-2 text-right">Current Due</th>
+                      <th className="p-2 text-right">Current Store Credit</th>
+                      <th className="p-2 text-right">Current Net</th>
+                      <th className="p-2 text-right">Simulated Due</th>
+                      <th className="p-2 text-right">Simulated Store Credit</th>
+                      <th className="p-2 text-right">Simulated Net</th>
+                      <th className="p-2 text-right">Difference</th>
+                      <th className="p-2 text-right">Risk</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerBalanceAudit.simulationRows.map((row) => {
+                      const expanded = expandedBalanceAuditSimulationIds.includes(row.customerId);
+                      return (
+                        <React.Fragment key={row.customerId}>
+                          <tr className="cursor-pointer border-t hover:bg-slate-50/70" onClick={() => toggleExpandedValue(row.customerId, setExpandedBalanceAuditSimulationIds)}>
+                            <td className="p-2">
+                              <div className="font-semibold">{row.customerName}</div>
+                              <div className="text-[11px] text-muted-foreground">{row.phone || 'No phone'}</div>
+                            </td>
+                            <td className="p-2 text-right">₹{row.currentDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-emerald-700">₹{row.currentStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">₹{row.currentNet.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">₹{row.simulatedDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">₹{row.simulatedStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">₹{row.simulatedNet.toFixed(2)}</td>
+                            <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{row.difference.toFixed(2)}</td>
+                            <td className="p-2 text-right">
+                              <Badge variant={row.risk === 'Safe' ? 'success' : 'outline'}>{row.risk}</Badge>
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr className="border-t bg-slate-50/60">
+                              <td colSpan={9} className="p-3 text-xs">
+                                <div className="grid gap-2 md:grid-cols-4">
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Open Orders</div>
+                                    <div className="mt-1 text-muted-foreground">{row.openOrders.length}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Advance-Order Credit</div>
+                                    <div className="mt-1 text-muted-foreground">₹{row.advanceOrderCreditTotal.toFixed(2)}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Unknown Credit</div>
+                                    <div className="mt-1 text-muted-foreground">₹{row.unknownCreditTotal.toFixed(2)}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Warnings</div>
+                                    <div className="mt-1 text-muted-foreground">{row.warningCount}</div>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                    {customerBalanceAudit.simulationRows.length === 0 && (
+                      <tr><td colSpan={9} className="p-4 text-center text-muted-foreground">No customers currently require simulation review from the loaded state.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
 	      ) : inventoryViewTab === 'purchase-history-reconciliation' ? (
         <Card className="border-slate-200 bg-slate-50/60">
           <CardHeader className="pb-3">
@@ -2366,28 +2959,9 @@ export default function Admin() {
                         </td>
                         <td className="p-3 text-xs text-muted-foreground">{implication}</td>
                         <td className="p-3 text-right">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                              setPurchaseTarget(product);
-                              setPurchaseQty('');
-                              setPurchasePrice('');
-                              setPurchaseNextBuyPrice('');
-                              setPurchaseReference('');
-                              setPurchaseNotes('');
-                              setPurchasePartyName('');
-                              setSelectedPurchasePartyId('');
-                              setPurchaseCashPaid('');
-                              setPurchaseBankPaid('');
-                              setPurchasePaymentNote('');
-                              setPurchaseModalTab('history');
-                              setPurchaseHistoryVariantFilter('all');
-                              setPurchaseError(null);
-                            }}
-                          >
-                            Open History
-                          </Button>
+                        <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}>
+                          Open History
+                        </Button>
                         </td>
                       </tr>
                     );
@@ -2863,34 +3437,18 @@ export default function Admin() {
                       </select>
                     </div>
                   )}
-                  {!resolvedPurchaseHistoryRows.length && !linkReviewPurchaseHistoryRows.length ? (
+                  {!purchaseHistoryRows.length ? (
                     <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
                       No purchase history found for this product yet.
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {!!resolvedPurchaseHistoryRows.length && (
-                        <div className="space-y-2">
-                          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Purchase History</div>
-                          <div className="max-h-[420px] overflow-y-auto rounded-md border p-2">
-                            {renderPurchaseHistoryCards(purchaseTarget.name, resolvedPurchaseHistoryRows)}
-                          </div>
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Purchase History</div>
+                        <div className="max-h-[420px] overflow-y-auto rounded-md border p-2">
+                          {renderPurchaseHistoryCards(purchaseTarget.name, purchaseHistoryRows)}
                         </div>
-                      )}
-                      {!!linkReviewPurchaseHistoryRows.length && (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-amber-700">
-                            <AlertTriangle className="w-4 h-4" />
-                            Needs Link Review
-                          </div>
-                          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                            These purchase-order rows matched this product by name, but their productId is missing or mismatched. They are shown for review and remain non-editable.
-                          </div>
-                          <div className="max-h-[320px] overflow-y-auto rounded-md border p-2">
-                            {renderPurchaseHistoryCards(purchaseTarget.name, linkReviewPurchaseHistoryRows)}
-                          </div>
-                        </div>
-                      )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -3221,6 +3779,28 @@ export default function Admin() {
               ) : (
                 <div className="max-h-[380px] overflow-y-auto rounded-lg border p-2">
                   {renderPurchaseHistoryCards(viewingProduct.name, viewingPurchaseHistoryRows)}
+                </div>
+              )}
+              {!!viewingBrokenPurchaseHistoryRows.length && (
+                <div className="space-y-2">
+                  <h4 className="font-semibold text-amber-800">Broken Purchase Links</h4>
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    These purchase orders matched the product name, but their `productId` is missing or points somewhere else. They are not part of the normal Purchase History display.
+                  </div>
+                  <div className="max-h-[320px] overflow-y-auto rounded-lg border p-2">
+                    {renderPurchaseHistoryCards(viewingProduct.name, viewingBrokenPurchaseHistoryRows)}
+                  </div>
+                </div>
+              )}
+              {!!viewingLegacyOnlyPurchaseHistoryRows.length && (
+                <div className="space-y-2">
+                  <h4 className="font-semibold text-amber-800">Legacy Snapshot Audit</h4>
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    Legacy-only history rows are kept here for audit and recovery only. They are not shown in normal client Purchase History.
+                  </div>
+                  <div className="max-h-[320px] overflow-y-auto rounded-lg border p-2">
+                    {renderLegacyAuditHistoryCards(viewingProduct.name, viewingLegacyOnlyPurchaseHistoryRows)}
+                  </div>
                 </div>
               )}
             </CardContent>
