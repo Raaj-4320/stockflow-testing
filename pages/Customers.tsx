@@ -563,6 +563,10 @@ export default function Customers() {
     if (!viewingCustomerCanonical) return null;
     return buildCorrectCustomerLedgerPreview(viewingCustomerCanonical, transactions, upfrontOrders);
   }, [viewingCustomerCanonical, transactions, upfrontOrders]);
+  const transactionById = useMemo(
+    () => new Map(transactions.map((tx) => [tx.id, tx])),
+    [transactions]
+  );
   const storeCreditBreakdownRows = useMemo(() => {
     return (viewingCustomerCorrectLedger?.rows || []).map((row) => {
       const sourceTx = transactions.find((tx) => tx.id === row.id);
@@ -724,6 +728,12 @@ export default function Customers() {
     if (viewingCustomer && selectedCustomerIds.includes(viewingCustomer.id)) {
       setViewingCustomer(null);
     }
+  };
+
+  const openCustomerTransactionDetails = (transactionId: string) => {
+    const transaction = transactionById.get(transactionId);
+    if (!transaction) return;
+    setSelectedTx(transaction);
   };
 
   const handleSaveCustomerEdit = (goToNext = false) => {
@@ -1774,8 +1784,22 @@ export default function Customers() {
                                 <tbody className="divide-y divide-slate-100">
                                   {businessTransactionRows.length === 0 ? (
                                     <tr><td colSpan={4} className="px-3 py-8 text-center text-xs text-slate-400">No business transactions yet.</td></tr>
-                                  ) : businessTransactionRows.map((row, idx) => (
-                                    <tr key={`business-${row.sourceKind}-${row.id}`} className={`h-11 align-middle hover:bg-slate-50 ${idx % 2 ? 'bg-slate-50/25' : 'bg-white'}`}>
+                                  ) : businessTransactionRows.map((row, idx) => {
+                                    const isTransactionRow = row.sourceKind === 'transaction';
+                                    return (
+                                    <tr
+                                      key={`business-${row.sourceKind}-${row.id}`}
+                                      className={`h-11 align-middle hover:bg-slate-50 ${isTransactionRow ? 'cursor-pointer' : ''} ${idx % 2 ? 'bg-slate-50/25' : 'bg-white'}`}
+                                      onClick={isTransactionRow ? () => openCustomerTransactionDetails(row.id) : undefined}
+                                      onKeyDown={isTransactionRow ? (event) => {
+                                        if (event.key === 'Enter' || event.key === ' ') {
+                                          event.preventDefault();
+                                          openCustomerTransactionDetails(row.id);
+                                        }
+                                      } : undefined}
+                                      role={isTransactionRow ? 'button' : undefined}
+                                      tabIndex={isTransactionRow ? 0 : undefined}
+                                    >
                                       <td className="whitespace-nowrap px-2 py-1.5 text-[13px] font-medium text-slate-600">{formatCompactDate(row.date)}</td>
                                       <td className="px-2 py-1.5"><Badge variant="outline" className="h-5 max-w-full truncate rounded-md bg-slate-50 px-2 py-0 text-[10px] font-semibold uppercase leading-5 text-slate-600">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
                                       <td className="min-w-0 px-2 py-1.5">
@@ -1791,7 +1815,7 @@ export default function Customers() {
                                       </td>
                                       <td className="whitespace-nowrap px-2 py-1.5 text-right text-[13px] font-semibold text-slate-800">₹{formatMoneyWhole(row.amount)}</td>
                                     </tr>
-                                  ))}
+                                  )})}
                                 </tbody>
                               </table>
                             </div>
@@ -1826,8 +1850,21 @@ export default function Customers() {
                                   ) : moneyBalanceLedgerRows.map((row, idx) => {
                                     const movement = getMovementDisplay(row);
                                     const running = getRunningBalanceDisplay(row.runningBalance);
+                                    const isTransactionRow = row.sourceKind !== 'upfront_order';
                                     return (
-                                      <tr key={`money-${row.sourceKind}-${row.id}`} className={`h-11 align-middle hover:bg-slate-50 ${idx % 2 ? 'bg-slate-50/25' : 'bg-white'}`}>
+                                      <tr
+                                        key={`money-${row.sourceKind}-${row.id}`}
+                                        className={`h-11 align-middle hover:bg-slate-50 ${isTransactionRow ? 'cursor-pointer' : ''} ${idx % 2 ? 'bg-slate-50/25' : 'bg-white'}`}
+                                        onClick={isTransactionRow ? () => openCustomerTransactionDetails(row.id) : undefined}
+                                        onKeyDown={isTransactionRow ? (event) => {
+                                          if (event.key === 'Enter' || event.key === ' ') {
+                                            event.preventDefault();
+                                            openCustomerTransactionDetails(row.id);
+                                          }
+                                        } : undefined}
+                                        role={isTransactionRow ? 'button' : undefined}
+                                        tabIndex={isTransactionRow ? 0 : undefined}
+                                      >
                                         <td className="whitespace-nowrap px-2 py-1.5 text-[13px] font-medium text-slate-600">{formatCompactDate(row.date)}</td>
                                         <td className="px-2 py-1.5"><Badge variant="outline" className="h-5 max-w-full truncate rounded-md bg-slate-50 px-2 py-0 text-[10px] font-semibold uppercase leading-5 text-slate-600">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
                                         <td className="min-w-0 px-2 py-1.5">
