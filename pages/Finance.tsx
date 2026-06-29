@@ -780,6 +780,7 @@ type FinanceProps = {
   initialTab?: FinanceTabKey;
   lockedTab?: FinanceTabKey;
   embeddedExpenseRepair?: boolean;
+  embeddedWithdrawalRepair?: boolean;
 };
 
 type ExpenseRepairDraftKind = 'add_expense' | 'edit_expense' | 'delete_expense';
@@ -795,8 +796,22 @@ type ExpenseRepairPreview = {
   afterExpenseTotal: number;
   changeExpenseTotal: number;
 };
+type WithdrawalRepairDraftKind = 'add_cash_withdrawal' | 'edit_cash_withdrawal' | 'delete_cash_withdrawal';
+type WithdrawalRepairDraft = {
+  kind: WithdrawalRepairDraftKind;
+  reason: string;
+  financialDate: string;
+  oldCashAdjustment?: CashAdjustment | null;
+  nextCashAdjustment?: CashAdjustment | null;
+};
+type WithdrawalRepairPreview = {
+  beforeWithdrawalTotal: number;
+  afterWithdrawalTotal: number;
+  changeWithdrawalTotal: number;
+  historicalShiftRepair: boolean;
+};
 
-export default function Finance({ repairMode = false, initialTab = 'cash', lockedTab, embeddedExpenseRepair = false }: FinanceProps) {
+export default function Finance({ repairMode = false, initialTab = 'cash', lockedTab, embeddedExpenseRepair = false, embeddedWithdrawalRepair = false }: FinanceProps) {
   const { session: roleSession, requestAdminOverride } = useRoleSession();
   const formatExpenseLoggedDate = (expense: Expense) => {
     const rawExpense = expense as Expense & { date?: unknown; timestamp?: unknown; expenseDate?: unknown };
@@ -879,6 +894,18 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
   const [cashAddNote, setCashAddNote] = useState('');
   const [cashWithdrawAmount, setCashWithdrawAmount] = useState('');
   const [cashWithdrawNote, setCashWithdrawNote] = useState('');
+  const [editingWithdrawalId, setEditingWithdrawalId] = useState<string | null>(null);
+  const [withdrawalFinancialDate, setWithdrawalFinancialDate] = useState(toDateTimeLocalNow());
+  const [withdrawalRepairReason, setWithdrawalRepairReason] = useState('');
+  const [withdrawalMethod, setWithdrawalMethod] = useState('Cash');
+  const [withdrawalTitle, setWithdrawalTitle] = useState('');
+  const [withdrawalPaidTo, setWithdrawalPaidTo] = useState('');
+  const [withdrawalReference, setWithdrawalReference] = useState('');
+  const [withdrawalRepairDraft, setWithdrawalRepairDraft] = useState<WithdrawalRepairDraft | null>(null);
+  const [withdrawalRepairPreview, setWithdrawalRepairPreview] = useState<WithdrawalRepairPreview | null>(null);
+  const [withdrawalRepairConfirmOpen, setWithdrawalRepairConfirmOpen] = useState(false);
+  const [withdrawalRepairSubmitting, setWithdrawalRepairSubmitting] = useState(false);
+  const [embeddedWithdrawalEditorOpen, setEmbeddedWithdrawalEditorOpen] = useState(false);
 
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Online'>('Cash');
@@ -908,6 +935,12 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
     setExpenseRepairConfirmOpen(false);
   }, { priority: 105 });
   useEscapeLayer(embeddedExpenseEditorOpen, () => setEmbeddedExpenseEditorOpen(false), { priority: 104 });
+  useEscapeLayer(Boolean(withdrawalRepairDraft), () => {
+    setWithdrawalRepairDraft(null);
+    setWithdrawalRepairPreview(null);
+    setWithdrawalRepairConfirmOpen(false);
+  }, { priority: 103 });
+  useEscapeLayer(embeddedWithdrawalEditorOpen, () => setEmbeddedWithdrawalEditorOpen(false), { priority: 102 });
 
   const refreshData = () => setData(loadData());
   const refreshFinanceNonCriticalData = async () => {
@@ -2321,6 +2354,67 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
     message,
     createdAt: new Date().toISOString(),
   });
+  const formatDateTimeCell = (value?: string) => {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? '—' : parsed.toLocaleString();
+  };
+  const resetWithdrawalRepairForm = () => {
+    setEditingWithdrawalId(null);
+    setCashWithdrawAmount('');
+    setCashWithdrawNote('');
+    setWithdrawalFinancialDate(toDateTimeLocalNow());
+    setWithdrawalRepairReason('');
+    setWithdrawalMethod('Cash');
+    setWithdrawalTitle('');
+    setWithdrawalPaidTo('');
+    setWithdrawalReference('');
+  };
+  const withdrawalRows = useMemo(
+    () => cashAdjustments
+      .filter((entry) => entry.type === 'cash_withdrawal')
+      .slice()
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()),
+    [cashAdjustments],
+  );
+  const buildWithdrawalRepairPreview = (draft: WithdrawalRepairDraft): WithdrawalRepairPreview => {
+    const currentTotal = withdrawalRows.reduce((sum, entry) => sum + Math.max(0, Number(entry.amount || 0)), 0);
+    const nextRows = draft.kind === 'add_cash_withdrawal' && draft.nextCashAdjustment
+      ? [draft.nextCashAdjustment, ...withdrawalRows]
+      : draft.kind === 'delete_cash_withdrawal' && draft.oldCashAdjustment
+        ? withdrawalRows.filter((entry) => entry.id !== draft.oldCashAdjustment!.id)
+        : withdrawalRows.map((entry) => entry.id === draft.oldCashAdjustment?.id ? (draft.nextCashAdjustment || draft.oldCashAdjustment || entry) : entry);
+    const nextTotal = nextRows.reduce((sum, entry) => sum + Math.max(0, Number(entry.amount || 0)), 0);
+    return {
+      beforeWithdrawalTotal: currentTotal,
+      afterWithdrawalTotal: nextTotal,
+      changeWithdrawalTotal: roundMoney(nextTotal - currentTotal),
+      historicalShiftRepair: Boolean(
+        openSession?.startTime
+        && draft.financialDate
+        && new Date(draft.financialDate).getTime() < new Date(openSession.startTime).getTime(),
+      ),
+    };
+  };
+  const buildWithdrawalRepairHistoryEntry = (draft: WithdrawalRepairDraft, preview: WithdrawalRepairPreview): RepairHistoryEntry => ({
+    id: `repair-${Date.now()}`,
+    entityType: 'cash_adjustment',
+    entityId: draft.oldCashAdjustment?.id || draft.nextCashAdjustment?.id || 'cash-withdrawal',
+    entityName: 'Cash Withdrawal',
+    repairKind: draft.kind,
+    targetTransactionId: draft.oldCashAdjustment?.id || draft.nextCashAdjustment?.id,
+    reason: draft.reason.trim(),
+    notes: 'cash_withdrawal',
+    financialDate: draft.financialDate,
+    adminUid: auth.currentUser?.uid || null,
+    adminEmail: auth.currentUser?.email || null,
+    createdAt: new Date().toISOString(),
+    before: { totalDue: preview.beforeWithdrawalTotal, storeCredit: 0, netReceivable: preview.beforeWithdrawalTotal },
+    after: { totalDue: preview.afterWithdrawalTotal, storeCredit: 0, netReceivable: preview.afterWithdrawalTotal },
+    delta: { totalDue: preview.changeWithdrawalTotal, storeCredit: 0, netReceivable: preview.changeWithdrawalTotal },
+    oldCashAdjustment: draft.oldCashAdjustment || null,
+    newCashAdjustment: draft.nextCashAdjustment || null,
+  });
 
   const buildExpenseRepairPreview = (draft: ExpenseRepairDraft): ExpenseRepairPreview => {
     const currentTotal = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
@@ -2497,6 +2591,119 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
     }
     if (type === 'cash_addition') { setCashAddAmount(''); setCashAddNote(''); }
     else { setCashWithdrawAmount(''); setCashWithdrawNote(''); }
+  };
+  const startEditWithdrawalRepair = (entry: CashAdjustment) => {
+    setEditingWithdrawalId(entry.id);
+    setCashWithdrawAmount(String(entry.amount || ''));
+    setCashWithdrawNote(entry.note || '');
+    setWithdrawalFinancialDate(toDateTimeLocalValue(entry.effectiveAt || entry.createdAt));
+    setWithdrawalRepairReason('');
+    setWithdrawalMethod(String(entry.method || 'Cash'));
+    setWithdrawalTitle(String(entry.title || ''));
+    setWithdrawalPaidTo(String(entry.paidTo || ''));
+    setWithdrawalReference(String(entry.reference || ''));
+    setEmbeddedWithdrawalEditorOpen(true);
+    setErrors(null);
+  };
+  const startAddWithdrawalRepair = () => {
+    resetWithdrawalRepairForm();
+    setEmbeddedWithdrawalEditorOpen(true);
+    setErrors(null);
+  };
+  const startDeleteWithdrawalRepair = (entry: CashAdjustment) => {
+    setEditingWithdrawalId(entry.id);
+    setCashWithdrawAmount(String(entry.amount || ''));
+    setCashWithdrawNote(entry.note || '');
+    setWithdrawalFinancialDate(toDateTimeLocalValue(entry.effectiveAt || entry.createdAt));
+    setWithdrawalRepairReason('');
+    setWithdrawalMethod(String(entry.method || 'Cash'));
+    setWithdrawalTitle(String(entry.title || ''));
+    setWithdrawalPaidTo(String(entry.paidTo || ''));
+    setWithdrawalReference(String(entry.reference || ''));
+    setEmbeddedWithdrawalEditorOpen(true);
+    setErrors(null);
+  };
+  const previewWithdrawalRepair = (kind: WithdrawalRepairDraftKind) => {
+    setErrors(null);
+    const target = editingWithdrawalId ? withdrawalRows.find((entry) => entry.id === editingWithdrawalId) : null;
+    if (kind !== 'add_cash_withdrawal' && !target) {
+      setErrors('Withdrawal not found.');
+      return;
+    }
+    if (!withdrawalRepairReason.trim()) {
+      setErrors('Repair reason is required.');
+      return;
+    }
+    const financialDate = parseDateTimeInput(withdrawalFinancialDate);
+    if (!financialDate) {
+      setErrors('Please enter a valid financial date and time.');
+      return;
+    }
+    const nextAmount = Number(cashWithdrawAmount);
+    if (kind === 'edit_cash_withdrawal' && (!Number.isFinite(nextAmount) || nextAmount <= 0)) {
+      setErrors('Please enter a valid withdrawal amount.');
+      return;
+    }
+    if (kind === 'add_cash_withdrawal' && (!Number.isFinite(nextAmount) || nextAmount <= 0)) {
+      setErrors('Please enter a valid withdrawal amount.');
+      return;
+    }
+    const nextCashAdjustmentBase: CashAdjustment = {
+      id: target?.id || `cash-adj-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      type: 'cash_withdrawal',
+      amount: nextAmount,
+      method: withdrawalMethod.trim() || 'Cash',
+      title: withdrawalTitle.trim() || 'Manual Cash Withdrawal',
+      note: cashWithdrawNote.trim() || undefined,
+      paidTo: withdrawalPaidTo.trim() || undefined,
+      reference: withdrawalReference.trim() || undefined,
+      effectiveAt: financialDate,
+      createdAt: financialDate,
+      updatedAt: new Date().toISOString(),
+      sessionId: target?.sessionId,
+    };
+    const nextCashAdjustment = kind === 'edit_cash_withdrawal'
+      ? { ...(target as CashAdjustment), ...nextCashAdjustmentBase }
+      : kind === 'add_cash_withdrawal'
+        ? nextCashAdjustmentBase
+        : null;
+    const draft: WithdrawalRepairDraft = {
+      kind,
+      reason: withdrawalRepairReason,
+      financialDate,
+      oldCashAdjustment: target || null,
+      nextCashAdjustment,
+    };
+    const preview = buildWithdrawalRepairPreview(draft);
+    setWithdrawalRepairDraft(draft);
+    setWithdrawalRepairPreview(preview);
+    setWithdrawalRepairConfirmOpen(true);
+    setEmbeddedWithdrawalEditorOpen(false);
+    setErrors(null);
+  };
+  const applyWithdrawalRepairDraft = async () => {
+    if (!withdrawalRepairDraft || !withdrawalRepairPreview) return;
+    setWithdrawalRepairSubmitting(true);
+    try {
+      const nextCashAdjustments = withdrawalRepairDraft.kind === 'add_cash_withdrawal' && withdrawalRepairDraft.nextCashAdjustment
+        ? [withdrawalRepairDraft.nextCashAdjustment, ...cashAdjustments]
+        : withdrawalRepairDraft.kind === 'delete_cash_withdrawal' && withdrawalRepairDraft.oldCashAdjustment
+          ? cashAdjustments.filter((entry) => entry.id !== withdrawalRepairDraft.oldCashAdjustment!.id)
+          : cashAdjustments.map((entry) => entry.id === withdrawalRepairDraft.oldCashAdjustment?.id ? (withdrawalRepairDraft.nextCashAdjustment || entry) : entry);
+      await persistState({ cashAdjustments: nextCashAdjustments });
+      await appendRepairHistoryEntry(buildWithdrawalRepairHistoryEntry(withdrawalRepairDraft, withdrawalRepairPreview));
+      setData(loadData());
+      setWithdrawalRepairDraft(null);
+      setWithdrawalRepairPreview(null);
+      setWithdrawalRepairConfirmOpen(false);
+      setEmbeddedWithdrawalEditorOpen(false);
+      resetWithdrawalRepairForm();
+      setErrors(null);
+    } catch (error) {
+      setErrors(getFriendlyErrorMessage(error, 'finance.withdrawal_repair'));
+    } finally {
+      setWithdrawalRepairSubmitting(false);
+    }
   };
 
   const removeExpense = async (id: string) => {
@@ -2810,6 +3017,208 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
                   <Button variant="outline" onClick={() => setExpenseRepairConfirmOpen(false)} disabled={expenseRepairSubmitting}>Cancel</Button>
                   <Button onClick={() => void applyExpenseRepairDraft()} disabled={expenseRepairSubmitting}>
                     {expenseRepairSubmitting ? 'Applying...' : 'Confirm Repair'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (embeddedWithdrawalRepair) {
+    const withdrawalRepairHistory = (loadData().repairHistoryEntries || [])
+      .filter((entry) => entry.entityType === 'cash_adjustment')
+      .slice(0, 12);
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <CardTitle>Withdrawal Repair</CardTitle>
+              <p className="text-sm text-muted-foreground">All-time cash withdrawal repair table with edit/delete preview flow and repair history.</p>
+            </div>
+            <div className="flex flex-col items-stretch gap-3 md:items-end">
+              <Button type="button" onClick={startAddWithdrawalRepair}>Add Withdrawal</Button>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-right">
+                <div className="text-[11px] font-semibold text-slate-600">All-Time Withdrawals</div>
+                <div className="text-lg font-semibold text-slate-900">{formatINR(withdrawalRows.reduce((sum, entry) => sum + Number(entry.amount || 0), 0))}</div>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="overflow-auto rounded-2xl border">
+              <table className="w-full min-w-[1180px] text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="p-3 text-left">Date</th>
+                    <th className="p-3 text-left">Time</th>
+                    <th className="p-3 text-left">Type</th>
+                    <th className="p-3 text-left">Details / Title</th>
+                    <th className="p-3 text-left">Notes</th>
+                    <th className="p-3 text-left">Method</th>
+                    <th className="p-3 text-left">Paid To / Person</th>
+                    <th className="p-3 text-left">Reference</th>
+                    <th className="p-3 text-right">Amount</th>
+                    <th className="p-3 text-left">Created At / Updated At</th>
+                    <th className="p-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {withdrawalRows.map((entry) => {
+                    const created = entry.createdAt ? new Date(entry.createdAt) : null;
+                    return (
+                      <tr key={entry.id} className="border-t align-top">
+                        <td className="p-3 text-slate-600">{created && !Number.isNaN(created.getTime()) ? created.toLocaleDateString() : '—'}</td>
+                        <td className="p-3 text-slate-600">{created && !Number.isNaN(created.getTime()) ? created.toLocaleTimeString() : '—'}</td>
+                        <td className="p-3">Cash Withdrawal</td>
+                        <td className="p-3">
+                          <div className="font-medium text-slate-900">{entry.title || 'Manual Cash Withdrawal'}</div>
+                          <div className="text-[11px] text-slate-400">{entry.id}</div>
+                        </td>
+                        <td className="p-3 text-slate-600">
+                          <div className="max-w-[240px] whitespace-normal break-words">{entry.note || '—'}</div>
+                        </td>
+                        <td className="p-3 text-slate-600">{entry.method || 'Cash'}</td>
+                        <td className="p-3 text-slate-600">{entry.paidTo || '—'}</td>
+                        <td className="p-3 text-slate-600">{entry.reference || '—'}</td>
+                        <td className="p-3 text-right font-semibold">{formatINR(entry.amount)}</td>
+                        <td className="p-3 text-xs text-slate-500">
+                          <div>Created: {formatDateTimeCell(entry.createdAt)}</div>
+                          <div>Updated: {formatDateTimeCell(entry.updatedAt)}</div>
+                        </td>
+                        <td className="p-3">
+                          <div className="flex justify-end gap-2">
+                            <Button type="button" variant="outline" size="sm" onClick={() => startEditWithdrawalRepair(entry)}>Edit Withdrawal</Button>
+                            <Button type="button" variant="outline" size="sm" className="text-rose-600" onClick={() => startDeleteWithdrawalRepair(entry)}>Delete Withdrawal</Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {withdrawalRows.length === 0 && (
+                    <tr>
+                      <td colSpan={11} className="p-6 text-center text-sm text-slate-500">No withdrawal transactions found.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-xs font-semibold text-slate-700">Repair History</div>
+              <div className="mt-2 space-y-2 text-xs text-slate-500">
+                {withdrawalRepairHistory.map((entry) => (
+                  <div key={entry.id} className="rounded-xl border border-slate-200 px-3 py-2">
+                    <div className="font-medium text-slate-900">{entry.repairKind.replace(/_/g, ' ')}</div>
+                    <div>{entry.reason} • {new Date(entry.createdAt).toLocaleString()}</div>
+                  </div>
+                ))}
+                {withdrawalRepairHistory.length === 0 && <div>No repair history yet.</div>}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {embeddedWithdrawalEditorOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setEmbeddedWithdrawalEditorOpen(false)}>
+            <Card className="w-full max-w-lg border-slate-200 shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <CardHeader><CardTitle>{editingWithdrawalId ? 'Withdrawal Repair' : 'Add Withdrawal Repair'}</CardTitle></CardHeader>
+              <CardContent className="space-y-4">
+                {errors && (
+                  <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {errors}
+                  </div>
+                )}
+                <div className="space-y-1">
+                  <Label>Financial Date</Label>
+                  <Input type="datetime-local" value={withdrawalFinancialDate} onChange={(e) => setWithdrawalFinancialDate(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>Amount</Label>
+                  <Input value={cashWithdrawAmount} onChange={(e) => setCashWithdrawAmount(e.target.value.replace(/[^\d.]/g, ''))} placeholder="0.00" inputMode="decimal" />
+                </div>
+                <div className="space-y-1">
+                  <Label>Method</Label>
+                  <Input value={withdrawalMethod} onChange={(e) => setWithdrawalMethod(e.target.value)} placeholder="Cash" />
+                </div>
+                <div className="space-y-1">
+                  <Label>Details / Title</Label>
+                  <Input value={withdrawalTitle} onChange={(e) => setWithdrawalTitle(e.target.value)} placeholder="Manual Cash Withdrawal" />
+                </div>
+                <div className="space-y-1">
+                  <Label>Notes</Label>
+                  <Input value={cashWithdrawNote} onChange={(e) => setCashWithdrawNote(e.target.value)} placeholder="Reason / note" />
+                </div>
+                <div className="space-y-1">
+                  <Label>Paid To / Person</Label>
+                  <Input value={withdrawalPaidTo} onChange={(e) => setWithdrawalPaidTo(e.target.value)} placeholder="Optional" />
+                </div>
+                <div className="space-y-1">
+                  <Label>Reference</Label>
+                  <Input value={withdrawalReference} onChange={(e) => setWithdrawalReference(e.target.value)} placeholder="Optional" />
+                </div>
+                <div className="space-y-1">
+                  <Label>Repair Reason</Label>
+                  <Input value={withdrawalRepairReason} onChange={(e) => setWithdrawalRepairReason(e.target.value)} placeholder="Required reason for this repair" />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setEmbeddedWithdrawalEditorOpen(false)}>Cancel</Button>
+                  {editingWithdrawalId && <Button variant="outline" className="text-rose-600" onClick={() => previewWithdrawalRepair('delete_cash_withdrawal')}>Preview Delete Withdrawal</Button>}
+                  <Button onClick={() => previewWithdrawalRepair(editingWithdrawalId ? 'edit_cash_withdrawal' : 'add_cash_withdrawal')}>
+                    {editingWithdrawalId ? 'Preview Edit Withdrawal' : 'Preview Add Withdrawal'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {withdrawalRepairConfirmOpen && withdrawalRepairDraft && withdrawalRepairPreview && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={() => !withdrawalRepairSubmitting && setWithdrawalRepairConfirmOpen(false)}>
+            <Card className="w-full max-w-lg border-slate-200 shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <CardHeader><CardTitle>Confirm Repair</CardTitle></CardHeader>
+              <CardContent className="space-y-4 text-sm">
+                {withdrawalRepairPreview.historicalShiftRepair && (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    This repair is historical. Reports will update for the selected financial date, but the current open shift will not be changed unless the withdrawal falls inside that shift window.
+                  </div>
+                )}
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Operation</div>
+                  <div className="mt-1 font-semibold text-slate-900">{withdrawalRepairDraft.kind === 'delete_cash_withdrawal' ? 'Delete Withdrawal' : withdrawalRepairDraft.kind === 'add_cash_withdrawal' ? 'Add Withdrawal' : 'Edit Withdrawal'}</div>
+                  <div className="mt-1 text-xs text-slate-600">{withdrawalRepairDraft.reason}</div>
+                  <div className="mt-1 text-xs text-slate-600">{new Date(withdrawalRepairDraft.financialDate).toLocaleString()}</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Withdrawal Amount</div>
+                      <div className="mt-1 font-semibold text-slate-900">{formatINR(Number(withdrawalRepairDraft.nextCashAdjustment?.amount || withdrawalRepairDraft.oldCashAdjustment?.amount || 0))}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Method</div>
+                      <div className="mt-1 font-medium text-slate-900">{withdrawalRepairDraft.nextCashAdjustment?.method || withdrawalRepairDraft.oldCashAdjustment?.method || 'Cash'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Details / Title</div>
+                      <div className="mt-1 font-medium text-slate-900">{withdrawalRepairDraft.nextCashAdjustment?.title || withdrawalRepairDraft.oldCashAdjustment?.title || 'Manual Cash Withdrawal'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notes</div>
+                      <div className="mt-1 text-slate-700">{withdrawalRepairDraft.nextCashAdjustment?.note || withdrawalRepairDraft.oldCashAdjustment?.note || '—'}</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="rounded-2xl border border-slate-200 p-3"><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Before</div><div className="mt-1 font-semibold text-slate-900">{formatINR(withdrawalRepairPreview.beforeWithdrawalTotal)}</div></div>
+                  <div className="rounded-2xl border border-slate-200 p-3"><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">After</div><div className="mt-1 font-semibold text-slate-900">{formatINR(withdrawalRepairPreview.afterWithdrawalTotal)}</div></div>
+                  <div className="rounded-2xl border border-slate-200 p-3"><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Change</div><div className="mt-1 font-semibold text-slate-900">{formatINR(withdrawalRepairPreview.changeWithdrawalTotal)}</div></div>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setWithdrawalRepairConfirmOpen(false)} disabled={withdrawalRepairSubmitting}>Cancel</Button>
+                  <Button onClick={() => void applyWithdrawalRepairDraft()} disabled={withdrawalRepairSubmitting}>
+                    {withdrawalRepairSubmitting ? 'Applying...' : 'Confirm Repair'}
                   </Button>
                 </div>
               </CardContent>

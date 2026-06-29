@@ -2298,10 +2298,11 @@ const defaultProfile: StoreProfile = {
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
   invoiceFormat: 'standard',
-  autoSendInvoiceAfterCreation: false
+  autoSendInvoiceAfterCreation: false,
+  repairCenterEnabled: false,
 };
 
-const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
+const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 201, padding: 5, prefix: '' });
 const DEFAULT_SALES_CREDIT_NOTE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'CN-' });
 const DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'RV-' });
 const DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'SPV-' });
@@ -2312,27 +2313,37 @@ const formatSeriesNumber = (nextNumber: number, padding: number, prefix = ''): s
   return `${prefix}${String(safeNumber).padStart(safePadding, '0')}`;
 };
 
-const ensureDocumentSeriesDefaults = (state: AppState): AppState => ({
-  ...state,
-  documentSeries: {
-    salesInvoice: {
-      ...DEFAULT_SALES_INVOICE_SERIES,
-      ...(state.documentSeries?.salesInvoice || {}),
+const ensureDocumentSeriesDefaults = (state: AppState): AppState => {
+  const salesInvoice = {
+    ...DEFAULT_SALES_INVOICE_SERIES,
+    ...(state.documentSeries?.salesInvoice || {}),
+  };
+
+  return {
+    ...state,
+    documentSeries: {
+      salesInvoice: {
+        ...salesInvoice,
+        nextNumber: Math.max(
+          DEFAULT_SALES_INVOICE_SERIES.nextNumber,
+          Number.isFinite(salesInvoice.nextNumber) ? Math.floor(salesInvoice.nextNumber) : DEFAULT_SALES_INVOICE_SERIES.nextNumber,
+        ),
+      },
+      salesCreditNote: {
+        ...DEFAULT_SALES_CREDIT_NOTE_SERIES,
+        ...(state.documentSeries?.salesCreditNote || {}),
+      },
+      customerPaymentReceipt: {
+        ...DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES,
+        ...(state.documentSeries?.customerPaymentReceipt || {}),
+      },
+      supplierPaymentVoucher: {
+        ...DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES,
+        ...(state.documentSeries?.supplierPaymentVoucher || {}),
+      },
     },
-    salesCreditNote: {
-      ...DEFAULT_SALES_CREDIT_NOTE_SERIES,
-      ...(state.documentSeries?.salesCreditNote || {}),
-    },
-    customerPaymentReceipt: {
-      ...DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES,
-      ...(state.documentSeries?.customerPaymentReceipt || {}),
-    },
-    supplierPaymentVoucher: {
-      ...DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES,
-      ...(state.documentSeries?.supplierPaymentVoucher || {}),
-    },
-  },
-});
+  };
+};
 
 const allocateSalesInvoiceNumber = (state: AppState): { state: AppState; invoiceNo: string } => {
   const normalized = ensureDocumentSeriesDefaults(state);

@@ -93,6 +93,7 @@ function AppContent() {
   const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unverified' | 'unauthenticated'>('loading');
   const [currentEmail, setCurrentEmail] = useState<string | null>(getCurrentUser());
   const [storeName, setStoreName] = useState('StockFlow');
+  const [repairCenterEnabled, setRepairCenterEnabled] = useState(false);
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
   const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
   const [salesCartCount, setSalesCartCount] = useState(0);
@@ -154,12 +155,14 @@ function AppContent() {
       if (authStatus === 'authenticated') {
           const data = loadData();
           setStoreName(data.profile.storeName || 'StockFlow');
+          setRepairCenterEnabled(Boolean(data.profile.repairCenterEnabled));
           emitFinanceSnapshot('app_load', data, { type: 'app_load', source: 'app' });
       }
 
       const handleStorageUpdate = () => {
          const data = loadData();
-         setStoreName(data.profile.storeName || 'StockFlow');
+          setStoreName(data.profile.storeName || 'StockFlow');
+         setRepairCenterEnabled(Boolean(data.profile.repairCenterEnabled));
       };
 
       window.addEventListener('local-storage-update', handleStorageUpdate);
@@ -237,6 +240,7 @@ function AppContent() {
     '/purchase-panel': 'purchases',
   };
   const showNav = (path: string) => !routePermissions[path] || simpleCan(routePermissions[path]);
+  const canShowRepairCenter = showNav('/repair-center') && getCurrentRole() === 'admin' && repairCenterEnabled;
   const handleAccessLogin = (session: Parameters<typeof setSession>[0]) => {
     if (!session) return;
     setSession(session);
@@ -376,7 +380,7 @@ function AppContent() {
             {showNav('/product-analytics') && <NavItem to="/product-analytics" icon={BarChart3} label="Product Analytics" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             <NavItem to="/customers" icon={Users} label="Customers" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
             {showNav('/pdf') && <NavItem to="/pdf" icon={FileText} label="Reports" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
-            {showNav('/repair-center') && getCurrentRole() === 'admin' && <NavItem to="/repair-center" icon={Wrench} label="Repair Center" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {canShowRepairCenter && <NavItem to="/repair-center" icon={Wrench} label="Repair Center" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             {showNav('/settings') && <NavItem to="/settings" icon={SettingsIcon} label="Settings" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             {showNav('/cashbook') && <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             <NavItem to="/finance" icon={Landmark} label="Finance" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
@@ -477,7 +481,7 @@ function AppContent() {
                               </div>
                               <span className="font-medium text-sm">Settings</span>
                          </Link>}
-                         {showNav('/repair-center') && getCurrentRole() === 'admin' && <Link to="/repair-center" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         {canShowRepairCenter && <Link to="/repair-center" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-amber-100 text-amber-700 rounded-full mb-2">
                                   <Wrench className="w-6 h-6" />
                               </div>
@@ -505,7 +509,7 @@ function AppContent() {
                 <Route path="/product-analytics" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="analytics"><ProductAnalytics /></ProtectedRoute>} />
                 <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
                 <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="reports"><Reports /></ProtectedRoute>} />
-                <Route path="/repair-center" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><RepairCenter /></ProtectedRoute>} />
+                <Route path="/repair-center" element={canShowRepairCenter ? <ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><RepairCenter /></ProtectedRoute> : <Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><Settings /></ProtectedRoute>} />
                 <Route path="/whatsapp-logs" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><WhatsAppLogs /></ProtectedRoute>} />
                 <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="cashbook"><Cashbook /></ProtectedRoute>} />

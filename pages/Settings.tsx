@@ -18,7 +18,7 @@ export default function Settings() {
     storeName: '', ownerName: '', gstin: '', email: '', phone: '',
     addressLine1: '', addressLine2: '', state: '',
     bankName: '', bankAccount: '', bankIfsc: '', bankHolder: '',
-    defaultTaxRate: 0, defaultTaxLabel: 'None', signatureImage: '', logoImage: '', adminPin: ''
+    defaultTaxRate: 0, defaultTaxLabel: 'None', signatureImage: '', logoImage: '', repairCenterEnabled: false, adminPin: ''
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -583,6 +583,14 @@ export default function Settings() {
                   onChange={(e) => setProfile({ ...profile, autoSendInvoiceAfterCreation: e.target.checked })}
                 />
                 Auto send invoice to customer after invoice creation
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={Boolean(profile.repairCenterEnabled)}
+                  onChange={(e) => setProfile({ ...profile, repairCenterEnabled: e.target.checked })}
+                />
+                Show Repair Center tab
               </label>
            </CardContent>
         </Card>

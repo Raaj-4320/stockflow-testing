@@ -17,7 +17,7 @@ import {
 import { formatMoneyWhole } from '../services/numberFormat';
 import { Customer, RepairHistoryEntry, Transaction, UpfrontOrder } from '../types';
 
-type RepairCenterTab = 'customer' | 'purchase_party' | 'expense' | 'other';
+type RepairCenterTab = 'customer' | 'purchase_party' | 'expense' | 'withdrawal' | 'other';
 type AdvanceOrderCustomerEntry = {
   customer: Customer;
   customerOrders: UpfrontOrder[];
@@ -64,6 +64,7 @@ const TABS: Array<{ key: RepairCenterTab; label: string }> = [
   { key: 'customer', label: 'Customer Repair' },
   { key: 'purchase_party', label: 'Purchase Party Repair' },
   { key: 'expense', label: 'Expense Repair' },
+  { key: 'withdrawal', label: 'Withdrawal Repair' },
   { key: 'other', label: 'Advance Order Repair' },
 ];
 
@@ -403,6 +404,7 @@ export default function RepairCenter() {
       {activeTab === 'customer' && <Customers repairMode hideStandardHeaderActions />}
       {activeTab === 'purchase_party' && <PurchasePanel repairMode embeddedRepairCenter />}
       {activeTab === 'expense' && <Finance repairMode initialTab="expense" lockedTab="expense" embeddedExpenseRepair />}
+      {activeTab === 'withdrawal' && <Finance repairMode initialTab="cash" lockedTab="cash" embeddedWithdrawalRepair />}
       {activeTab === 'other' && (
         <div className="rounded-2xl border border-slate-200 bg-white">
           <div className="border-b border-slate-200 px-5 py-4">

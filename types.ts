@@ -160,6 +160,7 @@ export interface StoreProfile {
   invoiceFormat?: 'standard' | 'thermal';
   thermalPaperWidth?: '58mm' | '80mm';
   autoSendInvoiceAfterCreation?: boolean;
+  repairCenterEnabled?: boolean;
   adminPin?: string;
 }
 
@@ -651,8 +652,14 @@ export interface CashAdjustment {
   id: string;
   type: 'cash_addition' | 'cash_withdrawal';
   amount: number;
+  method?: string;
+  title?: string;
   note?: string;
+  paidTo?: string;
+  reference?: string;
+  effectiveAt?: string;
   createdAt: string;
+  updatedAt?: string;
   sessionId?: string;
 }
 
@@ -757,10 +764,10 @@ export interface ManualCashbookEntry {
 
 export interface RepairHistoryEntry {
   id: string;
-  entityType: 'customer' | 'purchase_party' | 'expense';
+  entityType: 'customer' | 'purchase_party' | 'expense' | 'cash_adjustment';
   entityId: string;
   entityName: string;
-  repairKind: 'add_payment' | 'edit_payment' | 'delete_payment' | 'edit_sale' | 'add_sale' | 'delete_sale' | 'add_return' | 'edit_return' | 'delete_return' | 'add_purchase' | 'edit_purchase' | 'delete_purchase' | 'add_supplier_payment' | 'edit_supplier_payment' | 'delete_supplier_payment' | 'add_expense' | 'edit_expense' | 'delete_expense' | 'add_advance_order' | 'edit_advance_order' | 'delete_advance_order' | 'add_advance_payment' | 'edit_advance_payment' | 'delete_advance_payment';
+  repairKind: 'add_payment' | 'edit_payment' | 'delete_payment' | 'edit_sale' | 'add_sale' | 'delete_sale' | 'add_return' | 'edit_return' | 'delete_return' | 'add_purchase' | 'edit_purchase' | 'delete_purchase' | 'add_supplier_payment' | 'edit_supplier_payment' | 'delete_supplier_payment' | 'add_expense' | 'edit_expense' | 'delete_expense' | 'add_cash_withdrawal' | 'edit_cash_withdrawal' | 'delete_cash_withdrawal' | 'add_advance_order' | 'edit_advance_order' | 'delete_advance_order' | 'add_advance_payment' | 'edit_advance_payment' | 'delete_advance_payment';
   targetTransactionId?: string;
   reason: string;
   notes?: string;
@@ -791,6 +798,8 @@ export interface RepairHistoryEntry {
   newSupplierPayment?: SupplierPaymentLedgerEntry | null;
   oldExpense?: Expense | null;
   newExpense?: Expense | null;
+  oldCashAdjustment?: CashAdjustment | null;
+  newCashAdjustment?: CashAdjustment | null;
   oldUpfrontOrder?: UpfrontOrder | null;
   newUpfrontOrder?: UpfrontOrder | null;
 }

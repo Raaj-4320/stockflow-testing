@@ -86,6 +86,20 @@ const isPlaceholder = (v?: string) => {
   const t = normalizeText(v).toLowerCase();
   return !t || t === 'no variant' || t === 'no color' || t === '-';
 };
+const getPurchaseOrderThumbnail = (order: PurchaseOrder): string => {
+  const firstLine = Array.isArray(order.lines) ? order.lines.find((line) => String(line.image || '').trim()) : null;
+  return String(firstLine?.image || '').trim();
+};
+const getPurchaseOrderDetailsText = (order: PurchaseOrder): string => {
+  const lines = Array.isArray(order.lines) ? order.lines : [];
+  if (!lines.length) return order.notes || '—';
+  const parts = lines.slice(0, 2).map((line) => {
+    const base = line.productName || 'Product';
+    const variant = [line.variant, line.color].map((value) => String(value || '').trim()).filter(Boolean).join(' / ');
+    return variant ? `${base} (${variant})` : base;
+  });
+  return parts.join(', ');
+};
 
 
 type DuplicatePartyTotals = {
@@ -2462,26 +2476,61 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                       <Button type="button" size="sm" onClick={() => openCreateOrderForParty(selectedRepairParty)}>Add Purchase</Button>
                     </div>
                     {!selectedRepairOrders.length ? <div className="p-6 text-center text-sm text-slate-500">No purchases for this party.</div> : (
-                      <div className="max-h-[430px] space-y-3 overflow-y-auto p-4">
-                        {selectedRepairOrders.map((order) => (
-                          <div key={order.id} className="rounded-2xl border bg-slate-50/70 p-4">
-                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                              <div>
-                                <div className="font-semibold text-slate-900">{order.billNumber || order.id}</div>
-                                <div className="text-xs text-slate-500">{new Date(order.effectiveAt || order.orderDate || order.createdAt).toLocaleString()} · {order.status}</div>
-                              </div>
-                              <div className="flex gap-2">
-                                <Button type="button" size="sm" variant="outline" onClick={() => editOrder(order)}>Edit</Button>
-                                <Button type="button" size="sm" variant="outline" className="text-red-600" onClick={() => openPurchaseDeleteRepair(order)}>Delete</Button>
-                              </div>
-                            </div>
-                            <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                              <SummaryCard label="Amount" value={`₹${formatNumber(Number(order.totalAmount || 0))}`} />
-                              <SummaryCard label="Paid" value={`₹${formatNumber(Number(order.totalPaid || 0))}`} />
-                              <SummaryCard label="Balance" value={`₹${formatNumber(Number(order.remainingAmount || 0))}`} />
-                            </div>
-                          </div>
-                        ))}
+                      <div className="max-h-[430px] overflow-auto">
+                        <table className="w-full min-w-[980px] text-sm">
+                          <thead className="sticky top-0 bg-slate-50">
+                            <tr>
+                              <th className="p-3 text-left">Date / Time</th>
+                              <th className="p-3 text-left">Purchase No</th>
+                              <th className="p-3 text-left">Product image</th>
+                              <th className="p-3 text-left">Product / Details</th>
+                              <th className="p-3 text-right">Qty</th>
+                              <th className="p-3 text-right">Total Amount</th>
+                              <th className="p-3 text-right">Paid</th>
+                              <th className="p-3 text-right">Balance</th>
+                              <th className="p-3 text-left">Status</th>
+                              <th className="p-3 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedRepairOrders.map((order) => {
+                              const thumbnail = getPurchaseOrderThumbnail(order);
+                              return (
+                                <tr key={order.id} className="border-t align-top">
+                                  <td className="p-3 text-slate-600">{new Date(order.effectiveAt || order.orderDate || order.createdAt).toLocaleString()}</td>
+                                  <td className="p-3">
+                                    <div className="font-semibold text-slate-900">{order.billNumber || order.id}</div>
+                                    <div className="text-[11px] text-slate-400">{order.id}</div>
+                                  </td>
+                                  <td className="p-3">
+                                    <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-xl border bg-slate-50">
+                                      {thumbnail ? (
+                                        <img src={thumbnail} alt={order.billNumber || order.id} className="h-full w-full object-cover" />
+                                      ) : (
+                                        <span className="text-[10px] text-slate-400">No image</span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="p-3">
+                                    <div className="max-w-[260px] whitespace-normal break-words font-medium text-slate-900">{getPurchaseOrderDetailsText(order)}</div>
+                                    <div className="mt-1 text-xs text-slate-500">{order.notes || '—'}</div>
+                                  </td>
+                                  <td className="p-3 text-right font-medium">{formatNumber(Number(order.totalQuantity || 0))}</td>
+                                  <td className="p-3 text-right font-semibold">{`₹${formatNumber(Number(order.totalAmount || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold text-emerald-700">{`₹${formatNumber(Number(order.totalPaid || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold text-amber-700">{`₹${formatNumber(Number(order.remainingAmount || 0))}`}</td>
+                                  <td className="p-3 text-slate-600">{order.status}</td>
+                                  <td className="p-3">
+                                    <div className="flex justify-end gap-2">
+                                      <Button type="button" size="sm" variant="outline" onClick={() => editOrder(order)}>Edit</Button>
+                                      <Button type="button" size="sm" variant="outline" className="text-red-600" onClick={() => openPurchaseDeleteRepair(order)}>Delete</Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
                       </div>
                     )}
                   </div>
@@ -2495,30 +2544,49 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                       <Button type="button" size="sm" variant="outline" onClick={() => openPartyPaymentModal(selectedRepairParty)}>Add Payment</Button>
                     </div>
                     {!selectedRepairPayments.length ? <div className="p-6 text-center text-sm text-slate-500">No supplier payments for this party.</div> : (
-                      <div className="max-h-[430px] space-y-3 overflow-y-auto p-4">
-                        {selectedRepairPayments.map((payment) => {
-                          const payableApplied = Number(payment.paymentAppliedToPayable || payment.payableApplied || 0);
-                          const creditCreated = Number(payment.partyCreditCreated || 0);
-                          return (
-                            <div key={payment.id} className="rounded-2xl border bg-slate-50/70 p-4">
-                              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                                <div>
-                                  <div className="font-semibold text-slate-900">{payment.voucherNo || payment.id}</div>
-                                  <div className="text-xs text-slate-500">{new Date(payment.effectiveAt || payment.paidAt || payment.createdAt).toLocaleString()} · {payment.method || '—'}</div>
-                                </div>
-                                <div className="flex gap-2">
-                                  <Button type="button" size="sm" variant="outline" onClick={() => openSupplierPaymentEditModal(payment)}>Edit</Button>
-                                  <Button type="button" size="sm" variant="outline" className="text-red-600" onClick={() => openSupplierPaymentDeleteRepair(payment)}>Delete</Button>
-                                </div>
-                              </div>
-                              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                                <SummaryCard label="Movement" value={`-₹${formatNumber(Number(payment.amount || 0))}`} />
-                                <SummaryCard label="Payable Impact" value={`₹${formatNumber(payableApplied)}`} />
-                                <SummaryCard label="Credit Created" value={`₹${formatNumber(creditCreated)}`} />
-                              </div>
-                            </div>
-                          );
-                        })}
+                      <div className="max-h-[430px] overflow-auto">
+                        <table className="w-full min-w-[920px] text-sm">
+                          <thead className="sticky top-0 bg-slate-50">
+                            <tr>
+                              <th className="p-3 text-left">Date / Time</th>
+                              <th className="p-3 text-left">Payment Ref</th>
+                              <th className="p-3 text-left">Method</th>
+                              <th className="p-3 text-right">Amount</th>
+                              <th className="p-3 text-right">Payable Impact</th>
+                              <th className="p-3 text-right">Credit Created</th>
+                              <th className="p-3 text-left">Notes</th>
+                              <th className="p-3 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedRepairPayments.map((payment) => {
+                              const payableApplied = Number(payment.paymentAppliedToPayable || payment.payableApplied || 0);
+                              const creditCreated = Number(payment.partyCreditCreated || 0);
+                              return (
+                                <tr key={payment.id} className="border-t align-top">
+                                  <td className="p-3 text-slate-600">{new Date(payment.effectiveAt || payment.paidAt || payment.createdAt).toLocaleString()}</td>
+                                  <td className="p-3">
+                                    <div className="font-semibold text-slate-900">{payment.voucherNo || payment.id}</div>
+                                    <div className="text-[11px] text-slate-400">{payment.id}</div>
+                                  </td>
+                                  <td className="p-3 text-slate-600">{payment.method || '—'}</td>
+                                  <td className="p-3 text-right font-semibold">{`₹${formatNumber(Number(payment.amount || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold text-blue-700">{`₹${formatNumber(payableApplied)}`}</td>
+                                  <td className="p-3 text-right font-semibold text-emerald-700">{`₹${formatNumber(creditCreated)}`}</td>
+                                  <td className="p-3 text-slate-600">
+                                    <div className="max-w-[220px] whitespace-normal break-words">{payment.note || '—'}</div>
+                                  </td>
+                                  <td className="p-3">
+                                    <div className="flex justify-end gap-2">
+                                      <Button type="button" size="sm" variant="outline" onClick={() => openSupplierPaymentEditModal(payment)}>Edit</Button>
+                                      <Button type="button" size="sm" variant="outline" className="text-red-600" onClick={() => openSupplierPaymentDeleteRepair(payment)}>Delete</Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
                       </div>
                     )}
                   </div>
