@@ -3669,14 +3669,14 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
                               const total = getUpfrontOrderCustomerTotal(order); const paid = getUpfrontOrderPaid(order); const rem = getUpfrontOrderRemaining(order); const status = getUpfrontOrderStatus(order);
                               const isOverdue = rem > 0 && order.reminderDate && new Date(order.reminderDate).getTime() < Date.now();
                               return <div key={order.id} className="rounded border p-3 text-xs space-y-1">
-                                <div className="flex justify-between"><b>{order.productName || 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</b><span>{new Date(order.date || order.createdAt || '').toLocaleDateString()}</span></div>
-                                <div>Ref: {order.id.slice(-6)} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ {order.category || 'Uncategorized'} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ {order.variantLabel || [order.selectedVariant, order.selectedColor].filter(Boolean).join(' / ') || 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</div>
-                                <div>Pieces/Cartons/Total: {order.piecesPerCarton ?? 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'} / {order.numberOfCartons ?? 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'} / {order.totalPieces ?? order.quantity ?? 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</div>
-                                <div>?/Piece: {order.pricePerPiece ?? order.cartonPriceAdmin ?? 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Cust ?/Piece: {order.customerPricePerPiece ?? order.cartonPriceCustomer ?? 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</div>
-                                <div>Order Total: ?{formatMoneyWhole(order.orderTotal ?? 0)} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Expense: ?{formatMoneyWhole(order.expenseAmount ?? 0)} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Final: ?{formatMoneyWhole(total)}</div>
-                                <div>Paid Cash: ?{formatMoneyWhole(order.paidNowCash ?? 0)} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Paid Online: ?{formatMoneyWhole(order.paidNowOnline ?? 0)} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Advance Paid: ?{formatMoneyWhole(paid)} ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Remaining: ?{formatMoneyWhole(rem)}</div>
-                                <div className={`font-bold ${status === 'Paid in Full' ? 'text-emerald-700' : 'text-amber-700'}`}>Status: {isOverdue ? 'Overdue' : status}{order.reminderDate ? ` ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Reminder: ${new Date(order.reminderDate).toLocaleDateString()}` : ''}</div>
-                                {order.notes ? <div>Notes: {order.notes}</div> : <div>Notes: ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â</div>}
+                                <div className="flex justify-between"><b>{order.productName || '—'}</b><span>{new Date(order.date || order.createdAt || '').toLocaleDateString()}</span></div>
+                                <div>Ref: {order.id.slice(-6)} • {order.category || 'Uncategorized'} • {order.variantLabel || [order.selectedVariant, order.selectedColor].filter(Boolean).join(' / ') || '—'}</div>
+                                <div>Pieces/Cartons/Total: {order.piecesPerCarton ?? '—'} / {order.numberOfCartons ?? '—'} / {order.totalPieces ?? order.quantity ?? '—'}</div>
+                                <div>/Piece: {order.pricePerPiece ?? order.cartonPriceAdmin ?? '—'} • Cust /Piece: {order.customerPricePerPiece ?? order.cartonPriceCustomer ?? '—'}</div>
+                                <div>Order Total: {formatMoneyWhole(order.orderTotal ?? 0)} • Expense: {formatMoneyWhole(order.expenseAmount ?? 0)} • Final: {formatMoneyWhole(total)}</div>
+                                <div>Paid Cash: {formatMoneyWhole(order.paidNowCash ?? 0)} • Paid Online: {formatMoneyWhole(order.paidNowOnline ?? 0)} • Advance Paid: {formatMoneyWhole(paid)} • Remaining: {formatMoneyWhole(rem)}</div>
+                                <div className={`font-bold ${status === 'Paid in Full' ? 'text-emerald-700' : 'text-amber-700'}`}>Status: {isOverdue ? 'Overdue' : status}{order.reminderDate ? ` • Reminder: ${new Date(order.reminderDate).toLocaleDateString()}` : ''}</div>
+                                {order.notes ? <div>Notes: {order.notes}</div> : <div>Notes: —</div>}
                                 <div className="flex gap-2 flex-wrap">
                                   <Button size="sm" variant="outline" onClick={() => setExpandedOrderId(expandedOrderId === order.id ? null : order.id)}>View Details</Button>
                                   {rem > 0 && <Button size="sm" onClick={() => openUpfrontPaymentModal(order)}>{repairMode ? 'Add Advance Payment' : 'Collect Payment'}</Button>}

@@ -18,7 +18,7 @@ import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
-import { DISPLAY_FALLBACK, formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, joinDisplayParts, sanitizeDisplayText } from '../services/numberFormat';
+import { DISPLAY_FALLBACK, formatCurrency, formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, joinDisplayParts, sanitizeDisplayText } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { getCanonicalCustomerBalanceResult } from '../services/customerBalanceView';
 import { normalizeTransactionItems } from '../utils/transactionItems';
@@ -1199,41 +1199,71 @@ export default function Transactions() {
        };
   }, [filteredTransactions, products]);
 
-  const kpiStats = useMemo(() => {
-      let totalReturns = 0;
+  const transactionKpis = useMemo(() => {
+      let totalRevenue = 0;
       let totalCash = 0;
       let totalCredit = 0;
       let totalOnline = 0;
+      let totalPurchaseCash = 0;
+      let totalPurchaseCredit = 0;
+      let totalCashIn = 0;
+      let totalCashOut = 0;
 
       filteredTransactions.forEach((tx) => {
-          const amount = Math.abs(Number(tx.total || 0));
+          const amount = Math.max(0, Math.abs(Number(tx.total || 0)));
           const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
-
-          if (txType === 'return') {
-              totalReturns += amount;
-              return;
-          }
+          const paymentMethod = String(tx.paymentMethod || '').trim().toLowerCase();
+          const isSupplierPayment = isSupplierPaymentVirtualTransaction(tx);
 
           if (txType === 'sale' || txType === 'historical_reference') {
               const settlement = getSaleSettlementBreakdown(tx);
-              totalCash += Math.max(0, Number(settlement.cashPaid || 0));
-              totalCredit += Math.max(0, Number(settlement.creditDue || 0));
-              totalOnline += Math.max(0, Number(settlement.onlinePaid || 0));
+              const cashPaid = Math.max(0, Number(settlement.cashPaid || 0));
+              const creditDue = Math.max(0, Number(settlement.creditDue || 0));
+              const onlinePaid = Math.max(0, Number(settlement.onlinePaid || 0));
+
+              totalRevenue += amount;
+              totalCash += cashPaid;
+              totalCredit += creditDue;
+              totalOnline += onlinePaid;
+              totalCashIn += cashPaid;
               return;
           }
 
           if (txType === 'payment') {
-              const paymentMethod = String(tx.paymentMethod || '').toLowerCase();
-              if (paymentMethod === 'online') totalOnline += amount;
-              else if (paymentMethod === 'cash') totalCash += amount;
+              if (isSupplierPayment) {
+                  if (paymentMethod === 'cash') {
+                      totalPurchaseCash += amount;
+                      totalCashOut += amount;
+                  } else {
+                      totalPurchaseCredit += amount;
+                  }
+                  return;
+              }
+
+              if (paymentMethod === 'cash') totalCashIn += amount;
+              return;
+          }
+
+          if (txType === 'return') {
+              if (paymentMethod === 'cash') totalCashOut += amount;
+              return;
+          }
+
+          if (txType === 'customer_cash_out' && paymentMethod === 'cash') {
+              totalCashOut += amount;
           }
       });
 
       return {
-          totalReturns,
+          totalRevenue,
           totalCash,
           totalCredit,
           totalOnline,
+          totalCombined: totalCash + totalCredit + totalOnline,
+          totalPurchaseCash,
+          totalPurchaseCredit,
+          totalCashIn,
+          totalCashOut,
       };
   }, [filteredTransactions]);
 
@@ -1244,14 +1274,14 @@ export default function Transactions() {
       const advanceMatch = note.match(/Advance Paid: ([0-9,]+)/i);
       const paidMatch = note.match(/Paid: ([0-9,]+)/i);
       const remainingMatch = note.match(/Remaining: ([0-9,]+)/i);
-      if (paidMatch) return `Paid ${paidMatch[1]} Ã¢â‚¬Â¢ Remaining ${remainingMatch?.[1] || '0'}`;
-      return `Total ${totalMatch?.[1] || '0'} Ã¢â‚¬Â¢ Advance ${advanceMatch?.[1] || '0'} Ã¢â‚¬Â¢ Remaining ${remainingMatch?.[1] || '0'}`;
+      if (paidMatch) return `Paid ${paidMatch[1]} ? Remaining ${remainingMatch?.[1] || '0'}`;
+      return `Total ${totalMatch?.[1] || '0'} ? Advance ${advanceMatch?.[1] || '0'} ? Remaining ${remainingMatch?.[1] || '0'}`;
     }
     const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
     if (txType !== 'sale' && txType !== 'historical_reference') return null;
     const settlement = getSaleSettlementBreakdown(tx);
     const used = Math.max(0, Number(tx.storeCreditUsed || 0));
-    return `Cash ${formatINRPrecise(settlement.cashPaid)} Ã¢â‚¬Â¢ Online ${formatINRPrecise(settlement.onlinePaid)} Ã¢â‚¬Â¢ Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` Ã¢â‚¬Â¢ SC ${formatINRPrecise(used)}` : ''}`;
+    return `Cash ${formatINRPrecise(settlement.cashPaid)} ? Online ${formatINRPrecise(settlement.onlinePaid)} ? Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` ? SC ${formatINRPrecise(used)}` : ''}`;
   };
 
 
@@ -1537,67 +1567,29 @@ export default function Transactions() {
         </div>
       )}
 
-      {/* Stats Cards - Redesigned for Mobile Overflow & Aesthetics */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
-          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-red-50 to-rose-100/50">
-              <div className="absolute right-0 top-0 p-3 opacity-10">
-                  <ArrowDownLeft className="w-16 h-16 text-red-600" />
-              </div>
-              <CardContent className="p-4 relative z-10">
-                   <p className="text-[10px] md:text-xs font-bold text-red-700/70 uppercase tracking-wider">Returns</p>
-                   <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-red-700"></span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-red-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalReturns)}>
-                          {formatMoneyWhole(kpiStats.totalReturns)}
-                      </span>
-                   </div>
-              </CardContent>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-9">
+        {[
+          { label: 'Total Revenue', value: transactionKpis.totalRevenue, cardClass: 'border-blue-200 bg-blue-50/70', labelClass: 'text-blue-700/80', valueClass: 'text-blue-950' },
+          { label: 'Total Cash', value: transactionKpis.totalCash, cardClass: 'border-green-200 bg-green-50/70', labelClass: 'text-green-700/80', valueClass: 'text-green-950' },
+          { label: 'Credit', value: transactionKpis.totalCredit, cardClass: 'border-amber-200 bg-amber-50/80', labelClass: 'text-amber-700/80', valueClass: 'text-amber-950' },
+          { label: 'Online', value: transactionKpis.totalOnline, cardClass: 'border-purple-200 bg-purple-50/70', labelClass: 'text-purple-700/80', valueClass: 'text-purple-950' },
+          { label: 'Cash + Credit + Online', value: transactionKpis.totalCombined, cardClass: 'border-indigo-200 bg-indigo-50/70', labelClass: 'text-indigo-700/80', valueClass: 'text-indigo-950' },
+          { label: 'Total Purchase in Cash', value: transactionKpis.totalPurchaseCash, cardClass: 'border-red-200 bg-red-50/70', labelClass: 'text-red-700/80', valueClass: 'text-red-950' },
+          { label: 'Total Purchase in Credit', value: transactionKpis.totalPurchaseCredit, cardClass: 'border-orange-200 bg-orange-50/80', labelClass: 'text-orange-700/80', valueClass: 'text-orange-950' },
+          { label: 'Total Cash In', value: transactionKpis.totalCashIn, cardClass: 'border-emerald-200 bg-emerald-50/70', labelClass: 'text-emerald-700/80', valueClass: 'text-emerald-950' },
+          { label: 'Total Cash Out', value: transactionKpis.totalCashOut, cardClass: 'border-rose-200 bg-rose-50/70', labelClass: 'text-rose-700/80', valueClass: 'text-rose-950' },
+        ].map(({ label, value, cardClass, labelClass, valueClass }) => (
+          <Card key={label} className={`border shadow-sm ${cardClass}`}>
+            <CardContent className="p-2 lg:p-1.5">
+              <p className={`text-[9px] font-semibold uppercase leading-tight tracking-[0.06em] ${labelClass}`} title={label}>
+                {label}
+              </p>
+              <p className={`mt-1 whitespace-nowrap text-[13px] font-bold leading-none lg:text-[12px] ${valueClass}`} title={formatCurrency(value)}>
+                {formatCurrency(value)}
+              </p>
+            </CardContent>
           </Card>
-
-          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-green-50 to-emerald-100/50">
-              <div className="absolute right-0 top-0 p-3 opacity-10">
-                  <ArrowUpRight className="w-16 h-16 text-green-600" />
-              </div>
-              <CardContent className="p-4 relative z-10">
-                   <p className="text-[10px] md:text-xs font-bold text-green-700/70 uppercase tracking-wider">Total Cash</p>
-                   <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-green-700"></span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-green-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalCash)}>
-                          {formatMoneyWhole(kpiStats.totalCash)}
-                      </span>
-                   </div>
-              </CardContent>
-          </Card>
-
-          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-blue-50 to-indigo-100/50">
-              <div className="absolute right-0 top-0 p-3 opacity-10">
-                  <CreditCard className="w-16 h-16 text-blue-600" />
-              </div>
-              <CardContent className="p-4 relative z-10">
-                   <p className="text-[10px] md:text-xs font-bold text-blue-700/70 uppercase tracking-wider">Total Credit</p>
-                   <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-blue-700"></span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-blue-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalCredit)}>
-                          {formatMoneyWhole(kpiStats.totalCredit)}
-                      </span>
-                   </div>
-              </CardContent>
-          </Card>
-
-          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-amber-50 to-orange-100/50">
-              <div className="absolute right-0 top-0 p-3 opacity-10">
-                  <TrendingDown className="w-16 h-16 text-amber-600" />
-              </div>
-              <CardContent className="p-4 relative z-10">
-                   <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Total Online</p>
-                   <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-amber-700"></span>
-                      <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalOnline)}>
-                          {formatMoneyWhole(kpiStats.totalOnline)}
-                      </span>
-                   </div>
-              </CardContent>
-          </Card>
+        ))}
       </div>
 
       <div className="hidden grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">

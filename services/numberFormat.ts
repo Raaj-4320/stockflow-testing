@@ -18,9 +18,9 @@ const WHOLE_MONEY_FORMATTER = new Intl.NumberFormat('en-IN', {
 
 const MOJIBAKE_REPLACEMENTS: Array<[RegExp, string]> = [
   [/ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¹|Ã¢â€šÂ¹|â‚¹|₹/g, INR_SYMBOL],
-  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢|Ã¢â‚¬Â¢|Ã‚Â·/g, ' â€¢ '],
-  [/ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â|Ã¢â‚¬â€|ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â/g, DISPLAY_FALLBACK],
-  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢|Ã¢â€ â€™/g, ' -> '],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢|Ã¢â‚¬Â¢|Ã‚Â·|â€¢|Â·/g, ' • '],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â|Ã¢â‚¬â€|ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â|â€”|â€“/g, DISPLAY_FALLBACK],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢|Ã¢â€ â€™|â†’/g, ' → '],
   [/ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢/g, 'Ã—'],
   [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦/g, '...'],
   [/Ã‚+/g, ''],
@@ -57,8 +57,8 @@ export const sanitizeDisplayText = (value: unknown, fallback = DISPLAY_FALLBACK)
   });
 
   next = next
-    .replace(/\s*â€¢\s*/g, ' â€¢ ')
-    .replace(/\s*->\s*/g, ' -> ')
+    .replace(/\s*•\s*/g, ' • ')
+    .replace(/\s*→\s*/g, ' → ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -83,7 +83,7 @@ export const formatLocationText = (value: unknown) => cleanOptionalText(value) |
 
 export const joinDisplayParts = (...parts: Array<unknown>) => {
   const cleaned = parts.map((part) => cleanOptionalText(part)).filter(Boolean);
-  return cleaned.length ? cleaned.join(' â€¢ ') : DISPLAY_FALLBACK;
+  return cleaned.length ? cleaned.join(' • ') : DISPLAY_FALLBACK;
 };
 
 export const formatMoneyPrecise = (value: unknown) => MONEY_FORMATTER.format(roundTo(value, 2));
