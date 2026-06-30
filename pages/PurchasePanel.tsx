@@ -16,6 +16,7 @@ import {
   getLegacyOnlyPurchaseHistoryRowsForProduct,
   getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct,
 } from '../services/purchaseHistoryView';
+import { formatContactText, formatCurrency, formatGstText, formatLocationText, formatOptionalText, joinDisplayParts, sanitizeDisplayText } from '../services/numberFormat';
 import { can, isAdmin } from '../src/auth/simplePermissions';
 import { useRoleSession } from '../src/auth/roleSession';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
@@ -53,6 +54,9 @@ type PendingVariantRow = { key: string; label: string; variant?: string; color?:
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const toNum = (v: number | '') => (v === '' ? 0 : Number(v));
 const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const EMPTY_DASH = '\u2014';
+const DISPLAY_SEPARATOR = '\u2022';
+const formatDisplayText = (value: unknown, fallback = EMPTY_DASH) => sanitizeDisplayText(value, fallback);
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
 const toDateTimeLocalNow = () => {
   const d = new Date();
@@ -2729,9 +2733,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                         </div>
                       </div>
                       <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
-                        <SummaryCard label="Merged Purchases" value={`?${formatNumber(group.mergedTotals.totalPurchase)}`} />
-                        <SummaryCard label="Merged Payments" value={`?${formatNumber(group.mergedTotals.totalSupplierPayments)}`} />
-                        <SummaryCard label="Merged Credit Remaining" value={`?${formatNumber(group.mergedTotals.creditRemaining)}`} />
+                        <SummaryCard label="Merged Purchases" value={formatCurrency(group.mergedTotals.totalPurchase)} />
+                        <SummaryCard label="Merged Payments" value={formatCurrency(group.mergedTotals.totalSupplierPayments)} />
+                        <SummaryCard label="Merged Credit Remaining" value={formatCurrency(group.mergedTotals.creditRemaining)} />
                         <SummaryCard label="Dry-run Patches" value={`${group.patchCounts.purchaseOrders} PO / ${group.patchCounts.supplierPayments} Pay / ${group.patchCounts.partyCreditLedger} Credit`} />
                       </div>
                       <div className="mt-3 overflow-auto rounded-xl border">
@@ -2773,13 +2777,13 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="grid gap-2 text-xs md:grid-cols-4">
-              <SummaryCard label="Current Canonical Payable" value={`?${formatNumber(manualMayurbhaiMergePreview.currentCanonicalPayable)}`} />
-              <SummaryCard label="Duplicate Payable" value={`?${formatNumber(manualMayurbhaiMergePreview.duplicatePayable)}`} />
-              <SummaryCard label="Merged Purchases" value={`?${formatNumber(manualMayurbhaiMergePreview.mergedTotalPurchases)}`} />
-              <SummaryCard label="Merged Net Payable" value={`?${formatNumber(manualMayurbhaiMergePreview.mergedPayable)}`} />
-              <SummaryCard label="Merged Payments" value={`?${formatNumber(manualMayurbhaiMergePreview.mergedPayments)}`} />
-              <SummaryCard label="Merged Credit Created" value={`?${formatNumber(manualMayurbhaiMergePreview.mergedCreditCreated)}`} />
-              <SummaryCard label="Merged Credit Applied" value={`?${formatNumber(manualMayurbhaiMergePreview.mergedCreditApplied)}`} />
+              <SummaryCard label="Current Canonical Payable" value={formatCurrency(manualMayurbhaiMergePreview.currentCanonicalPayable)} />
+              <SummaryCard label="Duplicate Payable" value={formatCurrency(manualMayurbhaiMergePreview.duplicatePayable)} />
+              <SummaryCard label="Merged Purchases" value={formatCurrency(manualMayurbhaiMergePreview.mergedTotalPurchases)} />
+              <SummaryCard label="Merged Net Payable" value={formatCurrency(manualMayurbhaiMergePreview.mergedPayable)} />
+              <SummaryCard label="Merged Payments" value={formatCurrency(manualMayurbhaiMergePreview.mergedPayments)} />
+              <SummaryCard label="Merged Credit Created" value={formatCurrency(manualMayurbhaiMergePreview.mergedCreditCreated)} />
+              <SummaryCard label="Merged Credit Applied" value={formatCurrency(manualMayurbhaiMergePreview.mergedCreditApplied)} />
               <SummaryCard label="Orders to Reassign" value={`${manualMayurbhaiMergePreview.purchaseOrdersToReassign.length} / ${MAYURBHAI_MANUAL_MERGE.expectedOrderCount}`} />
             </div>
             <div className={`rounded-xl border p-3 text-xs ${manualMayurbhaiMergePreview.matchesExpected ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
@@ -2809,9 +2813,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                       <td className="p-2 font-medium">{order.billNumber || order.id}<div className="font-mono text-[10px] text-muted-foreground">{order.id}</div></td>
                       <td className="p-2">{order.orderDate || order.createdAt || 'â€”'}</td>
                       <td className="p-2">{order.partyName || MAYURBHAI_MANUAL_MERGE.duplicatePartyId}</td>
-                      <td className="p-2 text-right">?{formatNumber(Number(order.totalAmount || 0))}</td>
-                      <td className="p-2 text-right">?{formatNumber(Number(order.totalPaid || 0))}</td>
-                      <td className="p-2 text-right">?{formatNumber(Number(order.remainingAmount || 0))}</td>
+                      <td className="p-2 text-right">{formatCurrency(Number(order.totalAmount || 0))}</td>
+                      <td className="p-2 text-right">{formatCurrency(Number(order.totalPaid || 0))}</td>
+                      <td className="p-2 text-right">{formatCurrency(Number(order.remainingAmount || 0))}</td>
                     </tr>
                   ))}
                   {!manualMayurbhaiMergePreview.purchaseOrdersToReassign.length && (
@@ -2859,18 +2863,18 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                   <div className="text-xs text-muted-foreground">{p.phone || 'â€”'} Â· GST: {p.gst || 'â€”'} Â· {p.location || 'â€”'}</div>
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || 'â€”'}</div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                    <SummaryCard label="Total Purchase" value={`?${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
-                    <SummaryCard label="Total Payments" value={`?${formatNumber(partyLedgers.get(p.id)?.summary.actualPayments || 0)}`} />
-                    <SummaryCard label="Payable Applied" value={`?${formatNumber(partyLedgers.get(p.id)?.summary.payableApplied || 0)}`} />
+                    <SummaryCard label="Total Purchase" value={formatCurrency(partyFinancials.get(p.id)?.totalPurchase || 0)} />
+                    <SummaryCard label="Total Payments" value={formatCurrency(partyLedgers.get(p.id)?.summary.actualPayments || 0)} />
+                    <SummaryCard label="Payable Applied" value={formatCurrency(partyLedgers.get(p.id)?.summary.payableApplied || 0)} />
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                    <SummaryCard label="Credit Created" value={`?${formatNumber(partyLedgers.get(p.id)?.summary.creditCreated || partyLedgers.get(p.id)?.summary.partyCreditCreated || 0)}`} />
-                    <SummaryCard label="Credit Applied" value={`?${formatNumber(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)}`} />
-                    <SummaryCard label="Current Payable" value={`?${formatNumber(partyLedgers.get(p.id)?.summary.currentPayable || partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)}`} />
+                    <SummaryCard label="Credit Created" value={formatCurrency(partyLedgers.get(p.id)?.summary.creditCreated || partyLedgers.get(p.id)?.summary.partyCreditCreated || 0)} />
+                    <SummaryCard label="Credit Applied" value={formatCurrency(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)} />
+                    <SummaryCard label="Current Payable" value={formatCurrency(partyLedgers.get(p.id)?.summary.currentPayable || partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)} />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <SummaryCard label="Current Credit" value={`?${formatNumber((partyLedgers.get(p.id)?.summary.currentCredit || partyLedgers.get(p.id)?.summary.ourCredit || 0))}`} />
-                    <SummaryCard label="Net Payable" value={`?${formatNumber(partyLedgers.get(p.id)?.summary.netPayable || 0)}`} />
+                    <SummaryCard label="Current Credit" value={formatCurrency((partyLedgers.get(p.id)?.summary.currentCredit || partyLedgers.get(p.id)?.summary.ourCredit || 0))} />
+                    <SummaryCard label="Net Payable" value={formatCurrency(partyLedgers.get(p.id)?.summary.netPayable || 0)} />
                   </div>
                   <div className="mt-2">
                     <Button size="sm" variant="outline" onClick={() => setExpandedPartyId((prev) => prev === p.id ? null : p.id)}>{expandedPartyId === p.id ? 'Hide Ledger' : 'View Ledger'}</Button>
@@ -3024,11 +3028,11 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
               </div>
             )}
             <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-8">
-              <SummaryCard label="Total Purchase Amount" value={`?${formatNumber(filteredPurchaseDiagnosticSummary.totalPurchaseAmount)}`} />
-              <SummaryCard label="Total Paid" value={`?${formatNumber(filteredPurchaseDiagnosticSummary.totalPaid)}`} />
-              <SummaryCard label="Total Remaining" value={`?${formatNumber(filteredPurchaseDiagnosticSummary.totalRemaining)}`} />
-              <SummaryCard label="Total Credit Applied" value={`?${formatNumber(filteredPurchaseDiagnosticSummary.totalCreditApplied)}`} />
-              <SummaryCard label="Total Credit Created" value={`?${formatNumber(filteredPurchaseDiagnosticSummary.totalCreditCreated)}`} />
+              <SummaryCard label="Total Purchase Amount" value={formatCurrency(filteredPurchaseDiagnosticSummary.totalPurchaseAmount)} />
+              <SummaryCard label="Total Paid" value={formatCurrency(filteredPurchaseDiagnosticSummary.totalPaid)} />
+              <SummaryCard label="Total Remaining" value={formatCurrency(filteredPurchaseDiagnosticSummary.totalRemaining)} />
+              <SummaryCard label="Total Credit Applied" value={formatCurrency(filteredPurchaseDiagnosticSummary.totalCreditApplied)} />
+              <SummaryCard label="Total Credit Created" value={formatCurrency(filteredPurchaseDiagnosticSummary.totalCreditCreated)} />
               <SummaryCard label="Broken Purchase Links" value={`${filteredPurchaseDiagnosticSummary.linkReviewCount}`} />
               <SummaryCard label="Number of Orders" value={`${filteredPurchaseDiagnosticSummary.orderCount}`} />
               <SummaryCard label="Number of Lines" value={`${filteredPurchaseDiagnosticSummary.lineCount}`} />
@@ -3134,17 +3138,17 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                       <td className="p-2 text-right">{formatNumber(row.quantity, 0)}</td>
                       <td className="p-2 text-right">{row.qtyPerCtn ? formatNumber(row.qtyPerCtn, 0) : 'â€”'}</td>
                       <td className="p-2 text-right">{row.totalCtn ? formatNumber(row.totalCtn, 0) : 'â€”'}</td>
-                      <td className="p-2 text-right">?{formatNumber(row.unitCost)}</td>
-                      <td className="p-2 text-right">?{formatNumber(row.lineTotal)}</td>
-                      <td className="p-2 text-right">?{formatNumber(row.orderTotal)}</td>
-                      <td className="p-2 text-right">?{formatNumber(row.orderPaid)}</td>
-                      <td className="p-2 text-right">?{formatNumber(row.orderRemaining)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.unitCost)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.lineTotal)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.orderTotal)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.orderPaid)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.orderRemaining)}</td>
                       <td className="p-2">
                         <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.paymentStatus === 'paid' ? 'bg-emerald-100 text-emerald-700' : row.paymentStatus === 'partial' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{row.paymentStatus}</div>
                         <div className="mt-1 text-[10px] text-muted-foreground">{row.paymentMethodLabel || 'â€”'}</div>
                       </td>
-                      <td className="p-2 text-right">?{formatNumber(row.creditApplied)}</td>
-                      <td className="p-2 text-right">?{formatNumber(row.creditCreated)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.creditApplied)}</td>
+                      <td className="p-2 text-right">{formatCurrency(row.creditCreated)}</td>
                       <td className="p-2 font-mono text-[10px]">{row.orderPartyId || 'â€”'}</td>
                       <td className="p-2 font-mono text-[10px]">{row.productId || 'â€”'}</td>
                       <td className="p-2">
@@ -3264,9 +3268,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                         <SummaryCard label="Status" value={order.status.replace('_', ' ')} />
                         <SummaryCard label="Qty" value={formatNumber(totalQty, 0)} />
                         <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
-                        <SummaryCard label="Total" value={`?${formatNumber(totalAmount)}`} />
-                        <SummaryCard label="Payments" value={`?${formatNumber(order.totalPaid || 0)}`} />
-                        <SummaryCard label="Due" value={`?${formatNumber(order.remainingAmount ?? (order.totalAmount - (order.totalPaid || 0)))}`} />
+                        <SummaryCard label="Total" value={formatCurrency(totalAmount)} />
+                        <SummaryCard label="Payments" value={formatCurrency(order.totalPaid || 0)} />
+                        <SummaryCard label="Due" value={formatCurrency(order.remainingAmount ?? (order.totalAmount - (order.totalPaid || 0)))} />
                       </div>
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" onClick={() => editOrder(order)} disabled={order.status === 'received'}>
@@ -3303,7 +3307,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
               <SummaryCard label="Total Missing" value={`${repairDryRunResult.missingCount}`} />
               <SummaryCard label="Safe Patches" value={`${repairDryRunResult.safeCount}`} />
               <SummaryCard label="Unsafe Patches" value={`${repairDryRunResult.unsafeCount}`} />
-              <SummaryCard label="Total Amount" value={`?${formatNumber(repairDryRunResult.totalAmountRepresented)}`} />
+              <SummaryCard label="Total Amount" value={formatCurrency(repairDryRunResult.totalAmountRepresented)} />
               <SummaryCard label="Products Affected" value={`${repairDryRunResult.productsAffected}`} />
               <SummaryCard label="Generated" value={new Date(repairDryRunResult.generatedAt).toLocaleString()} />
             </div>
@@ -3390,8 +3394,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                         </td>
                         <td className="p-2">{patch.date ? new Date(patch.date).toLocaleString() : 'â€”'}</td>
                         <td className="p-2 text-right">{formatNumber(patch.quantity, 0)}</td>
-                        <td className="p-2 text-right">?{formatNumber(patch.unitPrice)}</td>
-                        <td className="p-2 text-right">?{formatNumber(patch.totalAmount)}</td>
+                        <td className="p-2 text-right">{formatCurrency(patch.unitPrice)}</td>
+                        <td className="p-2 text-right">{formatCurrency(patch.totalAmount)}</td>
                         <td className="p-2 text-right">{patch.beforeHistoryCount} â†’ {patch.afterHistoryCount}</td>
                         <td className="p-2">{patch.orderSource}</td>
                         <td className="p-2">{patch.createdByOrSource}</td>
@@ -3431,7 +3435,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                           <div>{patch.partyName}</div>
                           <div className="font-mono text-[10px] text-muted-foreground">{patch.partyId || 'â€”'}</div>
                         </td>
-                        <td className="p-2 text-right">?{formatNumber(patch.totalAmount)}</td>
+                        <td className="p-2 text-right">{formatCurrency(patch.totalAmount)}</td>
                         <td className="p-2">{patch.orderSource}</td>
                         <td className="p-2">{patch.reasons.join(', ')}</td>
                       </tr>
@@ -3531,10 +3535,10 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                           <div className="text-[10px] text-muted-foreground">{candidate.variant || 'No Variant'} / {candidate.color || 'No Color'}</div>
                         </td>
                         <td className="p-2 text-right">{formatNumber(candidate.quantity, 0)}</td>
-                        <td className="p-2 text-right">?{formatNumber(candidate.unitPrice)}</td>
-                        <td className="p-2 text-right">?{formatNumber(candidate.total)}</td>
-                        <td className="p-2 text-right">?{formatNumber(candidate.paid)}</td>
-                        <td className="p-2 text-right">?{formatNumber(candidate.remaining)}</td>
+                        <td className="p-2 text-right">{formatCurrency(candidate.unitPrice)}</td>
+                        <td className="p-2 text-right">{formatCurrency(candidate.total)}</td>
+                        <td className="p-2 text-right">{formatCurrency(candidate.paid)}</td>
+                        <td className="p-2 text-right">{formatCurrency(candidate.remaining)}</td>
                         <td className="p-2">{candidate.status || 'â€”'}</td>
                         <td className="p-2">
                           <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.productExists ? 'Product found' : 'Product missing'}</div>
@@ -3574,7 +3578,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
               <div className="grid gap-2 sm:grid-cols-2">
                 <SummaryCard label="Product ID" value={purchaseViewProduct.id} />
                 <SummaryCard label="Current Stock" value={formatNumber(Math.max(0, Number(purchaseViewProduct.stock || 0)), 0)} />
-                <SummaryCard label="Buy Price" value={`?${formatNumber(Math.max(0, Number(purchaseViewProduct.buyPrice || 0)))}`} />
+                <SummaryCard label="Buy Price" value={formatCurrency(Math.max(0, Number(purchaseViewProduct.buyPrice || 0)))} />
                 <SummaryCard label="Purchase History Rows" value={`${purchaseViewProductHistoryRows.length}`} />
               </div>
               <div className="space-y-2">
@@ -3694,8 +3698,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                     </div>
                     <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
                       <div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Stock</div><div className="font-semibold text-slate-900">{product.stock}</div></div>
-                      <div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Buy</div><div className="font-semibold text-slate-900">?{product.buyPrice}</div></div>
-                      <div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Sell</div><div className="font-semibold text-slate-900">?{product.sellPrice}</div></div>
+                      <div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Buy</div><div className="font-semibold text-slate-900">{formatCurrency(product.buyPrice)}</div></div>
+                      <div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Sell</div><div className="font-semibold text-slate-900">{formatCurrency(product.sellPrice)}</div></div>
                     </div>
                   </div>
                 </button>
@@ -3824,7 +3828,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                       }}
                       placeholder="0"
                     />
-                    <p className="text-[11px] text-emerald-700 mt-1">Party Credit Available ?{formatNumber(selectedPartyCreditAvailable)}</p>
+                    <p className="text-[11px] text-emerald-700 mt-1">Party Credit Available {formatCurrency(selectedPartyCreditAvailable)}</p>
                   </div>
                   <div className="md:col-span-2"><Label>Notes</Label><Input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes" /></div>
                 </div>
@@ -3833,20 +3837,20 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                 <div className="mb-3 text-sm font-semibold text-slate-900">Entered Totals</div>
                 <div className="grid grid-cols-2 gap-3">
                   <SummaryCard label="Total Qty" value={formatNumber(draftTotals.totalQty, 0)} />
-                  <SummaryCard label="Total Amount" value={`?${formatNumber(draftTotals.totalAmount)}`} />
+                  <SummaryCard label="Total Amount" value={formatCurrency(draftTotals.totalAmount)} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
                   <SummaryCard label="Party" value={parties.find(p => p.id === partyId)?.name || 'Not selected'} />
-                  <SummaryCard label="GST Amount" value={`?${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
-                  <SummaryCard label="Grand Total" value={`?${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
-                  <SummaryCard label="Initial Due" value={`?${formatNumber(Math.max(0, (draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)) - (initialPaidAmount === '' ? 0 : Number(initialPaidAmount) || 0)))}`} />
+                  <SummaryCard label="GST Amount" value={formatCurrency((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)} />
+                  <SummaryCard label="Grand Total" value={formatCurrency(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))} />
+                  <SummaryCard label="Initial Due" value={formatCurrency(Math.max(0, (draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)) - (initialPaidAmount === '' ? 0 : Number(initialPaidAmount) || 0)))} />
                 </div>
                 <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
                   <div className="text-xs font-semibold text-emerald-800">Supplier Party Credit Summary</div>
                   <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-emerald-900">
-                    <div>Party Credit Available: ?{formatNumber(selectedPartyCreditAvailable)}</div>
-                    <div>Credit Applied to This Purchase: ?{formatNumber(partyCreditAppliedPreview)}</div>
-                    <div>Remaining Credit After Purchase: ?{formatNumber(remainingCreditAfterPurchasePreview)}</div>
-                    <div>Payable After Credit: ?{formatNumber(payableAfterCreditPreview)}</div>
+                    <div>Party Credit Available: {formatCurrency(selectedPartyCreditAvailable)}</div>
+                    <div>Credit Applied to This Purchase: {formatCurrency(partyCreditAppliedPreview)}</div>
+                    <div>Remaining Credit After Purchase: {formatCurrency(remainingCreditAfterPurchasePreview)}</div>
+                    <div>Payable After Credit: {formatCurrency(payableAfterCreditPreview)}</div>
                   </div>
                 </div>
               </div>
@@ -3870,8 +3874,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                       </div>
                       <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
                         <SummaryCard label="Qty" value={formatNumber(qty, 0)} />
-                        <SummaryCard label="Unit Cost" value={`?${formatNumber(unitCost)}`} />
-                        <SummaryCard label="Line Total" value={`?${formatNumber(total)}`} />
+                        <SummaryCard label="Unit Cost" value={formatCurrency(unitCost)} />
+                        <SummaryCard label="Line Total" value={formatCurrency(total)} />
                       </div>
                     </div>
                     <div className="grid gap-4 md:grid-cols-2">
@@ -3906,8 +3910,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                           <td className="px-4 py-3 font-medium text-slate-900">{sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductDraft.name}</td>
                           <td className="px-4 py-3">{line.variant || 'Default'} / {line.color || 'Default'}</td>
                           <td className="px-4 py-3">{formatNumber(toNum(line.quantity), 0)}</td>
-                          <td className="px-4 py-3">?{formatNumber(toNum(line.unitCost))}</td>
-                          <td className="px-4 py-3 font-semibold text-slate-900">?{formatNumber(toNum(line.quantity) * toNum(line.unitCost))}</td>
+                          <td className="px-4 py-3">{formatCurrency(toNum(line.unitCost))}</td>
+                          <td className="px-4 py-3 font-semibold text-slate-900">{formatCurrency(toNum(line.quantity) * toNum(line.unitCost))}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -3925,9 +3929,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <SummaryCard label="Total Qty" value={formatNumber(draftTotals.totalQty, 0)} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
-                  <SummaryCard label="Total Amount" value={`?${formatNumber(draftTotals.totalAmount)}`} />
-                  <SummaryCard label="GST Amount" value={`?${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
-                  <SummaryCard label="Grand Total" value={`?${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
+                  <SummaryCard label="Total Amount" value={formatCurrency(draftTotals.totalAmount)} />
+                  <SummaryCard label="GST Amount" value={formatCurrency((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)} />
+                  <SummaryCard label="Grand Total" value={formatCurrency(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))} />
                   <SummaryCard label="Date" value={todayLabel()} />
                 </div>
                 <div className="mt-4 grid gap-2">
@@ -4026,12 +4030,12 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                     {receivePricePreviewRows.map(row => (
                       <tr key={row.key} className="border-t">
                         <td className="p-2 align-top"><div className="font-medium">{row.productName}</div><div className="text-[11px] text-slate-500">{row.variantLabel}</div></td>
-                        <td className="p-2 text-right">?{formatNumber(row.currentBuyPrice)}</td>
-                        <td className="p-2 text-right">?{formatNumber(row.incomingUnitCost)}</td>
-                        <td className="p-2 text-right">?{formatNumber(row.avg1)}</td>
-                        <td className="p-2 text-right">?{formatNumber(row.avg2)}</td>
-                        <td className="p-2 text-right">?{formatNumber(row.noChange)}</td>
-                        <td className="p-2 text-right">?{formatNumber(row.latest)}</td>
+                        <td className="p-2 text-right">{formatCurrency(row.currentBuyPrice)}</td>
+                        <td className="p-2 text-right">{formatCurrency(row.incomingUnitCost)}</td>
+                        <td className="p-2 text-right">{formatCurrency(row.avg1)}</td>
+                        <td className="p-2 text-right">{formatCurrency(row.avg2)}</td>
+                        <td className="p-2 text-right">{formatCurrency(row.noChange)}</td>
+                        <td className="p-2 text-right">{formatCurrency(row.latest)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -4052,9 +4056,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
         <div className="space-y-3">
           <div className="text-sm">Party: <span className="font-semibold">{paymentTargetParty?.name || 'â€”'}</span></div>
           <div className="grid grid-cols-3 gap-2">
-            <SummaryCard label="Payable" value={`?${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0)))}`} />
-            <SummaryCard label="Current Credit" value={`?${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
-            <SummaryCard label="Net Payable" value={`?${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0) - Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
+            <SummaryCard label="Payable" value={formatCurrency(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0)))} />
+            <SummaryCard label="Current Credit" value={formatCurrency(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))} />
+            <SummaryCard label="Net Payable" value={formatCurrency(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0) - Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))} />
           </div>
           <div><Label>Amount</Label><Input type="number" value={partialPaymentAmount} onChange={e => setPartialPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))} /></div>
           <div><Label>Method</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={partialPaymentMethod} onChange={e => setPartialPaymentMethod(e.target.value as 'cash' | 'online')}><option value="cash">Cash</option><option value="online">Online</option></select></div>
@@ -4068,7 +4072,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       <Modal open={showPaymentPopup} onClose={() => setShowPaymentPopup(false)} title="Pay Supplier Due">
         <div className="space-y-3">
           <div className="text-sm text-slate-700">Order: <span className="font-semibold">{paymentTargetOrder?.id}</span></div>
-          <div className={`text-sm ${getPaymentStatusColorClass('supplier due').replace('bg-orange-50 border-orange-200 ', '')}`}>Remaining: <span className="font-semibold">?{formatNumber(Math.max(0, Number(paymentTargetOrder?.remainingAmount ?? ((paymentTargetOrder?.totalAmount || 0) - (paymentTargetOrder?.totalPaid || 0)))) )}</span></div>
+          <div className={`text-sm ${getPaymentStatusColorClass('supplier due').replace('bg-orange-50 border-orange-200 ', '')}`}>Remaining: <span className="font-semibold">{formatCurrency(Math.max(0, Number(paymentTargetOrder?.remainingAmount ?? ((paymentTargetOrder?.totalAmount || 0) - (paymentTargetOrder?.totalPaid || 0)))) )}</span></div>
           <div><Label>Amount</Label><Input type="number" value={partialPaymentAmount} onChange={e => setPartialPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))} /></div>
           <div>
             <Label>Method</Label>
@@ -4107,21 +4111,21 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
             <div className="grid gap-3 md:grid-cols-3">
               <div className="rounded-xl border bg-slate-50 p-4 text-sm">
                 <div className="font-semibold text-slate-900">Before</div>
-                <div className="mt-1">Current Payable: ?{formatNumber(purchaseRepairPreview.before.currentPayable)}</div>
-                <div>Current Credit: ?{formatNumber(purchaseRepairPreview.before.currentCredit)}</div>
-                <div>Net Payable: ?{formatNumber(purchaseRepairPreview.before.netPayable)}</div>
+                <div className="mt-1">Current Payable: {formatCurrency(purchaseRepairPreview.before.currentPayable)}</div>
+                <div>Current Credit: {formatCurrency(purchaseRepairPreview.before.currentCredit)}</div>
+                <div>Net Payable: {formatCurrency(purchaseRepairPreview.before.netPayable)}</div>
               </div>
               <div className="rounded-xl border bg-slate-50 p-4 text-sm">
                 <div className="font-semibold text-slate-900">After</div>
-                <div className="mt-1">Current Payable: ?{formatNumber(purchaseRepairPreview.after.currentPayable)}</div>
-                <div>Current Credit: ?{formatNumber(purchaseRepairPreview.after.currentCredit)}</div>
-                <div>Net Payable: ?{formatNumber(purchaseRepairPreview.after.netPayable)}</div>
+                <div className="mt-1">Current Payable: {formatCurrency(purchaseRepairPreview.after.currentPayable)}</div>
+                <div>Current Credit: {formatCurrency(purchaseRepairPreview.after.currentCredit)}</div>
+                <div>Net Payable: {formatCurrency(purchaseRepairPreview.after.netPayable)}</div>
               </div>
               <div className="rounded-xl border bg-slate-50 p-4 text-sm">
                 <div className="font-semibold text-slate-900">Change</div>
-                <div className="mt-1">Current Payable: ?{formatNumber(purchaseRepairPreview.delta.currentPayable)}</div>
-                <div>Current Credit: ?{formatNumber(purchaseRepairPreview.delta.currentCredit)}</div>
-                <div>Net Payable: ?{formatNumber(purchaseRepairPreview.delta.netPayable)}</div>
+                <div className="mt-1">Current Payable: {formatCurrency(purchaseRepairPreview.delta.currentPayable)}</div>
+                <div>Current Credit: {formatCurrency(purchaseRepairPreview.delta.currentCredit)}</div>
+                <div>Net Payable: {formatCurrency(purchaseRepairPreview.delta.netPayable)}</div>
               </div>
             </div>
             {purchaseRepairError && <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{purchaseRepairError}</div>}
@@ -4135,6 +4139,5 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     </>
   );
 }
-
 
 

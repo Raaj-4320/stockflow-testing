@@ -18,7 +18,7 @@ import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
-import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
+import { DISPLAY_FALLBACK, formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, joinDisplayParts, sanitizeDisplayText } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { getCanonicalCustomerBalanceResult } from '../services/customerBalanceView';
 import { normalizeTransactionItems } from '../utils/transactionItems';

@@ -1,9 +1,9 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+﻿import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select, LightweightLoader } from '../components/ui';
 import { CashAdjustment, Customer, DeleteCompensationRecord, Expense, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
 import { allocateCustomerPaymentAgainstCompositeReceivable, applyPartyCreditToPurchaseOrder, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
-import { formatINRPrecise } from '../services/numberFormat';
+import { DISPLAY_FALLBACK, formatINRPrecise, formatOptionalText, joinDisplayParts, sanitizeDisplayText } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { buildPurchasePartyLedger } from '../services/purchaseLedger';
@@ -320,12 +320,12 @@ export default function Dashboard() {
           const debit = Math.max(0, Number(effect.receivableIncrease || 0));
           runningBalance += debit;
           totalCreditSales += debit;
-          rows.push({ id: effect.id, date: effect.date, type: 'Custom Order', ref: effect.orderId.slice(-6), description: `Custom Order — ${effect.productName}`, debit, credit: 0, balance: runningBalance, tone: 'due' });
+          rows.push({ id: effect.id, date: effect.date, type: 'Custom Order', ref: effect.orderId.slice(-6), description: `Custom Order â€” ${effect.productName}`, debit, credit: 0, balance: runningBalance, tone: 'due' });
         } else {
           const credit = Math.min(runningBalance, Math.max(0, Number(effect.receivableDecrease || 0)));
           runningBalance = Math.max(0, runningBalance - credit);
           totalPayments += Math.max(0, Number(effect.receivableDecrease || 0));
-          rows.push({ id: effect.id, date: effect.date, type: 'Order Payment', ref: (effect.paymentId || effect.orderId).slice(-6), description: `Custom Order Payment — ${effect.productName} — ${effect.paymentMethod}`, debit: 0, credit, balance: runningBalance, tone: effect.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
+          rows.push({ id: effect.id, date: effect.date, type: 'Order Payment', ref: (effect.paymentId || effect.orderId).slice(-6), description: `Custom Order Payment â€” ${effect.productName} â€” ${effect.paymentMethod}`, debit: 0, credit, balance: runningBalance, tone: effect.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
         }
         return;
       }
@@ -339,7 +339,7 @@ export default function Dashboard() {
         runningBalance += dueInc;
         totalCreditSales += dueInc;
         totalStoreCreditUsed += storeCreditUsed;
-        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Sale Invoice #${(tx as any).invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
+        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Sale Invoice #${(tx as any).invoiceNo || tx.id.slice(-6)} â€” ${getTransactionProductSummary(tx)} â€¢ Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` â€¢ SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
       } else if (txKind === 'payment') {
         const amount = Math.max(0, Number(tx.total || 0));
         const explicitApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || 0));
@@ -349,13 +349,13 @@ export default function Dashboard() {
         runningBalance = Math.max(0, runningBalance - dueReduced);
         totalPayments += amount;
         totalStoreCreditAdded += storeCreditAdded;
-        rows.push({ id: `payment-${tx.id}`, date: tx.date, type: 'Payment', ref: tx.id.slice(-6), description: `${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)} • Due reduced ${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` • SC added ${formatINRPrecise(storeCreditAdded)}` : ''}`, debit: 0, credit: dueReduced, balance: runningBalance, tone: tx.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
+        rows.push({ id: `payment-${tx.id}`, date: tx.date, type: 'Payment', ref: tx.id.slice(-6), description: `${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)} â€¢ Due reduced ${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` â€¢ SC added ${formatINRPrecise(storeCreditAdded)}` : ''}`, debit: 0, credit: dueReduced, balance: runningBalance, tone: tx.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
       } else {
         const alloc = getCanonicalReturnAllocation(tx, processed, runningBalance);
         const creditReduction = Math.max(0, alloc.dueReduction);
         runningBalance = Math.max(0, runningBalance - creditReduction);
         totalStoreCreditAdded += Math.max(0, alloc.storeCreditIncrease);
-        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Credit Note #${(tx as any).creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
+        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Credit Note #${(tx as any).creditNoteNo || tx.id.slice(-6)} â€” ${getTransactionProductSummary(tx)} â€¢ Due -${formatINRPrecise(creditReduction)} â€¢ SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
       }
       processed.push(tx);
     });
@@ -658,8 +658,8 @@ export default function Dashboard() {
           },
         },
         chain: {
-          payableChain: `Payable ₹${Number(row.payable || 0)} <- row.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay`,
-          partyCreditChain: `Party Credit ₹${Number(row.partyCredit || 0)} <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay`,
+          payableChain: `Payable â‚¹${Number(row.payable || 0)} <- row.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay`,
+          partyCreditChain: `Party Credit â‚¹${Number(row.partyCredit || 0)} <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay`,
         },
       };
       console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify(payload, null, 2));
@@ -1186,7 +1186,7 @@ export default function Dashboard() {
           </Card>
           <Card className="min-h-[92px]">
             <CardHeader className="pb-2"><CardTitle className={`text-xs ${getPaymentStatusColorClass('credit due')}`}>Total Payable</CardTitle></CardHeader>
-            <CardContent><div className="text-xl font-bold text-orange-700">{dashboardDetailsReady ? formatINRPrecise(totalPayable) : 'Preparing…'}</div></CardContent>
+            <CardContent><div className="text-xl font-bold text-orange-700">{dashboardDetailsReady ? formatINRPrecise(totalPayable) : 'Preparingâ€¦'}</div></CardContent>
           </Card>
         </div>
       </div>
@@ -1215,7 +1215,7 @@ export default function Dashboard() {
                 onChange={(e) => setCustomerDashboardSearch(e.target.value)}
               />
             </div>
-            {!dashboardDetailsReady && <LightweightLoader label="Preparing dashboard…" className="min-h-[120px]" />}
+            {!dashboardDetailsReady && <LightweightLoader label="Preparing dashboardâ€¦" className="min-h-[120px]" />}
             {dashboardDetailsReady && visibleCustomerDashboardRows.map((c) => (
               <div key={c.id} className="flex flex-col gap-2 rounded-lg border px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
@@ -1260,7 +1260,7 @@ export default function Dashboard() {
                 onChange={(e) => setSupplierDashboardSearch(e.target.value)}
               />
             </div>
-            {!dashboardDetailsReady && <LightweightLoader label="Preparing dashboard…" className="min-h-[120px]" />}
+            {!dashboardDetailsReady && <LightweightLoader label="Preparing dashboardâ€¦" className="min-h-[120px]" />}
             {dashboardDetailsReady && visibleSupplierDashboardRows.map((p) => (
               <div key={p.id} className="flex flex-col gap-2 rounded-lg border px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
@@ -1382,7 +1382,7 @@ export default function Dashboard() {
         )}
       </ActionModal>
 
-      <StatementModal open={!!selectedCustomer && !!customerStatement} title="Customer Statement" subtitle={selectedCustomer ? `${selectedCustomer.name} • ${selectedCustomer.phone || '-'}` : undefined} onClose={() => setStatementCustomerId(null)}>
+      <StatementModal open={!!selectedCustomer && !!customerStatement} title="Customer Statement" subtitle={selectedCustomer ? joinDisplayParts(selectedCustomer.name, formatOptionalText(selectedCustomer.phone)) : undefined} onClose={() => setStatementCustomerId(null)}>
         {selectedCustomer && customerStatement && (
           <div className="space-y-4">
             <div className="flex justify-end">
@@ -1409,7 +1409,7 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {customerStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'refund' ? 'bg-red-50 text-red-600' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}{row.id.startsWith('payment-') && <div className="mt-2 flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditCustomerPayment(row.id)}>Edit</Button><Button size="sm" variant="outline" onClick={() => handleDeleteCustomerPayment(row.id)}>Delete</Button></div>}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
+                  {customerStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'refund' ? 'bg-red-50 text-red-600' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{sanitizeDisplayText(row.type)}</span></td><td className="p-3 whitespace-nowrap">{formatOptionalText(row.ref)}</td><td className="p-3 whitespace-normal">{sanitizeDisplayText(row.description)}{row.id.startsWith('payment-') && <div className="mt-2 flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditCustomerPayment(row.id)}>Edit</Button><Button size="sm" variant="outline" onClick={() => handleDeleteCustomerPayment(row.id)}>Delete</Button></div>}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : DISPLAY_FALLBACK}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : DISPLAY_FALLBACK}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
                 </tbody>
               </table>
             </div>
@@ -1468,7 +1468,7 @@ export default function Dashboard() {
         confirmLabel="Apply Party Credit"
       />
 
-      <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? `${selectedParty.name} • ${selectedParty.phone || '-'}` : undefined} onClose={() => setStatementPartyId(null)}>
+      <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? joinDisplayParts(selectedParty.name, formatOptionalText(selectedParty.phone)) : undefined} onClose={() => setStatementPartyId(null)}>
         {selectedParty && partyStatement && (
           <div className="space-y-4">
             <div className="flex justify-end">
@@ -1517,7 +1517,7 @@ export default function Dashboard() {
                     <div className="font-medium text-slate-800">Issues ({supplierLedgerAnalysis.issues.length})</div>
                     {!supplierLedgerAnalysis.issues.length ? <div className="mt-1 text-slate-500">No reconciliation issues detected.</div> : (
                       <ul className="mt-1 max-h-36 space-y-1 overflow-auto pr-1">
-                        {supplierLedgerAnalysis.issues.slice(0, 8).map((issue, idx) => <li key={`${issue.type}-${issue.sourceId}-${idx}`} className="rounded border bg-white px-2 py-1"><span className={`font-semibold ${issue.severity === 'critical' ? 'text-red-700' : issue.severity === 'warning' ? 'text-amber-700' : 'text-slate-600'}`}>{issue.severity}</span> · {issue.message}<div className="text-[11px] text-slate-500">{issue.sourceCollection}/{issue.sourceId} · Suggested: {issue.suggestedFix} · Auto-fix: {issue.safeToAutoFix ? 'dry-run only' : 'unsafe'}</div></li>)}
+                        {supplierLedgerAnalysis.issues.slice(0, 8).map((issue, idx) => <li key={`${issue.type}-${issue.sourceId}-${idx}`} className="rounded border bg-white px-2 py-1"><span className={`font-semibold ${issue.severity === 'critical' ? 'text-red-700' : issue.severity === 'warning' ? 'text-amber-700' : 'text-slate-600'}`}>{issue.severity}</span> Â· {issue.message}<div className="text-[11px] text-slate-500">{issue.sourceCollection}/{issue.sourceId} Â· Suggested: {issue.suggestedFix} Â· Auto-fix: {issue.safeToAutoFix ? 'dry-run only' : 'unsafe'}</div></li>)}
                         {supplierLedgerAnalysis.issues.length > 8 && <li className="text-slate-500">{supplierLedgerAnalysis.issues.length - 8} more issue(s).</li>}
                       </ul>
                     )}
@@ -1548,7 +1548,7 @@ export default function Dashboard() {
                 <tbody>
                   {partyStatement.displayRows.map((row, idx) => {
                     const repairCandidate = getPartyCreditRepairCandidate(row);
-                    return <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="px-2 py-2 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="px-2 py-2"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span>{row.warnings?.length ? <div className="mt-1 text-[10px] font-medium text-amber-700">Review</div> : null}</td><td className="px-2 py-2 whitespace-nowrap">{row.ref}</td><td className="px-2 py-2 whitespace-normal"><div>{row.description}</div>{row.warnings?.length ? <ul className="mt-1 list-disc pl-4 text-[11px] text-amber-700">{row.warnings.map((warning, warningIdx) => <li key={`${warning.code}-${warningIdx}`}>{warning.message}</li>)}</ul> : null}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.purchaseAmount ? formatINRPrecise(row.purchaseAmount) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.paymentAmount ? formatINRPrecise(row.paymentAmount) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.creditApplied ? formatINRPrecise(row.creditApplied) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.creditCreated ? formatINRPrecise(row.creditCreated) : '—'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{formatINRPrecise(row.runningPayable || 0)}</td><td className="px-2 py-2 text-right whitespace-nowrap">{formatINRPrecise(row.runningCredit || 0)}</td><td className="px-2 py-2 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.netPayable ?? row.balance)}</td><td className="px-2 py-2 whitespace-nowrap">{row.type === 'Payment' ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row)}>Delete</Button></div> : repairCandidate ? <Button size="sm" variant="outline" onClick={() => setPendingPartyCreditRepairOrder(repairCandidate)}>Apply Party Credit</Button> : '—'}</td></tr>;
+                    return <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="px-2 py-2 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="px-2 py-2"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span>{row.warnings?.length ? <div className="mt-1 text-[10px] font-medium text-amber-700">Review</div> : null}</td><td className="px-2 py-2 whitespace-nowrap">{row.ref}</td><td className="px-2 py-2 whitespace-normal"><div>{row.description}</div>{row.warnings?.length ? <ul className="mt-1 list-disc pl-4 text-[11px] text-amber-700">{row.warnings.map((warning, warningIdx) => <li key={`${warning.code}-${warningIdx}`}>{warning.message}</li>)}</ul> : null}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.purchaseAmount ? formatINRPrecise(row.purchaseAmount) : 'â€”'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.paymentAmount ? formatINRPrecise(row.paymentAmount) : 'â€”'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.creditApplied ? formatINRPrecise(row.creditApplied) : 'â€”'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{row.creditCreated ? formatINRPrecise(row.creditCreated) : 'â€”'}</td><td className="px-2 py-2 text-right whitespace-nowrap">{formatINRPrecise(row.runningPayable || 0)}</td><td className="px-2 py-2 text-right whitespace-nowrap">{formatINRPrecise(row.runningCredit || 0)}</td><td className="px-2 py-2 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.netPayable ?? row.balance)}</td><td className="px-2 py-2 whitespace-nowrap">{row.type === 'Payment' ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row)}>Delete</Button></div> : repairCandidate ? <Button size="sm" variant="outline" onClick={() => setPendingPartyCreditRepairOrder(repairCandidate)}>Apply Party Credit</Button> : 'â€”'}</td></tr>;
                   })}
                 </tbody>
               </table>

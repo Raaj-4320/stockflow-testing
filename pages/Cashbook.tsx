@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects, createManualCashbookEntry, refreshDeletedTransactionsFromCloud } from '../services/storage';
 import { CashAdjustment, Expense, ManualCashbookEntry, PurchaseOrder, Transaction, UpfrontOrder } from '../types';
+import { formatCurrency } from '../services/numberFormat';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
 
@@ -40,7 +41,7 @@ type RegisterRow = {
   cashOut: number;
 };
 
-const fmt = (n: number) => `₹${(Number.isFinite(n) ? n : 0).toFixed(2)}`;
+const fmt = (n: number) => formatCurrency(n);
 const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
 const asPlainObject = (value: unknown): Record<string, unknown> => (value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 
