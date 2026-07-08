@@ -3,7 +3,7 @@ const getTelegramServerUrl = () => {
     telegramServerUrl: import.meta.env.VITE_TELEGRAM_SERVER_URL,
     hasTelegramServerUrl: Boolean(import.meta.env.VITE_TELEGRAM_SERVER_URL)
   });
-  const value = String((import.meta as any)Rs .envRs .VITE_TELEGRAM_SERVER_URL || '').trim().replace(/\/$/, '');
+  const value = String((import.meta as any)?.env?.VITE_TELEGRAM_SERVER_URL || '').trim().replace(/\/$/, '');
   if (!value) {
     throw new Error('Telegram server URL is not configured. Set VITE_TELEGRAM_SERVER_URL and try again.');
   }
@@ -11,24 +11,24 @@ const getTelegramServerUrl = () => {
 };
 
 const getTelegramHeaders = () => {
-  const apiKey = String((import.meta as any)Rs .envRs .VITE_TELEGRAM_API_KEY || '').trim();
+  const apiKey = String((import.meta as any)?.env?.VITE_TELEGRAM_API_KEY || '').trim();
   return {
     'Content-Type': 'application/json',
-  ...(apiKey Rs  { 'x-stockflow-telegram-key': apiKey } : {}),
+    ...(apiKey ? { 'x-stockflow-telegram-key': apiKey } : {}),
   };
 };
 
 const safeJson = async (response: Response) => {
   const text = await response.text();
   try {
-    return text Rs  JSON.parse(text) : {};
+    return text ? JSON.parse(text) : {};
   } catch {
     return {};
   }
 };
 
 export type TelegramProductPostPayload = {
-  channelIdRs : string;
+  channelId: string;
   product: {
     id: string;
     name: string;
@@ -38,7 +38,7 @@ export type TelegramProductPostPayload = {
     stock: number;
   };
   template: string;
-  notesRs : string;
+  notes: string;
 };
 
 export const createTelegramProductPost = async (payload: TelegramProductPostPayload) => {
@@ -50,7 +50,7 @@ export const createTelegramProductPost = async (payload: TelegramProductPostPayl
 
   const data = await safeJson(response);
   if (!response.ok) {
-    throw new Error(dataRs .message || dataRs .error || 'Telegram product post request failed.');
+    throw new Error(data?.message || data?.error || 'Telegram product post request failed.');
   }
   return data;
 };

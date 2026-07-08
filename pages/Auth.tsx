@@ -26,7 +26,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
   useEffect(() => {
     if (resendCooldown <= 0) return;
     const timer = window.setInterval(() => {
-      setResendCooldown((prev) => (prev > 0 Rs  prev - 1 : 0));
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
 
     return () => window.clearInterval(timer);
@@ -116,7 +116,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
           onLogin();
         } else {
           setError(result.message || "Invalid credentials");
-          if (result.requiresVerification || result.messageRs .toLowerCase().includes("not verified")) {
+          if (result.requiresVerification || result.message?.toLowerCase().includes("not verified")) {
             setShowResend(true);
           }
         }
@@ -136,10 +136,10 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
             <Package className="w-8 h-8 text-primary" />
           </div>
           <CardTitle className="text-2xl font-bold text-gray-900">
-            {isForgotPassword Rs  'Reset Password' : isRegister Rs  'Create Account' : 'Welcome Back'}
+            {isForgotPassword ? 'Reset Password' : isRegister ? 'Create Account' : 'Welcome Back'}
           </CardTitle>
           <p className="text-sm text-muted-foreground">
-            {isForgotPassword Rs  'Enter your email to receive a reset link' : isRegister Rs  'Setup your store admin profile' : 'Login to manage your inventory'}
+            {isForgotPassword ? 'Enter your email to receive a reset link' : isRegister ? 'Setup your store admin profile' : 'Login to manage your inventory'}
           </p>
         </CardHeader>
         <CardContent>
@@ -159,12 +159,12 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                 onClick={handleResendVerification}
                 disabled={isResending || resendCooldown > 0}
               >
-                {isResending Rs  (
+                {isResending ? (
                   <Loader2 className="w-3 h-3 mr-2 animate-spin" />
                 ) : (
                   <RefreshCw className="w-3 h-3 mr-2" />
                 )}
-                Resend Verification Email{resendCooldown > 0 Rs  ` (${resendCooldown}s)` : ""}
+                Resend Verification Email{resendCooldown > 0 ? ` (${resendCooldown}s)` : ""}
               </Button>
             )}
 
@@ -214,14 +214,14 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                             className="text-xs text-primary hover:underline font-medium"
                             disabled={isLoading}
                         >
-                            Forgot PasswordRs 
+                            Forgot Password?
                         </button>
                     )}
                 </div>
                 <div className="relative">
                   <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                   <Input 
-                    type={showPassword Rs  "text" : "password"} 
+                    type={showPassword ? "text" : "password"} 
                     className="pl-9 pr-10" 
                     placeholder="Enter password" 
                     value={password} 
@@ -234,7 +234,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                     className="absolute right-3 top-2.5 text-muted-foreground hover:text-primary focus:outline-none"
                     disabled={isLoading}
                   >
-                    {showPassword Rs  <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                   </button>
                 </div>
               </div>
@@ -246,7 +246,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                   <div className="relative">
                     <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                     <Input 
-                      type={showConfirmPassword Rs  "text" : "password"} 
+                      type={showConfirmPassword ? "text" : "password"} 
                       className="pl-9 pr-10" 
                       placeholder="Re-enter password" 
                       value={confirmPassword} 
@@ -259,21 +259,21 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                       className="absolute right-3 top-2.5 text-muted-foreground hover:text-primary focus:outline-none"
                       disabled={isLoading}
                     >
-                      {showConfirmPassword Rs  <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </button>
                   </div>
                </div>
             )}
 
             <Button type="submit" className="w-full h-11 text-base shadow-sm" disabled={isLoading}>
-              {isLoading Rs  (
+              {isLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                   Processing...
                 </>
               ) : (
                 <>
-                  {isForgotPassword Rs  'Send Reset Link' : isRegister Rs  'Register Store' : 'Login'} <ArrowRight className="w-4 h-4 ml-2" />
+                  {isForgotPassword ? 'Send Reset Link' : isRegister ? 'Register Store' : 'Login'} <ArrowRight className="w-4 h-4 ml-2" />
                 </>
               )}
             </Button>
@@ -295,7 +295,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
                 }}
                 disabled={isLoading}
               >
-                {isForgotPassword Rs  'Back to Login' : isRegister Rs  'Already have an accountRs  Login' : "Don't have an accountRs  Register"}
+                {isForgotPassword ? 'Back to Login' : isRegister ? 'Already have an account? Login' : "Don't have an account? Register"}
               </button>
             </div>
           </form>
@@ -304,4 +304,3 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
     </div>
   );
 }
-

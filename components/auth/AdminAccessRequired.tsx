@@ -7,7 +7,7 @@ export function AdminAccessRequired({ label = 'This page' }: { label?: string })
       <Card className="max-w-md text-center">
         <CardHeader><CardTitle>Admin access required</CardTitle></CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">{label} is hidden for operator accounts.</p>
+          <p className="text-sm text-muted-foreground">{label} is hidden for staff access.</p>
         </CardContent>
       </Card>
     </div>

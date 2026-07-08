@@ -31,98 +31,112 @@ const operatorPermissions: Record<SimplePermission, boolean> = {
   cashWithdrawal: false,
 };
 
-export const getCurrentRole = (): AppRole => {
-  if (typeof window === 'undefined') return 'admin';
+const canUseStorage = () => typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+
+const readStorage = (key: string): string => {
+  if (!canUseStorage()) return '';
   try {
-    const role = window.localStorage.getItem(ROLE_KEY);
-    return role === 'operator' || role === 'admin' ? role : 'admin';
+    return window.localStorage.getItem(key) || '';
   } catch {
-    return 'admin';
+    return '';
   }
 };
 
-export const getCurrentOperatorId = (): string => {
-  if (typeof window === 'undefined') return '';
-  try { return window.localStorage.getItem(OPERATOR_ID_KEY) || ''; } catch { return ''; }
+const writeStorage = (key: string, value: string) => {
+  if (!canUseStorage()) return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // ignore storage failures and keep the session in memory-only callers
+  }
 };
 
-export const getCurrentOperatorName = (): string => {
-  if (typeof window === 'undefined') return '';
-  try { return window.localStorage.getItem(OPERATOR_NAME_KEY) || ''; } catch { return ''; }
+const removeStorage = (key: string) => {
+  if (!canUseStorage()) return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // ignore storage failures
+  }
 };
 
-export const isAccessUnlocked = (): boolean => {
-  if (typeof window === 'undefined') return false;
-  try { return window.localStorage.getItem(ACCESS_UNLOCKED_KEY) === 'true'; } catch { return false; }
+const emitAccessUpdate = () => {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event('local-storage-update'));
 };
+
+export const getCurrentRole = (): AppRole => readStorage(ROLE_KEY) === 'operator' ? 'operator' : 'admin';
+
+export const getCurrentOperatorId = (): string => readStorage(OPERATOR_ID_KEY);
+
+export const getCurrentOperatorName = (): string => readStorage(OPERATOR_NAME_KEY);
+
+export const isAccessUnlocked = (): boolean => readStorage(ACCESS_UNLOCKED_KEY) === '1';
 
 export const isAccessUnlockedForUser = (email?: string | null): boolean => {
-  if (typeof window === 'undefined' || !email || !isAccessUnlocked()) return false;
-  try {
-    return window.localStorage.getItem(ACCESS_USER_EMAIL_KEY) === email;
-  } catch {
-    return false;
-  }
+  if (!isAccessUnlocked()) return false;
+  const currentEmail = String(email || '').trim().toLowerCase();
+  const sessionEmail = readStorage(ACCESS_USER_EMAIL_KEY).trim().toLowerCase();
+  return !!currentEmail && currentEmail === sessionEmail;
 };
 
 export const isAdmin = (): boolean => getCurrentRole() === 'admin';
 
 export const setCurrentRole = (role: AppRole): AppRole => {
-  if (typeof window === 'undefined') return role;
-  window.localStorage.setItem(ROLE_KEY, role);
-  window.dispatchEvent(new CustomEvent('stockflow-role-change', { detail: { role } }));
-  console.info(`[StockFlow] Role switched to ${role}. Reloading to apply UI permissions.`);
-  window.setTimeout(() => window.location.reload(), 50);
+  writeStorage(ROLE_KEY, role);
+  emitAccessUpdate();
   return role;
 };
 
+export const getCurrentAccessSession = (): { role: AppRole; operatorId?: string; operatorName?: string; userEmail?: string | null } | null => {
+  if (!isAccessUnlocked()) return null;
+  const role = getCurrentRole();
+  const operatorId = getCurrentOperatorId();
+  const operatorName = getCurrentOperatorName();
+  const userEmail = readStorage(ACCESS_USER_EMAIL_KEY) || null;
+  return {
+    role,
+    operatorId: operatorId || undefined,
+    operatorName: operatorName || undefined,
+    userEmail,
+  };
+};
+
 export const setAccessSession = (session: { role: AppRole; operatorId?: string; operatorName?: string; userEmail?: string | null }) => {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(ROLE_KEY, session.role);
-  window.localStorage.setItem(ACCESS_UNLOCKED_KEY, 'true');
-  if (session.userEmail) window.localStorage.setItem(ACCESS_USER_EMAIL_KEY, session.userEmail);
-  else window.localStorage.removeItem(ACCESS_USER_EMAIL_KEY);
-  if (session.role === 'operator') {
-    window.localStorage.setItem(OPERATOR_ID_KEY, session.operatorId || '');
-    window.localStorage.setItem(OPERATOR_NAME_KEY, session.operatorName || '');
-  } else {
-    window.localStorage.removeItem(OPERATOR_ID_KEY);
-    window.localStorage.removeItem(OPERATOR_NAME_KEY);
-  }
-  window.dispatchEvent(new CustomEvent('stockflow-role-change', { detail: { role: session.role } }));
+  writeStorage(ACCESS_UNLOCKED_KEY, '1');
+  writeStorage(ROLE_KEY, session.role);
+  writeStorage(OPERATOR_ID_KEY, session.operatorId || '');
+  writeStorage(OPERATOR_NAME_KEY, session.operatorName || '');
+  writeStorage(ACCESS_USER_EMAIL_KEY, String(session.userEmail || '').trim().toLowerCase());
+  emitAccessUpdate();
 };
 
 export const lockAccess = () => {
-  if (typeof window === 'undefined') return;
-  window.localStorage.removeItem(ACCESS_UNLOCKED_KEY);
-  window.localStorage.removeItem(ACCESS_USER_EMAIL_KEY);
-  window.dispatchEvent(new CustomEvent('stockflow-access-lock'));
+  removeStorage(ACCESS_UNLOCKED_KEY);
+  removeStorage(ROLE_KEY);
+  removeStorage(OPERATOR_ID_KEY);
+  removeStorage(OPERATOR_NAME_KEY);
+  emitAccessUpdate();
 };
 
 export const clearAccessSession = () => {
-  if (typeof window === 'undefined') return;
-  window.localStorage.removeItem(ROLE_KEY);
-  window.localStorage.removeItem(OPERATOR_ID_KEY);
-  window.localStorage.removeItem(OPERATOR_NAME_KEY);
-  window.localStorage.removeItem(ACCESS_UNLOCKED_KEY);
-  window.localStorage.removeItem(ACCESS_USER_EMAIL_KEY);
-  window.dispatchEvent(new CustomEvent('stockflow-role-change', { detail: { role: 'admin' } }));
+  lockAccess();
+  removeStorage(ACCESS_USER_EMAIL_KEY);
+  emitAccessUpdate();
 };
 
 export const installRoleTestHelpers = () => {
   if (typeof window === 'undefined') return;
-  const target = window as typeof window & { setRole?: (role: AppRole) => AppRole; getRole?: () => AppRole };
-  target.setRole = (role: AppRole) => {
-    if (role !== 'admin' && role !== 'operator') {
-      throw new Error('Role must be "admin" or "operator".');
-    }
-    return setCurrentRole(role);
+  (window as any).__stockflowAccess = {
+    getCurrentRole,
+    setCurrentRole,
+    setAccessSession,
+    clearAccessSession,
+    can,
   };
-  target.getRole = () => getCurrentRole();
 };
 
 export const can = (permission: SimplePermission): boolean => {
-  const role = getCurrentRole();
-  if (role === 'admin') return true;
+  if (isAdmin()) return true;
   return operatorPermissions[permission] === true;
 };

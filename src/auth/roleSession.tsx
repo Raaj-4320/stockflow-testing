@@ -1,16 +1,10 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { loadData } from '../../services/storage';
-import { ENABLE_ROLE_ACCESS, RoleSession } from './permissions';
-import { getCurrentRole } from './simplePermissions';
+import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { RoleSession } from './permissions';
+import { clearAccessSession, getCurrentAccessSession, setAccessSession } from './simplePermissions';
 import AdminPasswordConfirmModal from '../../components/auth/AdminPasswordConfirmModal';
+import { loadData } from '../../services/storage';
 import { verifyAdminAccessPassword } from './accessPassword';
-
-const STORAGE_KEY = 'stockflow_role_session_v1';
-
-type OverrideRequest = {
-  message: string;
-  resolve: (ok: boolean) => void;
-};
+import { getCurrentUser } from '../../services/auth';
 
 type RoleSessionContextValue = {
   session: RoleSession | null;
@@ -21,49 +15,57 @@ type RoleSessionContextValue = {
 
 const RoleSessionContext = createContext<RoleSessionContextValue | null>(null);
 
-const defaultAdminSession = (): RoleSession => ({ role: 'admin', loginAt: new Date().toISOString() });
-
-const readSession = (): RoleSession | null => {
-  if (!ENABLE_ROLE_ACCESS) return defaultAdminSession();
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as RoleSession;
-    if (parsed?.role === 'admin' || parsed?.role === 'operator') return parsed;
-  } catch {}
-  return null;
-};
-
-const writeSession = (session: RoleSession | null) => {
-  if (!ENABLE_ROLE_ACCESS) return;
-  try {
-    if (!session) window.localStorage.removeItem(STORAGE_KEY);
-    else window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
-  } catch {}
+const getStoredRoleSession = (): RoleSession | null => {
+  const session = getCurrentAccessSession();
+  if (!session) return null;
+  return {
+    role: session.role,
+    operatorId: session.operatorId,
+    operatorName: session.operatorName,
+    loginAt: new Date().toISOString(),
+  };
 };
 
 export const RoleSessionProvider = ({ children }: { children: React.ReactNode }) => {
-  const [session, setSessionState] = useState<RoleSession | null>(() => (!ENABLE_ROLE_ACCESS ? defaultAdminSession() : typeof window === 'undefined' ? null : readSession()));
-  const [overrideRequest, setOverrideRequest] = useState<OverrideRequest | null>(null);
+  const [session, setSessionState] = useState<RoleSession | null>(getStoredRoleSession());
+  const pendingResolveRef = useRef<((approved: boolean) => void) | null>(null);
+  const [overrideMessage, setOverrideMessage] = useState<string | null>(null);
 
   const setSession = useCallback((next: RoleSession | null) => {
+    if (!next) {
+      clearAccessSession();
+      setSessionState(null);
+      return;
+    }
+    setAccessSession({
+      role: next.role,
+      operatorId: next.operatorId,
+      operatorName: next.operatorName,
+      userEmail: getCurrentUser(),
+    });
     setSessionState(next);
-    writeSession(next);
   }, []);
 
   const logoutRole = useCallback(() => setSession(null), [setSession]);
 
+  const closeOverride = useCallback((approved: boolean) => {
+    const resolve = pendingResolveRef.current;
+    pendingResolveRef.current = null;
+    setOverrideMessage(null);
+    resolve?.(approved);
+  }, []);
+
   const requestAdminOverride = useCallback((message = 'Admin password required.') => {
-    if (getCurrentRole() === 'admin') return Promise.resolve(true);
-    if (ENABLE_ROLE_ACCESS && session?.role === 'admin') return Promise.resolve(true);
-    return new Promise<boolean>((resolve) => setOverrideRequest({ message, resolve }));
+    if (session?.role === 'admin') return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      pendingResolveRef.current = resolve;
+      setOverrideMessage(message);
+    });
   }, [session]);
 
-  useEffect(() => {
-    if (!ENABLE_ROLE_ACCESS) return;
-    const onStorage = () => setSessionState(readSession());
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+  const verifyOverridePassword = useCallback(async (password: string) => {
+    const data = loadData();
+    return verifyAdminAccessPassword(password, data.profile?.adminPin);
   }, []);
 
   const value = useMemo(() => ({ session, setSession, logoutRole, requestAdminOverride }), [session, setSession, logoutRole, requestAdminOverride]);
@@ -71,13 +73,12 @@ export const RoleSessionProvider = ({ children }: { children: React.ReactNode })
   return (
     <RoleSessionContext.Provider value={value}>
       {children}
-      {overrideRequest && (
+      {overrideMessage && (
         <AdminPasswordConfirmModal
-          title="Admin password required"
-          message={overrideRequest.message}
-          verifyPassword={(password) => verifyAdminAccessPassword(password, loadData().profile?.adminPin)}
-          onCancel={() => { overrideRequest.resolve(false); setOverrideRequest(null); }}
-          onConfirm={() => { overrideRequest.resolve(true); setOverrideRequest(null); }}
+          message={overrideMessage}
+          verifyPassword={verifyOverridePassword}
+          onConfirm={() => closeOverride(true)}
+          onCancel={() => closeOverride(false)}
         />
       )}
     </RoleSessionContext.Provider>

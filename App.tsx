@@ -7,19 +7,18 @@ import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, Lock, Wrench } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, Wrench } from 'lucide-react';
 import { Button, LightweightLoader } from './components/ui';
-import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
-import { can as simpleCan, clearAccessSession, getCurrentOperatorId, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, isAccessUnlockedForUser, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
-import { RestrictedPage } from './components/auth/PermissionGuard';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import Settings from './pages/Settings';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import Terms from './pages/Terms';
 import DataDeletion from './pages/DataDeletion';
+import RoleLoginModal from './components/auth/RoleLoginModal';
+import { RestrictedPage } from './components/auth/PermissionGuard';
+import { can, getCurrentAccessSession, isAccessUnlockedForUser, type SimplePermission } from './src/auth/simplePermissions';
+import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
 const WhatsAppLogs = lazy(() => import('./pages/WhatsAppLogs'));
-
-const DEV_ACCESS_BYPASS_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEV_ACCESS_BYPASS === 'true';
 
 const Admin = lazy(() => import('./pages/Admin'));
 const Sales = lazy(() => import('./pages/Sales'));
@@ -74,19 +73,36 @@ const MenuController = ({ setIsMenuOpen }: { setIsMenuOpen: (open: boolean) => v
     return null;
 };
 
-const ProtectedRoute = ({ isVerified, permission, children }: { isVerified: boolean; permission?: SimplePermission; children: React.ReactElement }) => {
+const ProtectedRoute = ({ isVerified, children }: { isVerified: boolean; children: React.ReactElement }) => {
   if (!isVerified) {
     return <Navigate to="/verify-email" replace />;
   }
-  if (permission && !simpleCan(permission)) {
-    return <RestrictedPage permission={permission} label={permission.replace(/([A-Z])/g, ' $1').toLowerCase()} />;
-  }
+  return children;
+};
 
+const AccessControlledRoute = ({
+  isVerified,
+  children,
+  permission,
+  label,
+}: {
+  isVerified: boolean;
+  children: React.ReactElement;
+  permission?: SimplePermission;
+  label?: string;
+}) => {
+  if (!isVerified) {
+    return <Navigate to="/verify-email" replace />;
+  }
+  if (permission && !can(permission)) {
+    return <RestrictedPage permission={permission} label={label || 'This page'} />;
+  }
   return children;
 };
 
 function AppContent() {
   const location = useLocation();
+  const { session: roleSession, setSession: setRoleSession } = useRoleSession();
   const currentBuildId = typeof APP_BUILD_ID === 'string' ? APP_BUILD_ID : 'unknown';
   const { updateAvailable, latestVersionData, dismissUpdate } = useVersionCheck(currentBuildId);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -97,17 +113,8 @@ function AppContent() {
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
   const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
   const [salesCartCount, setSalesCartCount] = useState(0);
-  const { logoutRole, setSession } = useRoleSession();
-  const [accessUnlocked, setAccessUnlocked] = useState(() => isAccessUnlocked());
   const [optimisticActivePath, setOptimisticActivePath] = useState<string | null>(null);
   const clearOptimisticActivePath = React.useCallback(() => setOptimisticActivePath(null), []);
-
-  useEffect(() => {
-    installRoleTestHelpers();
-    if (DEV_ACCESS_BYPASS_ENABLED) {
-      console.warn('DEV ACCESS BYPASS ENABLED');
-    }
-  }, []);
 
   useEffect(() => {
     if (!auth) {
@@ -119,35 +126,17 @@ function AppContent() {
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!user) {
-        clearAccessSession();
-        setAccessUnlocked(false);
         setCurrentEmail(null);
         setAuthStatus('unauthenticated');
         return;
       }
 
       const authedEmail = user.email || null;
-      if (isAccessUnlocked() && !isAccessUnlockedForUser(authedEmail)) {
-        clearAccessSession();
-        setAccessUnlocked(false);
-      }
       setCurrentEmail(authedEmail);
       setAuthStatus(user.emailVerified ? 'authenticated' : 'unverified');
     });
 
     return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    const refreshAccess = () => setAccessUnlocked(isAccessUnlocked());
-    window.addEventListener('storage', refreshAccess);
-    window.addEventListener('stockflow-access-lock', refreshAccess);
-    window.addEventListener('stockflow-role-change', refreshAccess);
-    return () => {
-      window.removeEventListener('storage', refreshAccess);
-      window.removeEventListener('stockflow-access-lock', refreshAccess);
-      window.removeEventListener('stockflow-role-change', refreshAccess);
-    };
   }, []);
 
 
@@ -229,47 +218,41 @@ function AppContent() {
       setAuthStatus('authenticated');
   };
 
-  const routePermissions: Record<string, SimplePermission> = {
-    '/product-analytics': 'analytics',
-    '/pdf': 'reports',
-    '/settings': 'settings',
-    '/repair-center': 'settings',
-    '/whatsapp-logs': 'settings',
-    '/cashbook': 'cashbook',
-    '/freight-booking': 'freight',
-    '/purchase-panel': 'purchases',
+  const canShowRepairCenter = repairCenterEnabled;
+  const isAccessUnlockedForCurrentUser = authStatus === 'authenticated' && isAccessUnlockedForUser(currentEmail);
+  const accessRoleLabel = roleSession?.role === 'operator' ? (roleSession.operatorName || 'Staff') : 'Admin';
+
+  const handleFullLogout = () => {
+    logout();
   };
-  const showNav = (path: string) => !routePermissions[path] || simpleCan(routePermissions[path]);
-  const canShowRepairCenter = showNav('/repair-center') && getCurrentRole() === 'admin' && repairCenterEnabled;
-  const handleAccessLogin = (session: Parameters<typeof setSession>[0]) => {
-    if (!session) return;
-    setSession(session);
-    setAccessSession({ role: session.role, operatorId: session.operatorId, operatorName: session.operatorName, userEmail: currentEmail });
-    setAccessUnlocked(true);
+
+  const handleAccessLogin = (session: { role: 'admin' | 'operator'; operatorId?: string; operatorName?: string; loginAt: string }) => {
+    setRoleSession(session);
   };
 
   useEffect(() => {
-    if (authStatus !== 'authenticated' || accessUnlocked) return;
-    const role = getCurrentRole();
-    handleAccessLogin({
-      role,
-      operatorId: role === 'operator' ? getCurrentOperatorId() || undefined : undefined,
-      operatorName: role === 'operator' ? getCurrentOperatorName() || undefined : undefined,
-      loginAt: new Date().toISOString(),
-    });
-  }, [accessUnlocked, authStatus, currentEmail]);
+    if (authStatus !== 'authenticated') {
+      if (roleSession) setRoleSession(null);
+      return;
+    }
 
-  const handleLockAccess = () => {
-    logoutRole();
-    lockAccess();
-    setAccessUnlocked(false);
-  };
+    if (!isAccessUnlockedForCurrentUser) {
+      if (roleSession) setRoleSession(null);
+      return;
+    }
 
-  const handleFullLogout = () => {
-    logoutRole();
-    clearAccessSession();
-    logout();
-  };
+    if (!roleSession) {
+      const storedSession = getCurrentAccessSession();
+      if (storedSession) {
+        setRoleSession({
+          role: storedSession.role,
+          operatorId: storedSession.operatorId,
+          operatorName: storedSession.operatorName,
+          loginAt: new Date().toISOString(),
+        });
+      }
+    }
+  }, [authStatus, currentEmail, isAccessUnlockedForCurrentUser, roleSession, setRoleSession]);
 
   const publicPaths = new Set(['/privacy-policy', '/terms', '/data-deletion']);
   const isPublicRoute = publicPaths.has(location.pathname);
@@ -307,7 +290,6 @@ function AppContent() {
       return <VerificationRequired email={currentEmail || undefined} />;
   }
 
-  const operatorName = getCurrentOperatorName();
   return (
       <>
       <RouteActivationObserver onRouteCommitted={clearOptimisticActivePath} />
@@ -377,25 +359,23 @@ function AppContent() {
             <NavItem to="/" icon={Package} label="Inventory" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
             <NavItem to="/sales" icon={ShoppingCart} label="POS System" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
             <NavItem to="/transactions" icon={ArrowRightLeft} label="Transactions" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
-            {showNav('/product-analytics') && <NavItem to="/product-analytics" icon={BarChart3} label="Product Analytics" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {can('analytics') && <NavItem to="/product-analytics" icon={BarChart3} label="Product Analytics" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             <NavItem to="/customers" icon={Users} label="Customers" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
-            {showNav('/pdf') && <NavItem to="/pdf" icon={FileText} label="Reports" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {can('reports') && <NavItem to="/pdf" icon={FileText} label="Reports" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             {canShowRepairCenter && <NavItem to="/repair-center" icon={Wrench} label="Repair Center" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
-            {showNav('/settings') && <NavItem to="/settings" icon={SettingsIcon} label="Settings" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
-            {showNav('/cashbook') && <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {can('settings') && <NavItem to="/settings" icon={SettingsIcon} label="Settings" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {can('cashbook') && <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
             <NavItem to="/finance" icon={Landmark} label="Finance" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
-            {showNav('/freight-booking') && <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
-            {showNav('/purchase-panel') && <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {can('freight') && <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {can('purchases') && <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
 
           </nav>
           
           <div className="p-4 border-t flex flex-col gap-2">
              <div className="text-xs text-muted-foreground mt-2">
-                <p>User: {currentEmail}</p><p>Access: {getCurrentRole() === 'operator' ? `Operator${operatorName ? ` (${operatorName})` : ''}` : 'Admin'}</p>
+                <p>User: {currentEmail}</p>
+                <p>Access: {accessRoleLabel}</p>
              </div>
-             <Button variant="ghost" size="sm" onClick={handleLockAccess} className="w-full text-muted-foreground hover:text-foreground justify-start px-2">
-                <Lock className="w-4 h-4 mr-2" /> Lock Access
-             </Button>
              <Button variant="ghost" size="sm" onClick={handleFullLogout} className="w-full text-muted-foreground hover:text-destructive justify-start px-2">
                 <LogOut className="w-4 h-4 mr-2" /> Logout
              </Button>
@@ -439,7 +419,7 @@ function AppContent() {
                               </div>
                               <span className="font-medium text-sm">Transactions</span>
                          </Link>
-                         {showNav('/pdf') && <Link to="/pdf" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         {can('reports') && <Link to="/pdf" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-purple-100 text-purple-600 rounded-full mb-2">
                                   <FileText className="w-6 h-6" />
                               </div>
@@ -451,31 +431,31 @@ function AppContent() {
                               </div>
                               <span className="font-medium text-sm">Dashboard</span>
                          </Link>
-                         {showNav('/product-analytics') && <Link to="/product-analytics" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         {can('analytics') && <Link to="/product-analytics" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-cyan-100 text-cyan-600 rounded-full mb-2">
                                   <BarChart3 className="w-6 h-6" />
                               </div>
                               <span className="font-medium text-sm">Product Analytics</span>
                          </Link>}
-                         {showNav('/finance') && <Link to="/finance" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         <Link to="/finance" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-emerald-100 text-emerald-600 rounded-full mb-2">
                                   <Landmark className="w-6 h-6" />
                               </div>
                               <span className="font-medium text-sm">Finance</span>
-                         </Link>}
-                         {showNav('/freight-booking') && <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         </Link>
+                         {can('freight') && <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-orange-100 text-orange-600 rounded-full mb-2">
                                   <Truck className="w-6 h-6" />
                               </div>
                               <span className="font-medium text-sm">Freight Booking</span>
                          </Link>}
-                         {showNav('/purchase-panel') && <Link to="/purchase-panel" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         {can('purchases') && <Link to="/purchase-panel" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-cyan-100 text-cyan-600 rounded-full mb-2">
                                   <ClipboardList className="w-6 h-6" />
                               </div>
                               <span className="font-medium text-sm">Purchase Parties</span>
                          </Link>}
-                         {showNav('/settings') && <Link to="/settings" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                         {can('settings') && <Link to="/settings" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-gray-100 text-gray-600 rounded-full mb-2">
                                   <SettingsIcon className="w-6 h-6" />
                               </div>
@@ -506,18 +486,18 @@ function AppContent() {
                 <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
                 <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />
                 <Route path="/dashboard" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Dashboard /></ProtectedRoute>} />
-                <Route path="/product-analytics" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="analytics"><ProductAnalytics /></ProtectedRoute>} />
+                <Route path="/product-analytics" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="analytics" label="Product Analytics"><ProductAnalytics /></AccessControlledRoute>} />
                 <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
-                <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="reports"><Reports /></ProtectedRoute>} />
-                <Route path="/repair-center" element={canShowRepairCenter ? <ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><RepairCenter /></ProtectedRoute> : <Navigate to="/settings" replace />} />
-                <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><Settings /></ProtectedRoute>} />
-                <Route path="/whatsapp-logs" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><WhatsAppLogs /></ProtectedRoute>} />
-                <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="cashbook"><Cashbook /></ProtectedRoute>} />
+                <Route path="/pdf" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="reports" label="Reports"><Reports /></AccessControlledRoute>} />
+                <Route path="/repair-center" element={canShowRepairCenter ? <ProtectedRoute isVerified={authStatus === "authenticated"}><RepairCenter /></ProtectedRoute> : <Navigate to={can('settings') ? "/settings" : "/"} replace />} />
+                <Route path="/settings" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="settings" label="Settings"><Settings /></AccessControlledRoute>} />
+                <Route path="/whatsapp-logs" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="settings" label="WhatsApp Logs"><WhatsAppLogs /></AccessControlledRoute>} />
+                <Route path="/cashbook" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="cashbook" label="Cashbook"><Cashbook /></AccessControlledRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
-                <Route path="/expense-repair" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><ExpenseRepair /></ProtectedRoute>} />
-                <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="freight"><FreightBooking /></ProtectedRoute>} />
-                <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="purchases"><PurchasePanel /></ProtectedRoute>} />
-                <Route path="/purchase-party-repair" element={<ProtectedRoute isVerified={authStatus === "authenticated"} permission="settings"><PurchasePartyRepair /></ProtectedRoute>} />
+                <Route path="/expense-repair" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="settings" label="Expense Repair"><ExpenseRepair /></AccessControlledRoute>} />
+                <Route path="/freight-booking" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="freight" label="Freight Booking"><FreightBooking /></AccessControlledRoute>} />
+                <Route path="/purchase-panel" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="purchases" label="Purchase Parties"><PurchasePanel /></AccessControlledRoute>} />
+                <Route path="/purchase-party-repair" element={<AccessControlledRoute isVerified={authStatus === "authenticated"} permission="purchases" label="Purchase Party Repair"><PurchasePartyRepair /></AccessControlledRoute>} />
                 
                 {/* Unprotected Route (POS) */}
                 <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />
@@ -529,6 +509,7 @@ function AppContent() {
           </div>
         </main>
       </div>
+      {authStatus === 'authenticated' && !roleSession && <RoleLoginModal onLogin={handleAccessLogin} />}
     </>
   );
 }

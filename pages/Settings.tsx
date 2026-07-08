@@ -10,7 +10,7 @@ import { appendWhatsAppLog, getWhatsAppLogStats } from '../services/whatsappLogs
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
 import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText, UserPlus, Edit } from 'lucide-react';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
-
+import { getEffectiveAdminPin } from '../src/auth/permissions';
 const isValidOperatorPin = (value: string) => /^\d{6,8}$/.test(value.trim());
 
 export default function Settings() {
@@ -62,7 +62,6 @@ export default function Settings() {
   const [editingOperatorId, setEditingOperatorId] = useState<string | null>(null);
   const [editingOperatorName, setEditingOperatorName] = useState('');
   const [editingOperatorPassword, setEditingOperatorPassword] = useState('');
-
   useEffect(() => {
     const refreshData = () => {
       const data = loadData();
@@ -123,31 +122,10 @@ export default function Settings() {
   };
 
 
-  const getEffectiveManagerPin = (adminPin?: string) => {
-    const saved = String(adminPin || '').trim();
-    return saved || '1234';
-  };
-
-  const handleChangePin = async () => {
-    const requiredCurrent = getEffectiveManagerPin(profile.adminPin);
-    if (currentPinInput.trim() !== requiredCurrent) return setPinMessage('Current PIN is incorrect.');
-    if (!/^\d{4,6}$/.test(newPinInput)) return setPinMessage('New PIN must be 4 to 6 digits.');
-    if (newPinInput !== confirmPinInput) return setPinMessage('New PIN and confirm PIN do not match.');
-    const next = { ...profile, adminPin: newPinInput };
-    try {
-      const savedProfile = await updateStoreProfile(next);
-      setProfile(savedProfile);
-      setCurrentPinInput('');
-      setNewPinInput('');
-      setConfirmPinInput('');
-      setPinMessage('PIN updated successfully.');
-    } catch (error) {
-      setPinMessage(getFriendlyErrorMessage(error, 'settings.change_pin'));
-    }
-  };
+  
 
   const handleClearAdminPin = async () => {
-    const requiredCurrent = getEffectiveManagerPin(profile.adminPin);
+    const requiredCurrent = getEffectiveAdminPin(profile.adminPin);
     if (currentPinInput.trim() !== requiredCurrent) return setPinMessage('Current ERP admin access PIN is incorrect.');
     const next = { ...profile, adminPin: '' };
     try {
@@ -623,66 +601,8 @@ export default function Settings() {
               </p>
             )}
           </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> ERP Admin Access PIN</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className={`rounded-lg border px-3 py-2 text-sm ${String(profile.adminPin || '').trim() ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-blue-200 bg-blue-50 text-blue-900'}`}>
-              <div className="font-semibold">Status: {String(profile.adminPin || '').trim() ? 'Using ERP Admin PIN' : 'Using Firebase Password'}</div>
-              <div className="mt-0.5 text-xs">{String(profile.adminPin || '').trim() ? 'This PIN is separate from your Firebase login password.' : 'ERP access uses the Firebase account password.'}</div>
-            </div>
-            <p className="text-xs text-muted-foreground">This ERP admin access PIN is separate from the Firebase login password. If no ERP PIN is configured, admin access uses the current Firebase password.</p>
-            <p className="text-xs text-muted-foreground">Temporary legacy fallback PIN is <span className="font-semibold">1234</span> only when Firebase user info is unavailable and no ERP PIN is configured.</p>
-            <div className="space-y-1"><Label>Current ERP Admin Access PIN</Label><Input type="password" inputMode="numeric" value={currentPinInput} onChange={e => setCurrentPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
-            <div className="space-y-1"><Label>New ERP Admin Access PIN</Label><Input type="password" inputMode="numeric" value={newPinInput} onChange={e => setNewPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
-            <div className="space-y-1"><Label>Confirm New ERP Admin Access PIN</Label><Input type="password" inputMode="numeric" value={confirmPinInput} onChange={e => setConfirmPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
-            {pinMessage && <p className="text-xs text-muted-foreground">{pinMessage}</p>}
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" onClick={handleChangePin}>Change ERP Admin Access PIN</Button>
-              <Button type="button" variant="outline" onClick={handleClearAdminPin}>Clear ERP Admin Access PIN</Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader><CardTitle className="flex items-center gap-2"><UserPlus className="w-5 h-5 text-primary" /> Operator Users</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <p className="text-xs text-muted-foreground">Operators can use POS, customer payments, expenses, and shifts with restricted access to purchases, cashbook, profit, and settings. Operator PINs must be numeric only and 6–8 digits.</p>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
-              <Input value={operatorNameInput} onChange={(e) => setOperatorNameInput(e.target.value)} placeholder="Operator name" />
-              <Input type="password" inputMode="numeric" maxLength={8} value={operatorPasswordInput} onChange={(e) => setOperatorPasswordInput(e.target.value.replace(/[^\d]/g, '').slice(0, 8))} placeholder="6–8 digit PIN" />
-              <Button type="button" onClick={handleAddOperator}>Add</Button>
-            </div>
-            {operatorMessage && <p className="text-xs text-muted-foreground">{operatorMessage}</p>}
-            <div className="space-y-2">
-              {operatorUsers.length === 0 ? <p className="text-xs text-muted-foreground">No operators added yet.</p> : operatorUsers.map((operator) => (
-                <div key={operator.id} className="rounded-lg border p-3 text-sm space-y-2">
-                  {editingOperatorId === operator.id ? (
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto_auto]">
-                      <Input value={editingOperatorName} onChange={(e) => setEditingOperatorName(e.target.value)} placeholder="Operator name" />
-                      <Input type="password" inputMode="numeric" maxLength={8} value={editingOperatorPassword} onChange={(e) => setEditingOperatorPassword(e.target.value.replace(/[^\d]/g, '').slice(0, 8))} placeholder="6–8 digit PIN" />
-                      <Button type="button" size="sm" onClick={() => handleSaveOperator(operator.id)}>Save</Button>
-                      <Button type="button" size="sm" variant="outline" onClick={() => setEditingOperatorId(null)}>Cancel</Button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between gap-2">
-                      <div><div className="font-semibold">{operator.name}</div><div className="text-xs text-muted-foreground">Created: {operator.createdAt ? new Date(operator.createdAt).toLocaleString() : '—'} · Updated: {operator.updatedAt ? new Date(operator.updatedAt).toLocaleString() : '—'}</div></div>
-                      <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${operator.active === false ? 'bg-slate-100 text-slate-600' : 'bg-emerald-100 text-emerald-700'}`}>{operator.active === false ? 'Inactive' : 'Active'}</span>
-                    </div>
-                  )}
-                  {editingOperatorId !== operator.id && <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" variant="outline" onClick={() => handleStartEditOperator(operator)}><Edit className="w-3 h-3 mr-1" /> Edit</Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => handleResetOperatorPassword(operator.id)}>Password</Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => handleToggleOperator(operator.id)}>{operator.active === false ? 'Enable' : 'Disable'}</Button>
-                    <Button type="button" size="sm" variant="outline" className="text-red-600" onClick={() => handleRemoveOperator(operator.id)}><Trash2 className="w-3 h-3 mr-1" /> Remove</Button>
-                  </div>}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="md:col-span-2">
+        </Card>
+        <Card className='md:col-span-2'>
            <CardHeader><CardTitle className="flex items-center gap-2"><Landmark className="w-5 h-5 text-primary" /> Bank Details</CardTitle></CardHeader>
            <CardContent className="grid md:grid-cols-2 gap-4">
               <div className="space-y-2"><Label>Bank Name</Label><Input value={profile.bankName || ''} onChange={e => setProfile({...profile, bankName: e.target.value})} /></div>
@@ -719,3 +639,4 @@ export default function Settings() {
     </div>
   );
 }
+

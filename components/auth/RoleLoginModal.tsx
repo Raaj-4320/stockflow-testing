@@ -8,7 +8,7 @@ import { getAdminAccessDiagnostics, isAccessDebugEnabled, verifyAdminAccessPassw
 const nowSession = (session: Omit<RoleSession, 'loginAt'>): RoleSession => ({ ...session, loginAt: new Date().toISOString() });
 const FAILED_ATTEMPT_COOLDOWN_MS = 1500;
 const DEV_ACCESS_BYPASS_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEV_ACCESS_BYPASS === 'true';
-const SIMPLE_ACCESS_MODE_ENABLED = String((import.meta as any).env?.VITE_SIMPLE_ACCESS_MODE || '').toLowerCase() === 'true';
+const SIMPLE_ACCESS_MODE_ENABLED = String((import.meta as any).env?.VITE_SIMPLE_ACCESS_MODE || 'true').toLowerCase() !== 'false';
 
 export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSession) => void }) {
   const [password, setPassword] = useState('');
@@ -39,6 +39,17 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
   const enterOperator = (operator: OperatorUser) => {
     setError(null);
     onLogin(nowSession({ role: 'operator', operatorId: operator.id, operatorName: operator.name }));
+  };
+
+  const enterStaff = () => {
+    const freshData = loadData();
+    const firstActiveOperator = ((freshData.operatorUsers || []) as OperatorUser[]).find((operator) => operator.active !== false);
+    if (firstActiveOperator) {
+      enterOperator(firstActiveOperator);
+      return;
+    }
+    setError(null);
+    onLogin(nowSession({ role: 'operator', operatorId: 'staff-session', operatorName: 'Staff' }));
   };
 
   const submit = async () => {
@@ -161,24 +172,10 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
           {SIMPLE_ACCESS_MODE_ENABLED ? (
             <>
               <Button className="w-full" onClick={enterAdmin}>Enter as Admin</Button>
-              {activeOperators.length > 0 && (
-                <div className="space-y-2 rounded-lg border bg-slate-50 p-3">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-600">Operators</div>
-                  <div className="space-y-2">
-                    {activeOperators.map((operator) => (
-                      <Button
-                        key={operator.id}
-                        type="button"
-                        variant="outline"
-                        className="w-full justify-start"
-                        onClick={() => enterOperator(operator)}
-                      >
-                        Enter as {operator.name}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <Button type="button" variant="outline" className="w-full" onClick={enterStaff}>Enter as Staff</Button>
+              <p className="text-xs text-muted-foreground">
+                Staff mode hides admin-only areas like reports, settings, cashbook, purchases, freight, and restricted edit/delete actions.
+              </p>
               {error && <p className="text-xs text-red-600">{error}</p>}
             </>
           ) : (
