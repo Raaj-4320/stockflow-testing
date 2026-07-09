@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
+import { auth } from '../../services/firebase';
 import { loadData, updateStoreProfile } from '../../services/storage';
+import { sendStaffOtp, verifyStaffOtp } from '../../services/staffOtp';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../ui';
 import { OperatorUser, RoleSession } from '../../src/auth/permissions';
 import { clearAccessSession } from '../../src/auth/simplePermissions';
@@ -20,6 +22,11 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
   const [recoveryNewPin, setRecoveryNewPin] = useState('');
   const [recoveryConfirmPin, setRecoveryConfirmPin] = useState('');
   const [isRecovering, setIsRecovering] = useState(false);
+  const [otpFlow, setOtpFlow] = useState<'choice' | 'verify'>('choice');
+  const [pendingOtpRole, setPendingOtpRole] = useState<'admin' | 'staff' | null>(null);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpNotice, setOtpNotice] = useState<string | null>(null);
+  const [isOtpSubmitting, setIsOtpSubmitting] = useState(false);
 
   const currentData = loadData();
   const activeOperators = useMemo(
@@ -41,7 +48,7 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
     onLogin(nowSession({ role: 'operator', operatorId: operator.id, operatorName: operator.name }));
   };
 
-  const enterStaff = () => {
+  const finishStaffEntry = () => {
     const freshData = loadData();
     const firstActiveOperator = ((freshData.operatorUsers || []) as OperatorUser[]).find((operator) => operator.active !== false);
     if (firstActiveOperator) {
@@ -50,6 +57,90 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
     }
     setError(null);
     onLogin(nowSession({ role: 'operator', operatorId: 'staff-session', operatorName: 'Staff' }));
+  };
+
+  const beginOtpFlow = async (role: 'admin' | 'staff') => {
+    if (isOtpSubmitting) return;
+    setPendingOtpRole(role);
+    setIsOtpSubmitting(true);
+    setError(null);
+    setOtpNotice(null);
+    try {
+      const email = String(auth?.currentUser?.email || '').trim();
+      if (!email) {
+        throw new Error('Unable to send verification code.');
+      }
+      await sendStaffOtp(email);
+      setOtpCode('');
+      setPendingOtpRole(role);
+      setOtpFlow('verify');
+      setOtpNotice(`Verification code sent to ${email}.`);
+    } catch (setupError) {
+      setPendingOtpRole(null);
+      setError(setupError instanceof Error ? setupError.message : 'Unable to send verification code.');
+    } finally {
+      setIsOtpSubmitting(false);
+    }
+  };
+
+  const finishOtpEntry = () => {
+    if (pendingOtpRole === 'admin') {
+      enterAdmin();
+      return;
+    }
+    finishStaffEntry();
+  };
+
+  const backToRoleChoice = () => {
+    setOtpFlow('choice');
+    setPendingOtpRole(null);
+    setOtpCode('');
+    setOtpNotice(null);
+    setError(null);
+  };
+
+  const submitOtp = async () => {
+    if (isOtpSubmitting) return;
+    const email = String(auth?.currentUser?.email || '').trim();
+    if (!email) {
+      setError('Unable to send verification code.');
+      return;
+    }
+    const code = otpCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setError('Code must be 6 digits.');
+      return;
+    }
+    setIsOtpSubmitting(true);
+    setError(null);
+    try {
+      await verifyStaffOtp(email, code);
+      finishOtpEntry();
+    } catch (otpError) {
+      setError(otpError instanceof Error ? otpError.message : 'Invalid or expired OTP.');
+    } finally {
+      setIsOtpSubmitting(false);
+    }
+  };
+
+  const resendOtp = async () => {
+    if (isOtpSubmitting) return;
+    const email = String(auth?.currentUser?.email || '').trim();
+    if (!email) {
+      setError('Unable to send verification code.');
+      return;
+    }
+    setIsOtpSubmitting(true);
+    setError(null);
+    setOtpNotice(null);
+    try {
+      await sendStaffOtp(email);
+      setOtpNotice(`Verification code sent to ${email}.`);
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : 'Unable to send verification code.');
+    } finally {
+      setIsOtpSubmitting(false);
+    }
   };
 
   const submit = async () => {
@@ -171,11 +262,49 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
         <CardContent className="space-y-4">
           {SIMPLE_ACCESS_MODE_ENABLED ? (
             <>
-              <Button className="w-full" onClick={enterAdmin}>Enter as Admin</Button>
-              <Button type="button" variant="outline" className="w-full" onClick={enterStaff}>Enter as Staff</Button>
-              <p className="text-xs text-muted-foreground">
-                Staff mode hides admin-only areas like reports, settings, cashbook, purchases, freight, and restricted edit/delete actions.
-              </p>
+              {otpFlow === 'choice' && (
+                <>
+                  <Button className="w-full" onClick={() => void beginOtpFlow('admin')} disabled={isOtpSubmitting}>
+                    {isOtpSubmitting && pendingOtpRole === 'admin' ? 'Sending code...' : 'Enter as Admin'}
+                  </Button>
+                  <Button type="button" variant="outline" className="w-full" onClick={() => void beginOtpFlow('staff')} disabled={isOtpSubmitting}>
+                    {isOtpSubmitting && pendingOtpRole === 'staff' ? 'Sending code...' : 'Enter as Staff'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Staff mode hides admin-only areas like reports, settings, cashbook, purchases, freight, and restricted edit/delete actions.
+                  </p>
+                </>
+              )}
+              {otpFlow === 'verify' && (
+                <div className="space-y-4">
+                  <div className="space-y-1">
+                    <div className="text-sm font-semibold text-slate-900">{pendingOtpRole === 'admin' ? 'Verify Admin Email' : 'Verify Staff Email'}</div>
+                    <p className="text-xs text-muted-foreground">Enter the 6-digit code sent to your email.</p>
+                  </div>
+                  {otpNotice && <p className="text-xs text-emerald-700">{otpNotice}</p>}
+                  <div className="space-y-1">
+                    <Label>Email OTP</Label>
+                    <Input
+                      autoFocus
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={otpCode}
+                      onChange={(e) => { setOtpCode(e.target.value.replace(/[^\d]/g, '').slice(0, 6)); setError(null); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void submitOtp(); }}
+                      placeholder="123456"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="button" variant="outline" className="flex-1" onClick={backToRoleChoice} disabled={isOtpSubmitting}>Back</Button>
+                    <Button type="button" className="flex-1" onClick={() => void submitOtp()} disabled={isOtpSubmitting}>
+                      {isOtpSubmitting ? 'Verifying...' : 'Verify'}
+                    </Button>
+                  </div>
+                  <Button type="button" variant="ghost" className="w-full" onClick={() => void resendOtp()} disabled={isOtpSubmitting}>
+                    {isOtpSubmitting ? 'Sending code...' : 'Resend Code'}
+                  </Button>
+                </div>
+              )}
               {error && <p className="text-xs text-red-600">{error}</p>}
             </>
           ) : (

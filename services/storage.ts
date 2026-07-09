@@ -391,6 +391,7 @@ const getPartyCreditLedgerCollectionRef = (uid: string) => collection(db!, 'stor
 const getPurchaseReceiptPostingsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseReceiptPostings');
 const getExpensesCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'expenses');
 const getExpenseActivitiesCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'expenseActivities');
+const getFinanceStateDocumentRef = (uid: string) => doc(db!, 'stores', uid, 'appState', 'finance');
 
 const ROOT_STORE_BLOCKED_ARRAY_FIELDS = [
   'products',
@@ -2581,6 +2582,7 @@ let memoryState: AppState = { ...initialData };
 let hasInitialSynced = false;
 let hasLoggedInitKpiSnapshot = false;
 let unsubscribeSnapshot: any = null;
+let unsubscribeFinanceSnapshot: any = null;
 let unsubscribeProductsSnapshot: any = null;
 let unsubscribeCustomersSnapshot: any = null;
 let unsubscribeTransactionsSnapshot: any = null;
@@ -2590,12 +2592,42 @@ let unsubscribeSupplierPaymentsSnapshot: any = null;
 let unsubscribePartyCreditLedgerSnapshot: any = null;
 let unsubscribeExpensesSnapshot: any = null;
 let unsubscribeRepairHistoryEntriesSnapshot: any = null;
+let financeDocumentCache: Record<string, unknown> | null = null;
+
+const buildHydratedFinanceState = (
+  rootData: Partial<AppState> & Record<string, unknown>,
+  financeData: Record<string, unknown> | null
+): Record<string, unknown> => {
+  const preferFinanceField = (key: FinanceRootAllowedField) => (
+    !!financeData && Object.prototype.hasOwnProperty.call(financeData, key)
+      ? financeData[key]
+      : rootData[key]
+  );
+
+  const hydrated: Record<string, unknown> = {
+    expenseCategories: Array.isArray(preferFinanceField('expenseCategories')) ? preferFinanceField('expenseCategories') : ['General'],
+    cashSessions: Array.isArray(preferFinanceField('cashSessions')) ? preferFinanceField('cashSessions') : [],
+    cashAdjustments: Array.isArray(preferFinanceField('cashAdjustments')) ? preferFinanceField('cashAdjustments') : [],
+    manualCashbookEntries: Array.isArray(preferFinanceField('manualCashbookEntries')) ? preferFinanceField('manualCashbookEntries') : [],
+  };
+
+  const financeSettings = preferFinanceField('financeSettings');
+  if (isPlainSerializableObject(financeSettings)) {
+    hydrated.financeSettings = financeSettings;
+  }
+
+  return hydrated;
+};
 
 
 const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
   if (unsubscribeSnapshot) {
     unsubscribeSnapshot();
     unsubscribeSnapshot = null;
+  }
+  if (unsubscribeFinanceSnapshot) {
+    unsubscribeFinanceSnapshot();
+    unsubscribeFinanceSnapshot = null;
   }
   if (unsubscribeProductsSnapshot) {
     unsubscribeProductsSnapshot();
@@ -2662,6 +2694,7 @@ const resetCloudStateForUser = (uid: string | null, reason: string) => {
   subcollectionExpenseActivitiesCache = [];
   legacyRootRepairHistoryEntriesCache = [];
   subcollectionRepairHistoryEntriesCache = [];
+  financeDocumentCache = null;
   activeSyncUid = uid;
   syncGeneration += 1;
   syncInitInFlight = false;
@@ -2879,6 +2912,19 @@ const syncFromCloud = async (): Promise<void> => {
         }, (error) => {
             logStockFlowError('repairHistory.listener_error', error, { uid: user.uid });
         });
+        unsubscribeFinanceSnapshot = onSnapshot(getFinanceStateDocumentRef(user.uid), (financeSnap) => {
+            financeDocumentCache = financeSnap.exists()
+              ? (financeSnap.data() as Record<string, unknown>)
+              : null;
+            memoryState = {
+              ...memoryState,
+              ...buildHydratedFinanceState(memoryState as AppState & Record<string, unknown>, financeDocumentCache),
+            };
+            logLoadedState(memoryState);
+            emitLocalStorageUpdate();
+        }, (error) => {
+            logStockFlowError('financeState.listener_error', error, { uid: user.uid });
+        });
         // expenseActivities are non-critical and are fetched on Finance open or manual refresh.
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
             if (docSnap.exists()) {
@@ -2929,12 +2975,9 @@ const syncFromCloud = async (): Promise<void> => {
                     categories: cloudData.categories || [],
                     customers: hydratedCustomers,
                     upfrontOrders: cloudData.upfrontOrders || [],
-                    cashSessions: cloudData.cashSessions || [],
                     expenses: mergedExpenseState.expenses,
-                    expenseCategories: cloudData.expenseCategories || ['General'],
                     expenseActivities: mergedExpenseState.expenseActivities,
                     repairHistoryEntries: mergedRepairHistoryState.repairHistoryEntries,
-                    cashAdjustments: cloudData.cashAdjustments || [],
                     freightInquiries: cloudData.freightInquiries ?? fallbackFreightInquiries,
                     freightConfirmedOrders: cloudData.freightConfirmedOrders ?? fallbackFreightConfirmedOrders,
                     freightPurchases: cloudData.freightPurchases ?? fallbackFreightPurchases,
@@ -2946,7 +2989,8 @@ const syncFromCloud = async (): Promise<void> => {
                     partyCreditLedger: mergedPurchaseState.partyCreditLedger,
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
-                    profile: { ...defaultProfile, ...(cloudData.profile || {}) }
+                    profile: { ...defaultProfile, ...(cloudData.profile || {}) },
+                    ...buildHydratedFinanceState(cloudData as AppState & Record<string, unknown>, financeDocumentCache),
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {
                     memoryState.profile.defaultTaxRate = 0;
@@ -4010,7 +4054,7 @@ export const safeFinancePersistState = async (patch: FinancePersistPatch, option
     if (!hasCompletedInitialCloudLoad) throw new Error('Cloud state not hydrated. Blocking write to prevent bootstrap corruption.');
     if (!storeDocumentExists) throw new Error('Store document missing. Automatic store bootstrap is disabled for data safety.');
 
-    await setDoc(doc(db, 'stores', user.uid), payload, { merge: true });
+    await setDoc(getFinanceStateDocumentRef(user.uid), payload, { merge: true });
     memoryState = nextState;
     logLoadedState(memoryState);
     emitLocalStorageUpdate();

@@ -20,7 +20,6 @@
     "lucide-react": "^0.556.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
-    "react-qr-code": "^2.0.18",
     "react-router-dom": "^7.10.1",
     "tailwind-merge": "^3.4.0",
     "xlsx": "^0.18.5"
