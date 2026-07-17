@@ -138,6 +138,8 @@ export interface DocumentSeriesConfig {
 }
 
 export type TelegramPostMode = 'selected' | 'filtered' | 'out_of_stock';
+export type TelegramCollectionRepeatMode = 'once' | 'loop';
+export type TelegramCollectionFrequencyUnit = 'seconds' | 'minutes' | 'hours';
 
 export interface TelegramPostCollection {
   id: string;
@@ -148,6 +150,10 @@ export interface TelegramPostCollection {
   notes: string;
   postMode: TelegramPostMode;
   queuedProductIds: string[];
+  frequencyValue?: number;
+  frequencyUnit?: TelegramCollectionFrequencyUnit;
+  repeatMode?: TelegramCollectionRepeatMode;
+  maxFailuresBeforePause?: number;
   createdAt: string;
   updatedAt: string;
   lastPostedAt?: string;
@@ -167,6 +173,51 @@ export interface TelegramPostActivity {
   failureCount: number;
   postedAt: string;
   lastPostedProductName?: string;
+}
+
+export interface TelegramSchedulerProduct {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  salePrice: number;
+  imageUrl: string;
+  category: string;
+  stock: number;
+  barcode?: string;
+}
+
+export interface TelegramLiveCollection {
+  id: string;
+  collectionId?: string;
+  name: string;
+  channelId: string;
+  category: string;
+  status: string;
+  productsCount: number;
+  currentCursor: number;
+  sentCount: number;
+  failedCount: number;
+  lastPostedProduct?: string;
+  lastPostedAt?: string;
+  nextPostAt?: string;
+  frequencyValue: number;
+  frequencyUnit: TelegramCollectionFrequencyUnit | string;
+  repeatMode?: TelegramCollectionRepeatMode | string;
+  maxFailuresBeforePause?: number;
+}
+
+export interface TelegramCollectionActivityItem {
+  id: string;
+  collectionId?: string;
+  collectionName?: string;
+  status?: string;
+  productId?: string;
+  productName?: string;
+  error?: string;
+  postedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface StoreProfile {

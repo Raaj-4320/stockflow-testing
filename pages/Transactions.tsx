@@ -828,6 +828,13 @@ export default function Transactions() {
   };
 
   const removeEditingItem = (index: number) => {
+    if (!editingTx) return;
+    const nextCount = editingItems.filter((_, i) => i !== index).length;
+    if (nextCount === 0 && (editingTx.type === 'sale' || editingTx.type === 'return')) {
+      closeTransactionEditor();
+      void openDeleteModal(editingTx);
+      return;
+    }
     setEditingItems(prev => prev.filter((_, i) => i !== index));
   };
 
@@ -1581,7 +1588,7 @@ export default function Transactions() {
           </div>
         </div>
       )}
-      {isInitialLoading && <LightweightLoader label="Loading dataÃ¢â‚¬Â¦" />}
+      {isInitialLoading && <LightweightLoader label="Loading data..." />}
       {loadError && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</div>
       )}
@@ -2451,8 +2458,8 @@ export default function Transactions() {
                   </div>
                   <div className="rounded-lg border p-3 bg-muted/5 text-sm space-y-1">
                     <p className="font-semibold">Customer balance effect</p>
-                    <p>Due: {formatINRPrecise(deletePreview.customerBalanceBefore.due)} Ã¢â€ â€™ {formatINRPrecise(deletePreview.customerBalanceAfter.due)}</p>
-                    <p>Store credit: {formatINRPrecise(deletePreview.customerBalanceBefore.storeCredit)} Ã¢â€ â€™ {formatINRPrecise(deletePreview.customerBalanceAfter.storeCredit)}</p>
+                    <p>Due: {formatINRPrecise(deletePreview.customerBalanceBefore.due)} → {formatINRPrecise(deletePreview.customerBalanceAfter.due)}</p>
+                    <p>Store credit: {formatINRPrecise(deletePreview.customerBalanceBefore.storeCredit)} → {formatINRPrecise(deletePreview.customerBalanceAfter.storeCredit)}</p>
                     <p>Due reduced: {formatINRPrecise(deletePreview.customerDelta.dueReduced)}</p>
                     <p>Store credit increased: {formatINRPrecise(deletePreview.customerDelta.storeCreditIncreased)}</p>
                     <p className="font-medium">Payable after due absorption: {formatINRPrecise(deletePreview.derivedCompensation.payableAfterDueAbsorption)}</p>
@@ -2469,7 +2476,7 @@ export default function Transactions() {
                       <div className="space-y-1">
                         {deletePreview.inventoryEffect.restoredLines.map((line, idx) => (
                           <p key={`${line.productId}-${line.variant}-${line.color}-${idx}`}>
-                            {line.productName || line.productId} Ã¢â‚¬Â¢ {line.variant || NO_VARIANT} / {line.color || NO_COLOR} Ã¢â‚¬Â¢ Qty {line.qty}
+                            {line.productName || line.productId} • {line.variant || NO_VARIANT} / {line.color || NO_COLOR} • Qty {line.qty}
                           </p>
                         ))}
                       </div>
@@ -2533,9 +2540,9 @@ export default function Transactions() {
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <Card className="w-full max-w-5xl max-h-[90vh] overflow-hidden">
             <CardHeader className="border-b py-3 flex flex-row items-center justify-between gap-2">
-              <CardTitle>{isBatchEditing ? `Batch Edit ${batchEditTransactionIndex + 1}/${batchEditTransactionIds.length}` : `Edit #${editingTx.id.slice(-6)}`} Ã¢â‚¬Â¢ {editingTx.type.toUpperCase()}</CardTitle>
+              <CardTitle>{isBatchEditing ? `Batch Edit ${batchEditTransactionIndex + 1}/${batchEditTransactionIds.length}` : `Edit #${editingTx.id.slice(-6)}`} • {editingTx.type.toUpperCase()}</CardTitle>
               <div className="flex items-center gap-2">
-                <div className="text-xs text-muted-foreground">{new Date(editingTx.date).toLocaleString()} Ã¢â‚¬Â¢ {editingTx.customerName || 'Walk-in customer'}</div>
+                <div className="text-xs text-muted-foreground">{new Date(editingTx.date).toLocaleString()} • {editingTx.customerName || 'Walk-in customer'}</div>
                 <Button
                   type="button"
                   variant="ghost"
@@ -2584,11 +2591,11 @@ export default function Transactions() {
                     <div className="space-y-1.5">
                       <div className="text-[13px] font-semibold text-muted-foreground px-1">{editingTx.type === 'sale' ? 'Sale lines' : 'Return lines'}</div>
                       {editingItems.map((item, index) => {
-                        const variantParts = [item.selectedVariant && item.selectedVariant !== NO_VARIANT ? item.selectedVariant : '', item.selectedColor && item.selectedColor !== NO_COLOR ? item.selectedColor : ''].filter(Boolean).join(' Ã¢â‚¬Â¢ ');
+                        const variantParts = [item.selectedVariant && item.selectedVariant !== NO_VARIANT ? item.selectedVariant : '', item.selectedColor && item.selectedColor !== NO_COLOR ? item.selectedColor : ''].filter(Boolean).join(' • ');
                         const isProtectedReturnLinkedSaleLine = editingTx.type === 'sale' && !!editingSaleLinkageInfo?.returnedQtyByKey.get(getLineCompositeKey(item));
                         return (
                           <div key={`${item.id}-${index}`} className="rounded-md border px-2 py-1.5">
-                            <div className="grid grid-cols-[30px_minmax(0,1.7fr)_74px_64px_74px_30px] md:grid-cols-[34px_minmax(0,2fr)_96px_80px_84px_32px] items-center gap-1.5 md:gap-2 text-[13px]">
+                            <div className="grid grid-cols-[30px_minmax(0,1.7fr)_74px_64px_74px_72px] md:grid-cols-[34px_minmax(0,2fr)_96px_80px_84px_88px] items-center gap-1.5 md:gap-2 text-[13px]">
                               <div className="h-8 w-8 rounded border bg-muted overflow-hidden shrink-0">{item.image ? <img src={item.image} alt={item.name} className="h-full w-full object-contain" /> : <Package className="w-full h-full p-1.5 opacity-30" />}</div>
                               <div className="min-w-0">
                                 <div className="truncate font-medium">{item.name}</div>
@@ -2597,7 +2604,18 @@ export default function Transactions() {
                               <Input type="number" min="1" className="h-8 px-2 text-right text-[13px]" value={item.quantity} onChange={e => updateEditingItem(index, { quantity: Math.max(1, Number(e.target.value || 1)) })} />
                               <Input type="number" min="0" step="0.01" disabled={editingTx.type === 'return' || isProtectedReturnLinkedSaleLine} className="h-8 px-2 text-right text-[13px]" value={item.sellPrice} onChange={e => updateEditingItem(index, { sellPrice: toSafeMoney(e.target.value) })} />
                               <div className="text-right font-semibold">{formatMoneyPrecise(toSafeMoney(item.quantity) * toSafeMoney(item.sellPrice))}</div>
-                              <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={() => removeEditingItem(index)} disabled={editingTx.type === 'sale' && isProtectedReturnLinkedSaleLine}>Ã¢Å“â€¢</Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="h-8 gap-1.5 border-red-200 px-2 text-red-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+                                onClick={() => removeEditingItem(index)}
+                                disabled={editingTx.type === 'sale' && isProtectedReturnLinkedSaleLine}
+                                title={isProtectedReturnLinkedSaleLine ? 'This line already has linked returns and cannot be removed.' : 'Remove this product from the invoice'}
+                                aria-label={isProtectedReturnLinkedSaleLine ? 'Line removal blocked because returns are linked' : 'Delete product from invoice'}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                <span className="text-[11px] font-semibold">Delete</span>
+                              </Button>
                             </div>
                           </div>
                         );
@@ -2664,9 +2682,9 @@ export default function Transactions() {
                         return (
                           <div className="rounded border bg-white p-2 space-y-1">
                             <div className="font-medium">Settlement change</div>
-                            <div className="text-[12px]">Before: Cash {formatMoneyPrecise(before.cashPaid)} Ã¢â‚¬Â¢ Online {formatMoneyPrecise(before.onlinePaid)} Ã¢â‚¬Â¢ Credit {formatMoneyPrecise(before.creditDue)}</div>
-                            <div className="text-[12px]">After: Cash {formatMoneyPrecise(after.cashPaid)} Ã¢â‚¬Â¢ Online {formatMoneyPrecise(after.onlinePaid)} Ã¢â‚¬Â¢ Credit {formatMoneyPrecise(after.creditDue)}</div>
-                            <div className="text-[12px]">Impact: Cash {before.cashPaid === after.cashPaid ? '0.00' : `${after.cashPaid > before.cashPaid ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.cashPaid - before.cashPaid))}`} Ã¢â‚¬Â¢ Online {before.onlinePaid === after.onlinePaid ? '0.00' : `${after.onlinePaid > before.onlinePaid ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.onlinePaid - before.onlinePaid))}`} Ã¢â‚¬Â¢ Due {before.creditDue === after.creditDue ? '0.00' : `${after.creditDue > before.creditDue ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.creditDue - before.creditDue))}`}</div>
+                            <div className="text-[12px]">Before: Cash {formatMoneyPrecise(before.cashPaid)} • Online {formatMoneyPrecise(before.onlinePaid)} • Credit {formatMoneyPrecise(before.creditDue)}</div>
+                            <div className="text-[12px]">After: Cash {formatMoneyPrecise(after.cashPaid)} • Online {formatMoneyPrecise(after.onlinePaid)} • Credit {formatMoneyPrecise(after.creditDue)}</div>
+                            <div className="text-[12px]">Impact: Cash {before.cashPaid === after.cashPaid ? '0.00' : `${after.cashPaid > before.cashPaid ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.cashPaid - before.cashPaid))}`} • Online {before.onlinePaid === after.onlinePaid ? '0.00' : `${after.onlinePaid > before.onlinePaid ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.onlinePaid - before.onlinePaid))}`} • Due {before.creditDue === after.creditDue ? '0.00' : `${after.creditDue > before.creditDue ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.creditDue - before.creditDue))}`}</div>
                           </div>
                         );
                       })()}
@@ -2675,8 +2693,8 @@ export default function Transactions() {
                   {editingTx.type === 'return' && editingReturnPreview && (
                     <div className="rounded-md border p-2.5 bg-orange-50/40 space-y-1.5 text-[13px]">
                       <div className="font-semibold text-[14px]">Return Preview Summary</div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before Ã¢â€ â€™ After</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.dueBefore)} Ã¢â€ â€™ {formatMoneyPrecise(editingReturnPreview.dueAfter)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before Ã¢â€ â€™ After</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.storeCreditBefore)} Ã¢â€ â€™ {formatMoneyPrecise(editingReturnPreview.storeCreditAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before → After</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.dueBefore)} → {formatMoneyPrecise(editingReturnPreview.dueAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before → After</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.storeCreditBefore)} → {formatMoneyPrecise(editingReturnPreview.storeCreditAfter)}</span></div>
                       <div className="rounded border bg-white p-2 flex justify-between"><span>Cash Outflow</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.cashRefund)}</span></div>
                       <div className="rounded border bg-white p-2 flex justify-between"><span>Online Outflow</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.onlineRefund)}</span></div>
                     </div>
@@ -2688,7 +2706,7 @@ export default function Transactions() {
                       {editingCustomerId && (() => {
                         const currentDue = editingCustomerBalance.currentDue;
                         const dueAfter = Math.max(0, currentDue - Math.max(0, Number(editingAmount || 0)));
-                        return <div>Due: {formatMoneyPrecise(currentDue)} Ã¢â€ â€™ {formatMoneyPrecise(dueAfter)}</div>;
+                        return <div>Due: {formatMoneyPrecise(currentDue)} → {formatMoneyPrecise(dueAfter)}</div>;
                       })()}
                     </div>
                   )}
@@ -2715,9 +2733,9 @@ export default function Transactions() {
               <div className="border-t pt-3 flex gap-2">
                 <Button variant="outline" onClick={closeTransactionEditor} disabled={isSavingTransaction}>Cancel</Button>
                 <Button variant="outline" onClick={() => void handleSaveTransaction(true)} disabled={isSavingTransaction}>
-                  {isSavingTransaction ? 'SavingÃ¢â‚¬Â¦' : remainingBatchTransactions > 0 ? `Update & Next (${remainingBatchTransactions} left)` : 'Update & Next'}
+                  {isSavingTransaction ? 'Saving...' : remainingBatchTransactions > 0 ? `Update & Next (${remainingBatchTransactions} left)` : 'Update & Next'}
                 </Button>
-                <Button onClick={() => void handleSaveTransaction(false)} disabled={isSavingTransaction}>{isSavingTransaction ? 'SavingÃ¢â‚¬Â¦' : 'Save'}</Button>
+                <Button onClick={() => void handleSaveTransaction(false)} disabled={isSavingTransaction}>{isSavingTransaction ? 'Saving...' : 'Save'}</Button>
               </div>
             </CardContent>
           </Card>

@@ -94,17 +94,22 @@ const blankRow = (input: Pick<PurchasePartyLedgerRow, 'id' | 'date' | 'type' | '
 
 export const buildPurchasePartyLedger = ({
   partyId,
+  relatedPartyIds,
   purchaseOrders,
   supplierPayments,
   partyCreditLedger,
 }: {
   partyId: string;
+  relatedPartyIds?: string[];
   purchaseOrders: PurchaseOrder[];
   supplierPayments: SupplierPaymentLedgerEntry[];
   partyCreditLedger: PartyCreditLedgerEntry[];
 }) => {
-  const orders = (purchaseOrders || []).filter((o) => o.partyId === partyId && o.status !== 'cancelled');
-  const directPayments = (supplierPayments || []).filter((p) => p.partyId === partyId && !p.deletedAt);
+  const relatedIds = new Set((relatedPartyIds && relatedPartyIds.length ? relatedPartyIds : [partyId]).map((value) => String(value || '').trim()).filter(Boolean));
+  const matchesParty = (value?: string) => relatedIds.has(String(value || '').trim());
+
+  const orders = (purchaseOrders || []).filter((o) => matchesParty(o.partyId) && o.status !== 'cancelled');
+  const directPayments = (supplierPayments || []).filter((p) => matchesParty(p.partyId) && !p.deletedAt);
   const paymentIds = new Set(directPayments.map((p) => p.id));
   const warnings: PurchaseLedgerWarning[] = [];
   const rows: PurchasePartyLedgerRow[] = [];
@@ -118,7 +123,7 @@ export const buildPurchasePartyLedger = ({
   }, 0);
 
   const usageHistoryTotal = (partyCreditLedger || [])
-    .filter((entry) => entry.partyId === partyId)
+    .filter((entry) => matchesParty(entry.partyId))
     .reduce((sum, entry) => sum + positiveMoney((entry.usageHistory || []).reduce((acc, usage) => acc + positiveMoney(usage.amount), 0)), 0);
 
   if (Math.abs(roundMoney(orderCreditAppliedTotal - usageHistoryTotal)) > 0.01) {
@@ -211,7 +216,7 @@ export const buildPurchasePartyLedger = ({
   });
 
   (partyCreditLedger || []).forEach((entry) => {
-    if (entry.partyId !== partyId) return;
+    if (!matchesParty(entry.partyId)) return;
     const entryId = String(entry.id || '');
     const sourcePaymentId = String(entry.sourcePaymentId || '');
     const sourceVoucherNo = String(entry.sourceVoucherNo || '');
@@ -221,16 +226,25 @@ export const buildPurchasePartyLedger = ({
       || sourcePaymentId.startsWith('pce-edit-')
       || sourceVoucherNo.toLowerCase().includes('pce-edit-')
       || lowerNote.includes('overpayment after purchase edit');
-    if (!isEditCredit) return;
-    const creditCreated = positiveMoney(entry.amountCreated || entry.remainingAmount);
-    if (creditCreated <= 0) return;
+    const linkedPayment = directPayments.find((payment) => (
+      (sourcePaymentId && payment.id === sourcePaymentId)
+      || (sourceVoucherNo && String(payment.voucherNo || '') === sourceVoucherNo)
+    ));
+    const entryCreditCreated = positiveMoney(entry.amountCreated || entry.remainingAmount);
+    const linkedPaymentCreditCreated = linkedPayment
+      ? positiveMoney(linkedPayment.partyCreditCreated ?? Math.max(0, positiveMoney(linkedPayment.amount) - positiveMoney((linkedPayment.paymentAppliedToPayable ?? (linkedPayment as any).payableApplied ?? 0))))
+      : 0;
+    const supplementalCreditCreated = isEditCredit
+      ? entryCreditCreated
+      : Math.max(0, roundMoney(entryCreditCreated - linkedPaymentCreditCreated));
+    if (supplementalCreditCreated <= 0) return;
     rows.push(blankRow({
       id: `edit-credit-${entry.id}`,
       date: entry.createdAt || entry.updatedAt || new Date().toISOString(),
       type: 'edit_credit',
       reference: sourceVoucherNo || sourcePaymentId || entryId,
-      description: note || 'Credit created from purchase edit',
-      creditCreated,
+      description: note || (isEditCredit ? 'Credit created from purchase edit' : 'Supplier credit balance'),
+      creditCreated: supplementalCreditCreated,
       sourceId: entry.id,
       sourceType: `partyCreditLedger|eventTimeMs:${resolveEventTimeMs(entry.createdAt, entry.updatedAt, entry.id, sourceVoucherNo, sourcePaymentId)}`,
     }));
@@ -254,12 +268,12 @@ export const buildPurchasePartyLedger = ({
     return String(a.id).localeCompare(String(b.id));
   });
 
-  let signedBalance = 0;
+  let runningPayableState = 0;
+  let runningCreditState = 0;
   const finalized = rows.map((row) => {
     const rowWarnings: PurchaseLedgerWarning[] = [];
-    const balanceBefore = signedBalance;
-    const openPayableBefore = Math.max(0, roundMoney(balanceBefore));
-    const creditBefore = Math.max(0, roundMoney(-balanceBefore));
+    const openPayableBefore = Math.max(0, roundMoney(runningPayableState));
+    const creditBefore = Math.max(0, roundMoney(runningCreditState));
 
     if (row.type === 'purchase') {
       if (row.creditApplied > row.purchaseAmount + 0.01) {
@@ -282,7 +296,14 @@ export const buildPurchasePartyLedger = ({
           actual: row.creditApplied,
         });
       }
-      signedBalance = roundMoney(signedBalance + row.purchaseAmount);
+      runningPayableState = roundMoney(runningPayableState + row.purchaseAmount);
+      const appliedCreditToBalance = Math.min(
+        positiveMoney(row.creditApplied),
+        Math.max(0, roundMoney(runningPayableState)),
+        Math.max(0, roundMoney(runningCreditState)),
+      );
+      runningPayableState = roundMoney(Math.max(0, runningPayableState - appliedCreditToBalance));
+      runningCreditState = roundMoney(Math.max(0, runningCreditState - appliedCreditToBalance));
     } else if (row.type === 'supplier_payment' || row.type === 'legacy_payment') {
       const canonicalPayableApplied = Math.min(row.paymentAmount, openPayableBefore);
       if (row.payableApplied > canonicalPayableApplied + 0.01) {
@@ -296,14 +317,24 @@ export const buildPurchasePartyLedger = ({
         });
       }
       row.payableApplied = roundMoney(canonicalPayableApplied);
-      signedBalance = roundMoney(signedBalance - row.paymentAmount);
+      runningPayableState = roundMoney(Math.max(0, runningPayableState - row.payableApplied));
+      runningCreditState = roundMoney(runningCreditState + positiveMoney(row.creditCreated));
     } else if (row.type === 'edit_credit') {
-      signedBalance = roundMoney(signedBalance - row.creditCreated);
+      runningCreditState = roundMoney(runningCreditState + positiveMoney(row.creditCreated));
+    } else if (row.type === 'credit_used') {
+      const creditUsed = Math.min(
+        positiveMoney(row.creditApplied || row.creditUsed),
+        Math.max(0, roundMoney(runningPayableState)),
+        Math.max(0, roundMoney(runningCreditState)),
+      );
+      runningPayableState = roundMoney(Math.max(0, runningPayableState - creditUsed));
+      runningCreditState = roundMoney(Math.max(0, runningCreditState - creditUsed));
     }
 
-    const runningPayable = Math.max(0, roundMoney(signedBalance));
-    const runningCredit = Math.max(0, roundMoney(-signedBalance));
-    const netPayable = runningPayable;
+    const runningPayable = Math.max(0, roundMoney(runningPayableState));
+    const runningCredit = Math.max(0, roundMoney(runningCreditState));
+    const netPayable = Math.max(0, roundMoney(runningPayable - runningCredit));
+    const signedBalance = roundMoney(runningPayable - runningCredit);
     const allRowWarnings = [...rowWarnings];
     warnings.push(...allRowWarnings);
 
@@ -328,8 +359,9 @@ export const buildPurchasePartyLedger = ({
   const creditCreated = finalized.reduce((s, r) => s + r.creditCreated, 0);
   const creditApplied = finalized.reduce((s, r) => s + r.creditApplied, 0);
   const finalBalance = roundMoney(finalized[finalized.length - 1]?.runningBalance || 0);
-  const currentPayable = Math.max(0, finalBalance);
-  const currentCredit = Math.max(0, roundMoney(-finalBalance));
+  const currentPayable = Math.max(0, roundMoney(finalized[finalized.length - 1]?.runningPayable || 0));
+  const currentCredit = Math.max(0, roundMoney(finalized[finalized.length - 1]?.runningCredit || 0));
+  const netPayable = Math.max(0, roundMoney(currentPayable - currentCredit));
 
   return {
     rows: finalized,
@@ -349,7 +381,7 @@ export const buildPurchasePartyLedger = ({
       ourCredit: currentCredit,
       currentCredit,
       remainingPayable: currentPayable,
-      netPayable: currentPayable,
+      netPayable,
       signedBalance: finalBalance,
     },
   };

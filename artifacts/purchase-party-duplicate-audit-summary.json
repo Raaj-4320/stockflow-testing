@@ -1,0 +1,18 @@
+{
+  "generatedAt": "2026-07-15T05:43:15.979Z",
+  "tenantsAnalyzed": 0,
+  "totalParties": 0,
+  "suspectedDuplicateGroups": 0,
+  "partiesInDuplicateGroups": 0,
+  "deterministicGroups": 0,
+  "veryHighConfidenceGroups": 0,
+  "highConfidenceGroups": 0,
+  "mediumConfidenceGroups": 0,
+  "lowConfidenceGroups": 0,
+  "ambiguousGroups": 0,
+  "potentiallyAutoMergeSafeGroups": 0,
+  "manualReviewRequiredGroups": 0,
+  "transactionDriftGroups": 0,
+  "fragmentedBalanceGroups": 0,
+  "note": "No tenant export input was provided. Audit schema was generated, but no live tenant data was analyzed."
+}

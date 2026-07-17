@@ -1,11 +1,30 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Clock3, FolderPlus, Image as ImageIcon, Plus, Save, Search, Send, Trash2 } from 'lucide-react';
+import { Clock3, FolderPlus, Image as ImageIcon, Pause, Play, Plus, Save, Search, Send, Square, Trash2 } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { formatCurrency } from '../services/numberFormat';
 import { loadData, updateStoreProfile } from '../services/storage';
-import { createTelegramProductPost } from '../services/telegram';
-import { Product, StoreProfile, TelegramPostActivity, TelegramPostCollection, TelegramPostMode } from '../types';
+import {
+  createTelegramProductPost,
+  getLiveTelegramCollections,
+  getTelegramCollectionActivity,
+  pauseTelegramCollection,
+  resumeTelegramCollection,
+  startTelegramCollection,
+  stopTelegramCollection,
+} from '../services/telegram';
+import {
+  Product,
+  StoreProfile,
+  TelegramCollectionActivityItem,
+  TelegramCollectionFrequencyUnit,
+  TelegramCollectionRepeatMode,
+  TelegramLiveCollection,
+  TelegramPostActivity,
+  TelegramPostCollection,
+  TelegramPostMode,
+  TelegramSchedulerProduct,
+} from '../types';
 
 const DEFAULT_TEMPLATE = `New arrival: {product_name}
 
@@ -16,15 +35,21 @@ Stock: {stock}
 Order now while stock lasts!`;
 
 const MAX_ACTIVITY_ENTRIES = 25;
+const DEFAULT_FREQUENCY_VALUE = 1;
+const DEFAULT_FREQUENCY_UNIT: TelegramCollectionFrequencyUnit = 'minutes';
+const DEFAULT_REPEAT_MODE: TelegramCollectionRepeatMode = 'loop';
+const TELEGRAM_DEBUG_LOGS_ENABLED = String((import.meta as any).env?.VITE_DEBUG_TELEGRAM_LOGS || 'false').toLowerCase() === 'true';
+const DEFAULT_MAX_FAILURES_BEFORE_PAUSE = 3;
+const TELEGRAM_CHANNEL_REQUIRED_MESSAGE = 'Telegram Channel ID is required. Save a channel ID for this collection first.';
 
 const safeText = (value: unknown, fallback = '') => {
   const text = String(value ?? '').trim();
   return text || fallback;
 };
 
-const toNonNegativeNumber = (value: unknown) => {
+const toNonNegativeNumber = (value: unknown, fallback = 0) => {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 0;
+  if (!Number.isFinite(parsed)) return fallback;
   return Math.max(0, parsed);
 };
 
@@ -63,6 +88,10 @@ const normalizeCollections = (profile?: StoreProfile | null): TelegramPostCollec
         notes: safeText(collection.notes),
         postMode: collection.postMode === 'out_of_stock' || collection.postMode === 'filtered' ? collection.postMode : 'selected',
         queuedProductIds: Array.isArray(collection.queuedProductIds) ? collection.queuedProductIds.filter(Boolean) : [],
+        frequencyValue: toNonNegativeNumber(collection.frequencyValue, DEFAULT_FREQUENCY_VALUE) || DEFAULT_FREQUENCY_VALUE,
+        frequencyUnit: (safeText(collection.frequencyUnit, DEFAULT_FREQUENCY_UNIT) as TelegramCollectionFrequencyUnit),
+        repeatMode: (safeText(collection.repeatMode, DEFAULT_REPEAT_MODE) as TelegramCollectionRepeatMode),
+        maxFailuresBeforePause: toNonNegativeNumber(collection.maxFailuresBeforePause, DEFAULT_MAX_FAILURES_BEFORE_PAUSE) || DEFAULT_MAX_FAILURES_BEFORE_PAUSE,
         createdAt: safeText(collection.createdAt, new Date().toISOString()),
         updatedAt: safeText(collection.updatedAt, new Date().toISOString()),
         totalPostsSent: toNonNegativeNumber(collection.totalPostsSent),
@@ -102,10 +131,20 @@ export default function TelegramPosts() {
   const [activeCollectionId, setActiveCollectionId] = useState('');
   const [collectionName, setCollectionName] = useState('');
   const [collectionCategory, setCollectionCategory] = useState('all');
+  const [frequencyValue, setFrequencyValue] = useState(String(DEFAULT_FREQUENCY_VALUE));
+  const [frequencyUnit, setFrequencyUnit] = useState<TelegramCollectionFrequencyUnit>(DEFAULT_FREQUENCY_UNIT);
+  const [repeatMode, setRepeatMode] = useState<TelegramCollectionRepeatMode>(DEFAULT_REPEAT_MODE);
+  const [maxFailuresBeforePause, setMaxFailuresBeforePause] = useState(String(DEFAULT_MAX_FAILURES_BEFORE_PAUSE));
   const [liveSyncCollection, setLiveSyncCollection] = useState(true);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSavingCollection, setIsSavingCollection] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isStartingCollection, setIsStartingCollection] = useState(false);
+  const [runningCollections, setRunningCollections] = useState<TelegramLiveCollection[]>([]);
+  const [selectedActivityCollectionId, setSelectedActivityCollectionId] = useState('');
+  const [selectedCollectionActivity, setSelectedCollectionActivity] = useState<TelegramCollectionActivityItem[]>([]);
+  const [isActivityLoading, setIsActivityLoading] = useState(false);
+  const [collectionActionId, setCollectionActionId] = useState('');
   const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const hasHydratedCollectionRef = useRef(false);
 
@@ -126,6 +165,10 @@ export default function TelegramPosts() {
     setActiveCollectionId(selectedCollection?.id || '');
     setCollectionName(selectedCollection?.name || '');
     setCollectionCategory(selectedCollection?.category || 'all');
+    setFrequencyValue(String(selectedCollection?.frequencyValue || DEFAULT_FREQUENCY_VALUE));
+    setFrequencyUnit((selectedCollection?.frequencyUnit || DEFAULT_FREQUENCY_UNIT) as TelegramCollectionFrequencyUnit);
+    setRepeatMode((selectedCollection?.repeatMode || DEFAULT_REPEAT_MODE) as TelegramCollectionRepeatMode);
+    setMaxFailuresBeforePause(String(selectedCollection?.maxFailuresBeforePause || DEFAULT_MAX_FAILURES_BEFORE_PAUSE));
     if (selectedCollection) {
       setTelegramChannelId(selectedCollection.channelId || safeText(safeProfile?.telegramChannelId));
       setTelegramTemplate(selectedCollection.template || safeText(safeProfile?.telegramTemplate, DEFAULT_TEMPLATE));
@@ -133,6 +176,11 @@ export default function TelegramPosts() {
       setPostMode(selectedCollection.postMode);
       setQueuedProductIds(selectedCollection.queuedProductIds || []);
       setCategoryFilter(selectedCollection.category || 'all');
+    } else {
+      setFrequencyValue(String(DEFAULT_FREQUENCY_VALUE));
+      setFrequencyUnit(DEFAULT_FREQUENCY_UNIT);
+      setRepeatMode(DEFAULT_REPEAT_MODE);
+      setMaxFailuresBeforePause(String(DEFAULT_MAX_FAILURES_BEFORE_PAUSE));
     }
   };
 
@@ -144,6 +192,25 @@ export default function TelegramPosts() {
       window.removeEventListener('storage', refreshFromStore);
       window.removeEventListener('local-storage-update', refreshFromStore);
     };
+  }, []);
+
+  const refreshRunningCollections = async (options?: { silent?: boolean }) => {
+    try {
+      const live = await getLiveTelegramCollections();
+      setRunningCollections(live);
+    } catch (error) {
+      if (!options?.silent) {
+        setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Backend not reachable' });
+      }
+    }
+  };
+
+  useEffect(() => {
+    void refreshRunningCollections({ silent: true });
+    const interval = window.setInterval(() => {
+      void refreshRunningCollections({ silent: true });
+    }, 5000);
+    return () => window.clearInterval(interval);
   }, []);
 
   const filterCategories = useMemo(() => (
@@ -200,6 +267,7 @@ export default function TelegramPosts() {
     if (postMode === 'out_of_stock') return outOfStockProducts;
     return filteredProducts;
   }, [filteredProducts, outOfStockProducts, postMode, queuedProducts]);
+  const collectionProducts = queuedProducts;
 
   const previewProduct = targetProducts[0] || queuedProducts[0] || filteredProducts[0] || null;
   const activeCollection = telegramCollections.find((collection) => collection.id === activeCollectionId) || null;
@@ -207,6 +275,12 @@ export default function TelegramPosts() {
   const lastPostedEntry = recentActivity[0] || null;
   const totalPostedCount = recentActivity.reduce((sum, entry) => sum + toNonNegativeNumber(entry.successCount), 0);
   const categoryCollections = telegramCollections.filter((collection) => collection.category === categoryFilter || (categoryFilter === 'all' && collection.category === 'all'));
+  const failedProducts = selectedCollectionActivity.filter((entry) => entry.error);
+  const livePostedCount = runningCollections.reduce((sum, entry) => sum + toNonNegativeNumber(entry.sentCount), 0);
+  const visibleRunningCollections = runningCollections.filter((collection) => {
+    const status = safeText(collection.status).toLowerCase();
+    return status !== 'stopped' && status !== 'completed';
+  });
 
   const buildCaption = (product: Product | null) => {
     if (!product) return '';
@@ -222,6 +296,40 @@ export default function TelegramPosts() {
       output = output.split(token).join(value);
     });
     return output;
+  };
+
+  const buildSchedulerProducts = (rows: Product[]): TelegramSchedulerProduct[] => rows.map((product) => ({
+    id: product.id,
+    name: getProductName(product),
+    description: safeText(product.description),
+    price: toNonNegativeNumber(product.buyPrice),
+    salePrice: toNonNegativeNumber(product.sellPrice || product.buyPrice),
+    imageUrl: getProductImageUrl(product),
+    category: getProductCategory(product),
+    stock: toNonNegativeNumber(product.stock),
+    barcode: getProductBarcode(product),
+  }));
+
+  const resolveFrequencyValue = () => {
+    const parsed = Number(frequencyValue);
+    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_FREQUENCY_VALUE;
+    return Math.max(1, Math.floor(parsed));
+  };
+
+  const resolveMaxFailuresBeforePause = () => {
+    const parsed = Number(maxFailuresBeforePause);
+    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_FAILURES_BEFORE_PAUSE;
+    return Math.max(1, Math.floor(parsed));
+  };
+
+  const getResolvedTelegramChannelId = () => safeText(telegramChannelId).trim();
+
+  const requireTelegramChannelId = () => {
+    const channelId = getResolvedTelegramChannelId();
+    if (!channelId) {
+      throw new Error(TELEGRAM_CHANNEL_REQUIRED_MESSAGE);
+    }
+    return channelId;
   };
 
   const persistTelegramProfile = async (nextValues: {
@@ -266,13 +374,23 @@ export default function TelegramPosts() {
     setActiveCollectionId(collection?.id || '');
     setCollectionName(collection?.name || '');
     setCollectionCategory(collection?.category || 'all');
-    if (!collection) return;
+    if (!collection) {
+      setFrequencyValue(String(DEFAULT_FREQUENCY_VALUE));
+      setFrequencyUnit(DEFAULT_FREQUENCY_UNIT);
+      setRepeatMode(DEFAULT_REPEAT_MODE);
+      setMaxFailuresBeforePause(String(DEFAULT_MAX_FAILURES_BEFORE_PAUSE));
+      return;
+    }
     setTelegramChannelId(collection.channelId);
     setTelegramTemplate(collection.template || DEFAULT_TEMPLATE);
     setTelegramNotes(collection.notes);
     setPostMode(collection.postMode);
     setQueuedProductIds(collection.queuedProductIds || []);
     setCategoryFilter(collection.category || 'all');
+    setFrequencyValue(String(collection.frequencyValue || DEFAULT_FREQUENCY_VALUE));
+    setFrequencyUnit((collection.frequencyUnit || DEFAULT_FREQUENCY_UNIT) as TelegramCollectionFrequencyUnit);
+    setRepeatMode((collection.repeatMode || DEFAULT_REPEAT_MODE) as TelegramCollectionRepeatMode);
+    setMaxFailuresBeforePause(String(collection.maxFailuresBeforePause || DEFAULT_MAX_FAILURES_BEFORE_PAUSE));
     void persistTelegramProfile({ telegramActiveCollectionId: collection.id }, { suppressNotice: true });
   };
 
@@ -280,8 +398,9 @@ export default function TelegramPosts() {
     setIsSavingSettings(true);
     setNotice(null);
     try {
+      const channelId = requireTelegramChannelId();
       const saved = await persistTelegramProfile({
-        telegramChannelId: telegramChannelId.trim(),
+        telegramChannelId: channelId,
         telegramTemplate: telegramTemplate.trim() || DEFAULT_TEMPLATE,
         telegramNotes: telegramNotes.trim(),
       });
@@ -307,16 +426,21 @@ export default function TelegramPosts() {
     setIsSavingCollection(true);
     setNotice(null);
     try {
+      const channelId = requireTelegramChannelId();
       const now = new Date().toISOString();
       const nextCollection: TelegramPostCollection = {
         id: activeCollection?.id || `telegram-collection-${Date.now()}`,
         name: trimmedName,
         category: collectionCategory || categoryFilter || 'all',
-        channelId: telegramChannelId.trim(),
+        channelId,
         template: telegramTemplate.trim() || DEFAULT_TEMPLATE,
         notes: telegramNotes.trim(),
         postMode,
         queuedProductIds,
+        frequencyValue: resolveFrequencyValue(),
+        frequencyUnit,
+        repeatMode,
+        maxFailuresBeforePause: resolveMaxFailuresBeforePause(),
         createdAt: activeCollection?.createdAt || now,
         updatedAt: now,
         lastPostedAt: activeCollection?.lastPostedAt,
@@ -368,6 +492,10 @@ export default function TelegramPosts() {
     setActiveCollectionId('');
     setCollectionName('');
     setCollectionCategory(categoryFilter);
+    setFrequencyValue(String(DEFAULT_FREQUENCY_VALUE));
+    setFrequencyUnit(DEFAULT_FREQUENCY_UNIT);
+    setRepeatMode(DEFAULT_REPEAT_MODE);
+    setMaxFailuresBeforePause(String(DEFAULT_MAX_FAILURES_BEFORE_PAUSE));
   };
 
   useEffect(() => {
@@ -391,6 +519,10 @@ export default function TelegramPosts() {
       notes: telegramNotes.trim(),
       postMode,
       queuedProductIds,
+      frequencyValue: resolveFrequencyValue(),
+      frequencyUnit,
+      repeatMode,
+      maxFailuresBeforePause: resolveMaxFailuresBeforePause(),
       updatedAt: new Date().toISOString(),
     };
     const changed = JSON.stringify({
@@ -401,6 +533,10 @@ export default function TelegramPosts() {
       notes: target.notes,
       postMode: target.postMode,
       queuedProductIds: target.queuedProductIds,
+      frequencyValue: target.frequencyValue,
+      frequencyUnit: target.frequencyUnit,
+      repeatMode: target.repeatMode,
+      maxFailuresBeforePause: target.maxFailuresBeforePause,
     }) !== JSON.stringify({
       name: nextCollection.name,
       category: nextCollection.category,
@@ -409,6 +545,10 @@ export default function TelegramPosts() {
       notes: nextCollection.notes,
       postMode: nextCollection.postMode,
       queuedProductIds: nextCollection.queuedProductIds,
+      frequencyValue: nextCollection.frequencyValue,
+      frequencyUnit: nextCollection.frequencyUnit,
+      repeatMode: nextCollection.repeatMode,
+      maxFailuresBeforePause: nextCollection.maxFailuresBeforePause,
     });
     if (!changed) return;
     const timer = window.setTimeout(() => {
@@ -431,15 +571,152 @@ export default function TelegramPosts() {
     telegramCollections,
     telegramNotes,
     telegramTemplate,
+    frequencyUnit,
+    frequencyValue,
+    maxFailuresBeforePause,
+    repeatMode,
   ]);
 
-  const sendPosts = async () => {
-    if (!telegramChannelId.trim()) {
-      setNotice({ type: 'error', message: 'Enter and save a Telegram channel ID first.' });
+  const ensureCollectionSaved = async () => {
+    const trimmedName = collectionName.trim();
+    if (!trimmedName) {
+      throw new Error('Collection name is required.');
+    }
+    const channelId = requireTelegramChannelId();
+    const now = new Date().toISOString();
+    const nextCollection: TelegramPostCollection = {
+      id: activeCollection?.id || `telegram-collection-${Date.now()}`,
+      name: trimmedName,
+      category: collectionCategory || categoryFilter || 'all',
+      channelId,
+      template: telegramTemplate.trim() || DEFAULT_TEMPLATE,
+      notes: telegramNotes.trim(),
+      postMode,
+      queuedProductIds,
+      frequencyValue: resolveFrequencyValue(),
+      frequencyUnit,
+      repeatMode,
+      maxFailuresBeforePause: resolveMaxFailuresBeforePause(),
+      createdAt: activeCollection?.createdAt || now,
+      updatedAt: now,
+      lastPostedAt: activeCollection?.lastPostedAt,
+      lastPostedProductName: activeCollection?.lastPostedProductName,
+      totalPostsSent: toNonNegativeNumber(activeCollection?.totalPostsSent),
+    };
+    const nextCollections = activeCollection
+      ? telegramCollections.map((collection) => collection.id === activeCollection.id ? nextCollection : collection)
+      : [nextCollection, ...telegramCollections].sort((left, right) => left.name.localeCompare(right.name));
+    const saved = await persistTelegramProfile({
+      telegramCollections: nextCollections,
+      telegramActiveCollectionId: nextCollection.id,
+    });
+    if (!saved) {
+      throw new Error('Collection could not be saved.');
+    }
+    setActiveCollectionId(nextCollection.id);
+    setCollectionName(nextCollection.name);
+    setCollectionCategory(nextCollection.category);
+    return nextCollection;
+  };
+
+  const loadActivityForCollection = async (id: string) => {
+    setSelectedActivityCollectionId(id);
+    setIsActivityLoading(true);
+    try {
+      const activity = await getTelegramCollectionActivity(id);
+      setSelectedCollectionActivity(activity);
+    } catch (error) {
+      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Backend not reachable' });
+      setSelectedCollectionActivity([]);
+    } finally {
+      setIsActivityLoading(false);
+    }
+  };
+
+  const handleCollectionAction = async (
+    action: 'pause' | 'resume' | 'stop',
+    collection: TelegramLiveCollection,
+    handler: () => Promise<unknown>,
+    successMessage: string,
+  ) => {
+    const collectionId = safeText(collection.collectionId || collection.id);
+    if (TELEGRAM_DEBUG_LOGS_ENABLED) {
+      console.log('telegram.collection.control', {
+        action,
+        collectionId,
+        collectionName: collection.name,
+        status: collection.status,
+        hasCollectionId: Boolean(collectionId),
+      });
+    }
+    if (!collectionId) {
+      setNotice({ type: 'error', message: 'Collection ID missing. Refresh live collections and try again.' });
       return;
     }
+    setCollectionActionId(collectionId);
+    try {
+      await handler();
+      setNotice({ type: 'success', message: successMessage });
+      await refreshRunningCollections({ silent: true });
+      if (selectedActivityCollectionId === collectionId) {
+        await loadActivityForCollection(collectionId);
+      }
+    } catch (error) {
+      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Backend not reachable' });
+    } finally {
+      setCollectionActionId('');
+    }
+  };
+
+  const startCollectionRun = async () => {
+    if (!collectionProducts.length) {
+      setNotice({ type: 'error', message: 'Add at least one product before starting a collection.' });
+      return;
+    }
+    const missingImageProduct = collectionProducts.find((product) => !getProductImageUrl(product));
+    if (missingImageProduct) {
+      setNotice({ type: 'error', message: 'Product missing image.' });
+      return;
+    }
+
+    setIsStartingCollection(true);
+    setNotice({ type: 'info', message: 'Starting Telegram collection...' });
+    try {
+      requireTelegramChannelId();
+      const savedCollection = await ensureCollectionSaved();
+      const schedulerProducts = buildSchedulerProducts(collectionProducts);
+      await startTelegramCollection({
+        id: savedCollection.id,
+        collectionId: savedCollection.id,
+        name: savedCollection.name,
+        channelId: savedCollection.channelId,
+        template: savedCollection.template,
+        notes: savedCollection.notes,
+        category: savedCollection.category,
+        frequencyValue: savedCollection.frequencyValue || DEFAULT_FREQUENCY_VALUE,
+        frequencyUnit: (savedCollection.frequencyUnit || DEFAULT_FREQUENCY_UNIT) as TelegramCollectionFrequencyUnit,
+        repeatMode: (savedCollection.repeatMode || DEFAULT_REPEAT_MODE) as TelegramCollectionRepeatMode,
+        maxFailuresBeforePause: savedCollection.maxFailuresBeforePause || DEFAULT_MAX_FAILURES_BEFORE_PAUSE,
+        postMode: savedCollection.postMode,
+        products: schedulerProducts,
+      });
+      await refreshRunningCollections({ silent: true });
+      setNotice({ type: 'success', message: 'Collection started' });
+    } catch (error) {
+      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Backend not reachable' });
+    } finally {
+      setIsStartingCollection(false);
+    }
+  };
+
+  const sendPosts = async () => {
     if (!targetProducts.length) {
       setNotice({ type: 'error', message: 'No products are ready to post for the current mode.' });
+      return;
+    }
+    const missingImageProduct = targetProducts.find((product) => !getProductImageUrl(product));
+    if (missingImageProduct) {
+      setNotice({ type: 'error', message: 'Product missing image.' });
       return;
     }
     setIsSending(true);
@@ -447,10 +724,11 @@ export default function TelegramPosts() {
     let successCount = 0;
     const failures: string[] = [];
     try {
+      const channelId = requireTelegramChannelId();
       for (const product of targetProducts) {
         try {
           await createTelegramProductPost({
-            channelId: telegramChannelId.trim(),
+            channelId,
             product: {
               id: product.id,
               name: getProductName(product),
@@ -474,7 +752,7 @@ export default function TelegramPosts() {
         collectionId: activeCollection?.id || undefined,
         collectionName: activeCollection?.name || (collectionName.trim() || undefined),
         category: categoryFilter,
-        channelId: telegramChannelId.trim(),
+        channelId,
         postMode,
         productCount: targetProducts.length,
         successCount,
@@ -526,6 +804,100 @@ export default function TelegramPosts() {
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_380px]">
         <div className="space-y-6">
+          <Card className="shadow-sm">
+            <CardHeader>
+              <CardTitle className="text-base tracking-wide uppercase text-slate-700">Running Collections</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {visibleRunningCollections.length > 0 ? (
+                <div className="grid gap-4">
+                  {visibleRunningCollections.map((collection) => {
+                    const backendCollectionId = safeText(collection.collectionId || collection.id);
+                    const normalizedStatus = safeText(collection.status).toLowerCase();
+                    const isRunning = normalizedStatus === 'running';
+                    const isPaused = normalizedStatus === 'paused';
+                    return (
+                    <div key={collection.id} className="rounded-2xl border bg-white p-4">
+                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="space-y-2">
+                          <div className="text-lg font-bold text-slate-950">{collection.name}</div>
+                          <div className="text-sm text-slate-600">{collection.channelId || 'No channel'} • {collection.category === 'all' ? 'All categories' : collection.category}</div>
+                          <div className="inline-flex rounded-full border bg-slate-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-700">
+                            {collection.status}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {isRunning && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleCollectionAction('pause', collection, () => pauseTelegramCollection(backendCollectionId), 'Collection paused')}
+                              disabled={collectionActionId === backendCollectionId}
+                            >
+                              <Pause className="mr-2 h-4 w-4" /> Pause
+                            </Button>
+                          )}
+                          {isPaused && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleCollectionAction('resume', collection, () => resumeTelegramCollection(backendCollectionId), 'Collection resumed')}
+                              disabled={collectionActionId === backendCollectionId}
+                            >
+                              <Play className="mr-2 h-4 w-4" /> Resume
+                            </Button>
+                          )}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleCollectionAction('stop', collection, () => stopTelegramCollection(backendCollectionId), 'Collection stopped')}
+                            disabled={collectionActionId === backendCollectionId}
+                          >
+                            <Square className="mr-2 h-4 w-4" /> Stop
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => void loadActivityForCollection(backendCollectionId)}
+                            disabled={isActivityLoading && selectedActivityCollectionId === backendCollectionId}
+                          >
+                            View Activity
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm"><div className="text-xs uppercase tracking-wide text-slate-500">Products</div><div className="mt-1 font-bold text-slate-900">{collection.productsCount}</div></div>
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm"><div className="text-xs uppercase tracking-wide text-slate-500">Current Cursor</div><div className="mt-1 font-bold text-slate-900">{collection.currentCursor}</div></div>
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm"><div className="text-xs uppercase tracking-wide text-slate-500">Sent Count</div><div className="mt-1 font-bold text-slate-900">{collection.sentCount}</div></div>
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm"><div className="text-xs uppercase tracking-wide text-slate-500">Failed Count</div><div className="mt-1 font-bold text-slate-900">{collection.failedCount}</div></div>
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm"><div className="text-xs uppercase tracking-wide text-slate-500">Frequency</div><div className="mt-1 font-bold text-slate-900">{collection.frequencyValue} {collection.frequencyUnit}</div></div>
+                      </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-2">
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm">
+                          <div className="text-xs uppercase tracking-wide text-slate-500">Last Posted Product</div>
+                          <div className="mt-1 font-semibold text-slate-900">{collection.lastPostedProduct || 'Not yet'}</div>
+                          <div className="mt-1 text-xs text-slate-500">{formatDateTime(collection.lastPostedAt)}</div>
+                        </div>
+                        <div className="rounded-xl border bg-slate-50 p-3 text-sm">
+                          <div className="text-xs uppercase tracking-wide text-slate-500">Next Post Time</div>
+                          <div className="mt-1 font-semibold text-slate-900">{formatDateTime(collection.nextPostAt)}</div>
+                          <div className="mt-1 text-xs text-slate-500">Repeat mode: {collection.repeatMode || 'loop'}</div>
+                        </div>
+                      </div>
+                    </div>
+                  )})}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+                  No live collections yet. Start a collection below to see automatic posting status here.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <Card className="border-sky-100 bg-sky-50/70 shadow-sm">
             <CardHeader className="pb-3">
               <CardTitle className="text-base tracking-wide uppercase text-slate-700">Collection Status</CardTitle>
@@ -548,8 +920,8 @@ export default function TelegramPosts() {
                 </div>
                 <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Live Catalog</div>
-                  <div className="mt-1 text-2xl font-bold text-slate-950">{totalPostedCount}</div>
-                  <div className="mt-1 text-sm text-slate-600">Posts sent so far</div>
+                  <div className="mt-1 text-2xl font-bold text-slate-950">{livePostedCount}</div>
+                  <div className="mt-1 text-sm text-slate-600">Posts sent by live collections</div>
                 </div>
               </div>
               <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px_180px]">
@@ -654,6 +1026,43 @@ export default function TelegramPosts() {
                   <input type="checkbox" checked={liveSyncCollection} onChange={(event) => setLiveSyncCollection(event.target.checked)} />
                   Live update active collection
                 </label>
+              </div>
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="space-y-2">
+                  <Label>Frequency Value</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={frequencyValue}
+                    onChange={(event) => setFrequencyValue(event.target.value)}
+                    placeholder="1"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Frequency Unit</Label>
+                  <Select value={frequencyUnit} onChange={(event) => setFrequencyUnit(event.target.value as TelegramCollectionFrequencyUnit)}>
+                    <option value="seconds">Seconds</option>
+                    <option value="minutes">Minutes</option>
+                    <option value="hours">Hours</option>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Repeat Mode</Label>
+                  <Select value={repeatMode} onChange={(event) => setRepeatMode(event.target.value as TelegramCollectionRepeatMode)}>
+                    <option value="once">Once</option>
+                    <option value="loop">Loop</option>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Max Failures Before Pause</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={maxFailuresBeforePause}
+                    onChange={(event) => setMaxFailuresBeforePause(event.target.value)}
+                    placeholder="3"
+                  />
+                </div>
               </div>
               <div className="grid gap-3 md:grid-cols-3">
                 <div className="rounded-xl border bg-slate-50 p-3 text-sm">
@@ -811,10 +1220,16 @@ export default function TelegramPosts() {
               ) : (
                 <div className="rounded-2xl border border-dashed p-8 text-center text-sm text-muted-foreground">Add products to the queue or widen the filters to generate a preview.</div>
               )}
-              <Button type="button" className="h-11 w-full" onClick={() => void sendPosts()} disabled={isSending || targetProducts.length === 0}>
-                <Send className="mr-2 h-4 w-4" />
-                {isSending ? 'Sending to Telegram...' : 'Send Post'}
-              </Button>
+              <div className="space-y-2">
+                <Button type="button" className="h-11 w-full" onClick={() => void startCollectionRun()} disabled={isStartingCollection || targetProducts.length === 0}>
+                  <Play className="mr-2 h-4 w-4" />
+                  {isStartingCollection ? 'Starting Collection...' : 'Start Collection'}
+                </Button>
+                <Button type="button" variant="outline" className="h-11 w-full" onClick={() => void sendPosts()} disabled={isSending || targetProducts.length === 0}>
+                  <Send className="mr-2 h-4 w-4" />
+                  {isSending ? 'Sending Test Post...' : 'Send One Test Post'}
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -826,12 +1241,16 @@ export default function TelegramPosts() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-xl border bg-slate-50 p-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Posts sent</div>
-                  <div className="mt-1 text-xl font-bold text-slate-950">{totalPostedCount}</div>
+                  <div className="mt-1 text-xl font-bold text-slate-950">{Math.max(totalPostedCount, livePostedCount)}</div>
                 </div>
                 <div className="rounded-xl border bg-slate-50 p-3">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last posted</div>
-                  <div className="mt-1 text-sm font-bold text-slate-950">{formatDateTime(lastPostedEntry?.postedAt)}</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last posted product</div>
+                  <div className="mt-1 text-sm font-bold text-slate-950">{lastPostedEntry?.lastPostedProductName || 'Not yet'}</div>
                 </div>
+              </div>
+              <div className="rounded-xl border bg-slate-50 p-3 text-sm">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last posted time</div>
+                <div className="mt-1 font-semibold text-slate-900">{formatDateTime(lastPostedEntry?.postedAt)}</div>
               </div>
               <div className="rounded-xl border bg-slate-50 p-3 text-sm">
                 <div className="flex items-center gap-2 font-semibold text-slate-900">
@@ -849,6 +1268,17 @@ export default function TelegramPosts() {
                   )}
                 </div>
               </div>
+              {selectedActivityCollectionId && (
+                <div className="rounded-xl border bg-slate-50 p-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="font-semibold text-slate-900">Selected Activity</div>
+                    <div className="text-xs text-slate-500">{selectedActivityCollectionId}</div>
+                  </div>
+                  <div className="mt-2 text-slate-700">
+                    {isActivityLoading ? 'Loading collection activity...' : `${selectedCollectionActivity.length} activity row${selectedCollectionActivity.length === 1 ? '' : 's'} loaded`}
+                  </div>
+                </div>
+              )}
               <div className="space-y-3">
                 {recentActivity.slice(0, 6).map((entry) => (
                   <div key={entry.id} className="rounded-xl border p-3 text-sm">
@@ -866,6 +1296,33 @@ export default function TelegramPosts() {
                 ))}
                 {recentActivity.length === 0 && <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">Running catalog will appear here after the first Telegram post.</div>}
               </div>
+              <div className="space-y-3">
+                <div className="text-sm font-semibold text-slate-900">Failed Products</div>
+                {failedProducts.slice(0, 6).map((entry) => (
+                  <div key={entry.id} className="rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700">
+                    <div className="font-semibold">{entry.productName || 'Unknown product'}</div>
+                    <div className="mt-1 text-xs">{entry.error}</div>
+                  </div>
+                ))}
+                {failedProducts.length === 0 && <div className="rounded-xl border border-dashed p-4 text-center text-sm text-muted-foreground">No failed products in the selected activity feed.</div>}
+              </div>
+              {selectedCollectionActivity.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-900">Recent Activity</div>
+                  {selectedCollectionActivity.slice(0, 6).map((entry) => (
+                    <div key={entry.id} className="rounded-xl border p-3 text-sm">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-semibold text-slate-900">{entry.productName || entry.collectionName || 'Telegram item'}</div>
+                          <div className="text-xs text-slate-500">{entry.status || 'unknown'}</div>
+                        </div>
+                        <div className="text-right text-xs text-slate-500">{formatDateTime(entry.postedAt || entry.createdAt || entry.updatedAt)}</div>
+                      </div>
+                      {entry.error && <div className="mt-2 text-xs text-red-600">{entry.error}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { auth } from '../../services/firebase';
 import { loadData, updateStoreProfile } from '../../services/storage';
 import { sendStaffOtp, verifyStaffOtp } from '../../services/staffOtp';
@@ -9,8 +9,32 @@ import { getAdminAccessDiagnostics, isAccessDebugEnabled, verifyAdminAccessPassw
 
 const nowSession = (session: Omit<RoleSession, 'loginAt'>): RoleSession => ({ ...session, loginAt: new Date().toISOString() });
 const FAILED_ATTEMPT_COOLDOWN_MS = 1500;
-const DEV_ACCESS_BYPASS_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEV_ACCESS_BYPASS === 'true';
+const DEV_ACCESS_BYPASS_ENABLED = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEV_ACCESS_BYPASS === 'true';
 const SIMPLE_ACCESS_MODE_ENABLED = String((import.meta as any).env?.VITE_SIMPLE_ACCESS_MODE || 'true').toLowerCase() !== 'false';
+const AUTH_DEBUG_LOGS_ENABLED = String((import.meta as any).env?.VITE_DEBUG_AUTH_LOGS || 'false').toLowerCase() === 'true';
+const DEFAULT_OTP_EXPIRY_SECONDS = 120;
+
+const logAuthDebug = (event: string, payload: Record<string, unknown>) => {
+  if (!AUTH_DEBUG_LOGS_ENABLED) return;
+  console.log(event, payload);
+};
+
+const getOtpExpiryDeadline = (payload?: { expiresInSeconds?: number; expiresAt?: string; }) => {
+  const expiresAtMs = payload?.expiresAt ? new Date(payload.expiresAt).getTime() : NaN;
+  if (Number.isFinite(expiresAtMs)) return expiresAtMs;
+  const expiresInSeconds = Number(payload?.expiresInSeconds);
+  if (Number.isFinite(expiresInSeconds) && expiresInSeconds > 0) {
+    return Date.now() + (expiresInSeconds * 1000);
+  }
+  return Date.now() + (DEFAULT_OTP_EXPIRY_SECONDS * 1000);
+};
+
+const formatCountdown = (remainingMs: number) => {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
 
 export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSession) => void }) {
   const [password, setPassword] = useState('');
@@ -27,6 +51,9 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
   const [otpCode, setOtpCode] = useState('');
   const [otpNotice, setOtpNotice] = useState<string | null>(null);
   const [isOtpSubmitting, setIsOtpSubmitting] = useState(false);
+  const [otpExpiresAtMs, setOtpExpiresAtMs] = useState<number | null>(null);
+  const [otpRemainingMs, setOtpRemainingMs] = useState(DEFAULT_OTP_EXPIRY_SECONDS * 1000);
+  const [otpExpired, setOtpExpired] = useState(false);
 
   const currentData = loadData();
   const activeOperators = useMemo(
@@ -37,6 +64,21 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
   const accessHelpText = accessDiagnostics.adminPinConfigured
     ? 'Enter ERP admin PIN or active operator PIN.'
     : 'Enter Firebase password or active operator PIN.';
+
+  useEffect(() => {
+    if (!otpExpiresAtMs) return;
+    const tick = () => {
+      const remaining = Math.max(0, otpExpiresAtMs - Date.now());
+      setOtpRemainingMs(remaining);
+      if (remaining <= 0) {
+        setOtpExpired(true);
+        setError((current) => current || 'OTP expired. Request a new OTP.');
+      }
+    };
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => window.clearInterval(interval);
+  }, [otpExpiresAtMs]);
 
   const enterAdmin = () => {
     setError(null);
@@ -70,10 +112,13 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
       if (!email) {
         throw new Error('Unable to send verification code.');
       }
-      await sendStaffOtp(email);
+      const otpResponse = await sendStaffOtp(email);
       setOtpCode('');
       setPendingOtpRole(role);
       setOtpFlow('verify');
+      setOtpExpired(false);
+      setOtpExpiresAtMs(getOtpExpiryDeadline(otpResponse));
+      setOtpRemainingMs(Math.max(0, getOtpExpiryDeadline(otpResponse) - Date.now()));
       setOtpNotice(`Verification code sent to ${email}.`);
     } catch (setupError) {
       setPendingOtpRole(null);
@@ -96,6 +141,9 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
     setPendingOtpRole(null);
     setOtpCode('');
     setOtpNotice(null);
+    setOtpExpiresAtMs(null);
+    setOtpRemainingMs(DEFAULT_OTP_EXPIRY_SECONDS * 1000);
+    setOtpExpired(false);
     setError(null);
   };
 
@@ -111,13 +159,50 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
       setError('Code must be 6 digits.');
       return;
     }
+    if (otpExpired || (otpExpiresAtMs !== null && otpExpiresAtMs <= Date.now())) {
+      setOtpExpired(true);
+      setError('OTP expired. Request a new OTP.');
+      return;
+    }
+    logAuthDebug('otp.verify.start', {
+      role: pendingOtpRole,
+      hasEmail: Boolean(email),
+      codeLength: code.length,
+    });
     setIsOtpSubmitting(true);
     setError(null);
     try {
-      await verifyStaffOtp(email, code);
+      const verificationResult = await verifyStaffOtp(email, code);
+      const verified = verificationResult?.ok === true || verificationResult?.success === true;
+      if (!verified) {
+        logAuthDebug('otp.verify.failed', {
+          role: pendingOtpRole,
+          hasEmail: Boolean(email),
+          responseOk: verificationResult?.ok === true,
+          responseSuccess: verificationResult?.success === true,
+        });
+        setError('Invalid OTP');
+        return;
+      }
+      logAuthDebug('otp.verify.success', {
+        role: pendingOtpRole,
+        hasEmail: Boolean(email),
+      });
       finishOtpEntry();
     } catch (otpError) {
-      setError(otpError instanceof Error ? otpError.message : 'Invalid or expired OTP.');
+      const message = otpError instanceof Error ? otpError.message : 'OTP verification failed. Try again.';
+      const isExpiredOtp = /otp_expired|expired/i.test(message);
+      const isInvalidOtp = /otp_mismatch|invalid|unauthorized|401|400/i.test(message);
+      logAuthDebug(
+        isInvalidOtp || isExpiredOtp ? 'otp.verify.failed' : 'otp.verify.network_error',
+        { role: pendingOtpRole, hasEmail: Boolean(email), message },
+      );
+      if (isExpiredOtp) {
+        setOtpExpired(true);
+        setError('OTP expired. Request a new OTP.');
+        return;
+      }
+      setError(isInvalidOtp ? 'Invalid OTP' : 'OTP verification failed. Try again.');
     } finally {
       setIsOtpSubmitting(false);
     }
@@ -134,7 +219,12 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
     setError(null);
     setOtpNotice(null);
     try {
-      await sendStaffOtp(email);
+      const otpResponse = await sendStaffOtp(email);
+      const nextExpiryDeadline = getOtpExpiryDeadline(otpResponse);
+      setOtpCode('');
+      setOtpExpired(false);
+      setOtpExpiresAtMs(nextExpiryDeadline);
+      setOtpRemainingMs(Math.max(0, nextExpiryDeadline - Date.now()));
       setOtpNotice(`Verification code sent to ${email}.`);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : 'Unable to send verification code.');
@@ -280,6 +370,9 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
                   <div className="space-y-1">
                     <div className="text-sm font-semibold text-slate-900">{pendingOtpRole === 'admin' ? 'Verify Admin Email' : 'Verify Staff Email'}</div>
                     <p className="text-xs text-muted-foreground">Enter the 6-digit code sent to your email.</p>
+                    <p className={`text-xs ${otpExpired ? 'text-red-600' : 'text-slate-500'}`}>
+                      {otpExpired ? 'OTP expired. Request a new OTP.' : `OTP expires in ${formatCountdown(otpRemainingMs)}`}
+                    </p>
                   </div>
                   {otpNotice && <p className="text-xs text-emerald-700">{otpNotice}</p>}
                   <div className="space-y-1">
@@ -296,7 +389,7 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
                   </div>
                   <div className="flex gap-2">
                     <Button type="button" variant="outline" className="flex-1" onClick={backToRoleChoice} disabled={isOtpSubmitting}>Back</Button>
-                    <Button type="button" className="flex-1" onClick={() => void submitOtp()} disabled={isOtpSubmitting}>
+                    <Button type="button" className="flex-1" onClick={() => void submitOtp()} disabled={isOtpSubmitting || otpExpired}>
                       {isOtpSubmitting ? 'Verifying...' : 'Verify'}
                     </Button>
                   </div>

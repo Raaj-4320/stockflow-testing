@@ -3,9 +3,9 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
-import { Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction, UpfrontOrder } from '../types';
+import { Customer, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, Transaction, UpfrontOrder } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder, uploadImageFileToCloudinary, analyzeMissingProductPurchaseHistoryRows, MissingProductPurchaseHistoryRowsAnalysis, tracePurchaseOrderProductHistoryLink, PurchaseOrderProductHistoryTraceResult } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder, uploadImageFileToCloudinary, analyzeMissingProductPurchaseHistoryRows, MissingProductPurchaseHistoryRowsAnalysis, tracePurchaseOrderProductHistoryLink, PurchaseOrderProductHistoryTraceResult } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight, MoreVertical } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -16,7 +16,10 @@ import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { formatCurrency, formatCurrencyWhole } from '../services/numberFormat';
+import { buildPurchasePartyCanonicalView, resolveCanonicalPurchasePartyForDraft, resolvePurchasePartyIdentity } from '../services/purchasePartyIdentity';
 import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
+
+const STORAGE_DEBUG_LOGS_ENABLED = String((import.meta as any).env?.VITE_DEBUG_STORAGE_LOGS || 'false').toLowerCase() === 'true';
 import {
   buildLegacyPurchaseHistoryConversionDryRun,
   LegacyProductPurchaseHistoryFallbackRow,
@@ -134,7 +137,7 @@ export default function Admin() {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isCatalogOptionsOpen, setIsCatalogOptionsOpen] = useState(false);
-  const [purchaseParties, setPurchaseParties] = useState<Array<{ id: string; name: string }>>([]);
+  const [purchaseParties, setPurchaseParties] = useState<PurchaseParty[]>([]);
   const [selectedPurchasePartyId, setSelectedPurchasePartyId] = useState('');
   const [supplierPayableManuallyEdited, setSupplierPayableManuallyEdited] = useState(false);
 
@@ -327,15 +330,24 @@ export default function Admin() {
     setStoreProfile(data.profile || null);
     setVariantsMaster(data.variantsMaster || []);
     setColorsMaster(data.colorsMaster || []);
-    setPurchaseParties(getPurchaseParties().map((party) => ({ id: party.id, name: party.name })));
+    setPurchaseParties(Array.isArray(data.purchaseParties) ? data.purchaseParties : []);
   };
+  const purchasePartyCanonicalView = useMemo(() => buildPurchasePartyCanonicalView(
+    purchaseParties,
+    {
+      purchaseOrders,
+      supplierPayments: loadData().supplierPayments || [],
+      partyCreditLedger: loadData().partyCreditLedger || [],
+    },
+  ), [purchaseOrders, purchaseParties.length]);
+  const visiblePurchaseParties = useMemo(() => purchasePartyCanonicalView.visibleParties, [purchasePartyCanonicalView]);
   const purchasePartySuggestions = useMemo(() => {
     const query = purchasePartyName.trim().toLowerCase();
     if (!purchaseTarget || !query || !isPurchasePartyInputFocused) return [];
-    return getPurchaseParties()
+    return visiblePurchaseParties
       .filter((party) => party.name.toLowerCase().includes(query))
       .slice(0, 5);
-  }, [purchasePartyName, purchaseTarget, isPurchasePartyInputFocused]);
+  }, [purchasePartyName, purchaseTarget, isPurchasePartyInputFocused, visiblePurchaseParties]);
 
   useEffect(() => {
     refreshData();
@@ -354,6 +366,7 @@ export default function Admin() {
 
 
   useEffect(() => {
+    if (!STORAGE_DEBUG_LOGS_ENABLED) return;
     console.info('[StockFlowDataAudit]', 'inventory.render', {
       productsCount: products.length,
       firstProducts: getProductAuditSample(products),
@@ -369,7 +382,7 @@ export default function Admin() {
       })
       .filter(Boolean)
       .slice(0, 10);
-    if (malformed.length) {
+    if (STORAGE_DEBUG_LOGS_ENABLED && malformed.length) {
       console.info('[StockFlowDataAudit]', 'product.optional_fields_detected', { products: malformed });
     }
   }, [products]);
@@ -752,7 +765,7 @@ export default function Admin() {
           const remainingPayable = h.remainingPayable == null ? null : toNonNegativeNumber(h.remainingPayable);
           const paymentSummary = h.paymentBreakdown || { cash: 0, online: 0, partyCredit: 0 };
           const partyName = h.partyName || 'Not linked / Unknown';
-          const poLabel = h.purchaseOrderLabel || h.purchaseOrderId || 'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â';
+          const poLabel = h.purchaseOrderLabel || h.purchaseOrderId || '—';
           const isReviewRow = h.linkStatus === 'needs_review';
           const purchaseOrderActionHelp = 'Edit/delete for purchase-order history will be handled from Purchase Orders.';
 
@@ -771,7 +784,7 @@ export default function Admin() {
             </div>
           )}
           <div className="text-muted-foreground">
-            <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(h.variant, NO_VARIANT)} &nbsp;ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢&nbsp;
+            <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(h.variant, NO_VARIANT)} &nbsp;•&nbsp;
             <span className="font-medium text-foreground">Color:</span> {formatVariantColorValue(h.color, NO_COLOR)}
           </div>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -780,8 +793,8 @@ export default function Admin() {
             <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">{lineTotal.toFixed(2)}</div></div>
           </div>
           <div className="space-y-1 text-[11px]">
-            <div><span className="text-muted-foreground">Reference:</span> {h.reference || 'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â'}</div>
-            <div><span className="text-muted-foreground">Notes:</span> {h.notes || 'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â'}</div>
+            <div><span className="text-muted-foreground">Reference:</span> {h.reference || '—'}</div>
+            <div><span className="text-muted-foreground">Notes:</span> {h.notes || '—'}</div>
             {isReviewRow && (
               <div className="text-amber-700">
                 <span className="font-medium">Review:</span> {h.reviewReason || 'Purchase order line needs a product link review.'}
@@ -794,9 +807,9 @@ export default function Admin() {
               <div><span className="text-muted-foreground">Party:</span> <span className="font-medium">{partyName}</span></div>
               <div><span className="text-muted-foreground">PO:</span> <span className="font-medium">{poLabel}</span></div>
               <div><span className="text-muted-foreground">Line Total:</span> <span className="font-medium">{lineTotal.toFixed(2)}</span></div>
-              <div><span className="text-muted-foreground">Order Total:</span> <span className="font-medium">{orderTotal != null ? `${orderTotal.toFixed(2)}` : 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</span></div>
-              <div><span className="text-muted-foreground">Paid:</span> <span className="font-medium">{orderPaid != null ? `${orderPaid.toFixed(2)}` : 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</span></div>
-              <div><span className="text-muted-foreground">Remaining Payable:</span> <span className="font-medium">{remainingPayable != null ? `${remainingPayable.toFixed(2)}` : 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</span></div>
+              <div><span className="text-muted-foreground">Order Total:</span> <span className="font-medium">{orderTotal != null ? `${orderTotal.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Paid:</span> <span className="font-medium">{orderPaid != null ? `${orderPaid.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Remaining Payable:</span> <span className="font-medium">{remainingPayable != null ? `${remainingPayable.toFixed(2)}` : '—'}</span></div>
               <div><span className="text-muted-foreground">Party Credit Used:</span> <span className="font-medium">{paymentSummary.partyCredit.toFixed(2)}</span></div>
               <div><span className="text-muted-foreground">Cash:</span> <span className="font-medium">{paymentSummary.cash.toFixed(2)}</span></div>
               <div><span className="text-muted-foreground">Online/Bank:</span> <span className="font-medium">{paymentSummary.online.toFixed(2)}</span></div>
@@ -836,10 +849,10 @@ export default function Admin() {
               <div className="text-muted-foreground">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</div>
             </div>
             <div className="rounded border border-amber-200 bg-white px-2 py-1 text-[11px] text-amber-900">
-              Legacy-only history row ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â not part of canonical purchase ledger.
+              Legacy-only history row — not part of canonical purchase ledger.
             </div>
             <div className="text-muted-foreground">
-              <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(row.variant, NO_VARIANT)} &nbsp;ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢&nbsp;
+              <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(row.variant, NO_VARIANT)} &nbsp;•&nbsp;
               <span className="font-medium text-foreground">Color:</span> {formatVariantColorValue(row.color, NO_COLOR)}
             </div>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -848,10 +861,10 @@ export default function Admin() {
               <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">{lineTotal.toFixed(2)}</div></div>
             </div>
             <div className="space-y-1 text-[11px]">
-              <div><span className="text-muted-foreground">Reference:</span> {row.reference || 'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â'}</div>
-              <div><span className="text-muted-foreground">Notes:</span> {row.notes || 'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â'}</div>
+              <div><span className="text-muted-foreground">Reference:</span> {row.reference || '—'}</div>
+              <div><span className="text-muted-foreground">Notes:</span> {row.notes || '—'}</div>
               <div><span className="text-muted-foreground">Linked Purchase Order:</span> {row.purchaseOrderLabel || row.purchaseOrderId || 'Not linked'}</div>
-              <div><span className="text-muted-foreground">Party:</span> {row.partyName || 'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â'}</div>
+              <div><span className="text-muted-foreground">Party:</span> {row.partyName || '—'}</div>
             </div>
           </div>
         );
@@ -1066,10 +1079,16 @@ export default function Admin() {
         }
         updated = await addProduct(productPayload);
         if (supplierSectionTouched) {
-          const existingParty = (formData.supplierPartyId
-            ? getPurchaseParties().find((p) => p.id === formData.supplierPartyId)
-            : undefined) || getPurchaseParties().find((p) => safeLower(p.name) === safeLower(supplierName));
-          const party = existingParty || await createPurchaseParty({ name: supplierName });
+          const partyResolution = resolvePurchasePartyForAdmin({
+            id: formData.supplierPartyId,
+            name: supplierName,
+          });
+          if (partyResolution.status === 'ambiguous') {
+            throw new Error('Multiple supplier parties match this name. Please select the correct supplier from the supplier list before saving.');
+          }
+          const party = partyResolution.status === 'matched'
+            ? partyResolution.party
+            : await createPurchaseParty({ name: supplierName });
           if (supplierPayable > 0) {
             const now = new Date().toISOString();
             const order: PurchaseOrder = {
@@ -1227,26 +1246,41 @@ export default function Admin() {
   const purchaseEffectivePaidAmount = useMemo(() => Number((purchaseEffectiveCashPaid + purchaseEffectiveBankPaid).toFixed(2)), [purchaseEffectiveCashPaid, purchaseEffectiveBankPaid]);
   const purchaseRemainingDue = useMemo(() => Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2))), [purchaseTotalCost, purchaseEffectivePaidAmount]);
   const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const getPurchasePartyRelatedIds = (partyId: string) => purchasePartyCanonicalView.canonicalIdToRelatedIds.get(partyId) || [partyId];
+  const resolvePurchasePartyForAdmin = (draft: { id?: string | null; name?: string; phone?: string; gst?: string; location?: string; contactPerson?: string; notes?: string }) => {
+    const rawParties = purchaseParties;
+    const resolution = resolvePurchasePartyIdentity(rawParties, draft);
+    if (resolution.status !== 'matched') return resolution;
+    const canonicalParty = resolveCanonicalPurchasePartyForDraft(rawParties, { id: resolution.party.id }, {
+      purchaseOrders,
+      supplierPayments: loadData().supplierPayments || [],
+      partyCreditLedger: loadData().partyCreditLedger || [],
+    });
+    return canonicalParty
+      ? { ...resolution, party: canonicalParty, candidates: [canonicalParty] }
+      : resolution;
+  };
   const partyCreditEntryMatchesParty = (entry: { partyId?: string; partyName?: string }, party: { id?: string; name?: string }) => {
-    const entryId = String(entry.partyId || '').trim();
     const partyId = String(party.id || '').trim();
-    if (entryId && partyId && entryId === partyId) return true;
-    const entryName = normalizePartyName(entry.partyName);
-    const partyName = normalizePartyName(party.name);
-    return !!entryName && !!partyName && entryName === partyName;
+    if (!partyId) return false;
+    return new Set(getPurchasePartyRelatedIds(partyId)).has(String(entry.partyId || '').trim());
   };
   const purchaseAvailablePartyCredit = useMemo(() => {
     const partyName = purchasePartyName.trim();
     if (!partyName && !selectedPurchasePartyId) return 0;
-    const parties = getPurchaseParties();
-    const matchedParty = (selectedPurchasePartyId
-      ? parties.find((p) => p.id === selectedPurchasePartyId)
-      : undefined) || parties.find((p) => normalizePartyName(p.name) === normalizePartyName(partyName));
+    const rawParties = purchaseParties;
+    const matchedParty = resolveCanonicalPurchasePartyForDraft(rawParties, { id: selectedPurchasePartyId, name: partyName }, {
+      purchaseOrders,
+      supplierPayments: loadData().supplierPayments || [],
+      partyCreditLedger: loadData().partyCreditLedger || [],
+    }) || (selectedPurchasePartyId
+      ? visiblePurchaseParties.find((p) => p.id === selectedPurchasePartyId)
+      : undefined) || visiblePurchaseParties.find((p) => normalizePartyName(p.name) === normalizePartyName(partyName));
     const partyRef = { id: matchedParty?.id || selectedPurchasePartyId, name: matchedParty?.name || partyName };
     return (loadData().partyCreditLedger || [])
       .filter((entry) => Math.max(0, Number(entry.remainingAmount || 0)) > 0 && partyCreditEntryMatchesParty(entry, partyRef))
       .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
-  }, [purchasePartyName, selectedPurchasePartyId, purchaseParties.length]);
+  }, [purchasePartyName, selectedPurchasePartyId, purchaseParties.length, purchaseOrders, visiblePurchaseParties]);
   const purchaseCreditAppliedPreview = useMemo(
     () => Math.min(purchaseAvailablePartyCredit, Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2)))),
     [purchaseAvailablePartyCredit, purchaseTotalCost, purchaseEffectivePaidAmount]
@@ -1344,10 +1378,17 @@ export default function Admin() {
         })()
       : nextBuyPrice;
 
-    const existingParty = (selectedPurchasePartyId
-      ? getPurchaseParties().find((p) => p.id === selectedPurchasePartyId)
-      : undefined) || getPurchaseParties().find((p) => safeLower(p.name) === safeLower(partyName));
-    const party = existingParty || await createPurchaseParty({ name: partyName });
+    const partyResolution = resolvePurchasePartyForAdmin({
+      id: selectedPurchasePartyId,
+      name: partyName,
+    });
+    if (partyResolution.status === 'ambiguous') {
+      setPurchaseError('Multiple supplier parties match this name. Please select the correct supplier from the supplier list.');
+      return;
+    }
+    const party = partyResolution.status === 'matched'
+      ? partyResolution.party
+      : await createPurchaseParty({ name: partyName });
     const now = new Date().toISOString();
     const orderId = `po-admin-${Date.now()}`;
     const line: PurchaseOrderLine = {
@@ -1613,8 +1654,19 @@ export default function Admin() {
   const handleCreateSupplierParty = async () => {
     const name = newSupplierPartyName.trim();
     if (!name) return setError('Party name is required.');
-    const existing = getPurchaseParties().find((p) => safeLower(p.name).trim() === safeLower(name));
-    const party = existing || await createPurchaseParty({
+    const partyResolution = resolvePurchasePartyForAdmin({
+      name,
+      phone: newSupplierPartyPhone,
+      gst: newSupplierPartyGst,
+      location: newSupplierPartyLocation,
+      contactPerson: newSupplierPartyContactPerson,
+      notes: newSupplierPartyNotes,
+    });
+    if (partyResolution.status === 'ambiguous') {
+      setError('Multiple supplier parties already use this name. Add phone or GST, or select the correct existing supplier instead of creating another duplicate.');
+      return;
+    }
+    const party = await createPurchaseParty({
       name,
       phone: newSupplierPartyPhone.trim() || undefined,
       gst: newSupplierPartyGst.trim() || undefined,
@@ -2019,7 +2071,7 @@ export default function Admin() {
     return buildLegacyPurchaseHistoryConversionDryRun({
       products: filteredProducts,
       orders: purchaseOrders,
-      parties: getPurchaseParties(),
+      parties: purchaseParties,
     });
   }, [filteredProducts, purchaseOrders]);
   const purchaseHistoryReviewFilteredRows = useMemo(() => {
@@ -3623,7 +3675,7 @@ export default function Admin() {
                         <Label>Party / Supplier</Label>
                         <Input value={formData.supplierName ?? ''} onChange={e => {
                           const value = e.target.value;
-                          const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
+                          const matched = visiblePurchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
                           setFormData({ ...formData, supplierName: value, supplierPartyId: matched?.id || '' });
                         }} placeholder="Select or type supplier name" />
                         <div className="mt-2 flex items-center gap-2">
@@ -3667,8 +3719,8 @@ export default function Admin() {
             <CardContent className="space-y-3">
               <Input value={supplierPartySearch} onChange={e => setSupplierPartySearch(e.target.value)} placeholder="Search party by name / phone / GST" />
               <div className="max-h-[50vh] overflow-y-auto border rounded-md">
-                {getPurchaseParties().filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { if (supplierPartyPickerContext === 'purchase') { setPurchasePartyName(p.name); setSelectedPurchasePartyId(p.id); } else { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); } setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.phone || 'No phone'} {p.gst ? `ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ GST ${p.gst}` : ''}</div></button>)}
-                {!getPurchaseParties().filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).length && (
+                {visiblePurchaseParties.filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { if (supplierPartyPickerContext === 'purchase') { setPurchasePartyName(p.name); setSelectedPurchasePartyId(p.id); } else { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); } setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.phone || 'No phone'} {p.gst ? `ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ GST ${p.gst}` : ''}</div></button>)}
+                {!visiblePurchaseParties.filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).length && (
                   <div className="p-4 text-sm text-muted-foreground">No parties found. <button type="button" className="text-primary" onClick={() => { setShowSupplierPartyModal(false); setShowAddSupplierPartyModal(true); }}>Add Party</button></div>
                 )}
               </div>
@@ -3716,7 +3768,7 @@ export default function Admin() {
                   </div>
                   <div>
                     <div className="font-semibold text-base">{purchaseTarget.name}</div>
-                    <div className="text-xs text-muted-foreground">{purchaseTarget.category} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ HSN: {purchaseTarget.hsn || 'N/A'}</div>
+                    <div className="text-xs text-muted-foreground">{purchaseTarget.category} • HSN: {purchaseTarget.hsn || 'N/A'}</div>
                   </div>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
@@ -3737,7 +3789,7 @@ export default function Admin() {
                   >
                     {purchaseVariantRows.map((row) => (
                       <option key={row.key} value={row.key}>
-                        {row.variant || NO_VARIANT} / {row.color || NO_COLOR} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Stock {toNonNegativeNumber(row.stock)} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Buy {toNonNegativeNumber(row.buyPrice)}
+                        {row.variant || NO_VARIANT} / {row.color || NO_COLOR} • Stock {toNonNegativeNumber(row.stock)} • Buy {toNonNegativeNumber(row.buyPrice)}
                       </option>
                     ))}
                   </select>
@@ -3760,7 +3812,7 @@ export default function Admin() {
                         onChange={(e) => {
                           const value = e.target.value;
                           setPurchasePartyName(value);
-                          const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
+                          const matched = visiblePurchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
                           setSelectedPurchasePartyId(matched?.id || '');
                         }}
                       />
@@ -3778,7 +3830,7 @@ export default function Admin() {
                               }}
                             >
                               <div className="text-sm font-medium">{party.name}</div>
-                              <div className="text-xs text-muted-foreground">{party.phone || 'No phone'}{party.gst ? ` ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ GST ${party.gst}` : ''}</div>
+                              <div className="text-xs text-muted-foreground">{party.phone || 'No phone'}{party.gst ? ` • GST ${party.gst}` : ''}</div>
                             </button>
                           ))}
                         </div>
@@ -3819,7 +3871,7 @@ export default function Admin() {
               {purchaseError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{purchaseError}</div>}
               <div className="sticky bottom-0 mt-2 flex flex-col gap-2 rounded-lg border bg-background/95 p-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-sm">
-                  <span className="font-semibold">Total:</span> {purchaseTotalCost.toFixed(2)} ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <span className="font-semibold">Paid:</span> {purchaseEffectivePaidAmount.toFixed(2)} ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <span className="font-semibold">Due:</span> {purchaseRemainingDue.toFixed(2)}
+                  <span className="font-semibold">Total:</span> {purchaseTotalCost.toFixed(2)} • <span className="font-semibold">Paid:</span> {purchaseEffectivePaidAmount.toFixed(2)} • <span className="font-semibold">Due:</span> {purchaseRemainingDue.toFixed(2)}
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={() => setPurchaseTarget(null)}>Cancel</Button>

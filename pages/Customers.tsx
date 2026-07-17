@@ -64,7 +64,7 @@ const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => 
 
 const formatCompactDate = (date: string): string => {
   const parsed = new Date(date);
-  if (Number.isNaN(parsed.getTime())) return 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â';
+  if (Number.isNaN(parsed.getTime())) return '—';
   return parsed.toLocaleDateString([], { day: '2-digit', month: 'short' });
 };
 
@@ -102,29 +102,29 @@ const getMovementDisplay = (row: {
 }): { label: string; className: string } => {
   const movement = Number(row.amountMovement || 0);
   const absMovement = Math.abs(movement);
-  if (Math.abs(movement) < 0.005) return { label: 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â', className: 'text-slate-500' };
+  if (Math.abs(movement) < 0.005) return { label: '—', className: 'text-slate-500' };
   if (row.storeCreditCreated && row.storeCreditCreated > 0 && movement < 0) {
-    return { label: `Credit +?${formatMoneyWhole(row.storeCreditCreated)}`, className: 'text-emerald-700' };
+    return { label: `Credit +₹${formatMoneyWhole(row.storeCreditCreated)}`, className: 'text-emerald-700' };
   }
   if (row.storeCreditUsed && row.storeCreditUsed > 0 && movement > 0 && row.type !== 'sale') {
-    return { label: `Credit Used -?${formatMoneyWhole(row.storeCreditUsed)}`, className: 'text-blue-700' };
+    return { label: `Credit Used -₹${formatMoneyWhole(row.storeCreditUsed)}`, className: 'text-blue-700' };
   }
   if (row.type === 'customer_cash_out') {
-    return { label: `Cash Refund +?${formatMoneyWhole(absMovement)}`, className: 'text-orange-700' };
+    return { label: `Cash Refund +₹${formatMoneyWhole(absMovement)}`, className: 'text-orange-700' };
   }
   if (row.type === 'payment') {
-    return { label: `-?${formatMoneyWhole(absMovement)}`, className: 'text-emerald-700' };
+    return { label: `-₹${formatMoneyWhole(absMovement)}`, className: 'text-emerald-700' };
   }
   if (row.type === 'return') {
-    return { label: `-?${formatMoneyWhole(absMovement)}`, className: 'text-purple-700' };
+    return { label: `-₹${formatMoneyWhole(absMovement)}`, className: 'text-purple-700' };
   }
-  if (movement > 0) return { label: `+?${formatMoneyWhole(absMovement)}`, className: 'text-orange-700' };
-  return { label: `-?${formatMoneyWhole(absMovement)}`, className: 'text-emerald-700' };
+  if (movement > 0) return { label: `+₹${formatMoneyWhole(absMovement)}`, className: 'text-orange-700' };
+  return { label: `-₹${formatMoneyWhole(absMovement)}`, className: 'text-emerald-700' };
 };
 
 const getRunningBalanceDisplay = (runningBalance: number): { label: string; className: string } => {
-  if (runningBalance > 0.005) return { label: `?${formatMoneyWhole(runningBalance)} Due`, className: 'text-orange-700' };
-  if (runningBalance < -0.005) return { label: `Store owes ?${formatMoneyWhole(Math.abs(runningBalance))}`, className: 'text-blue-700' };
+  if (runningBalance > 0.005) return { label: `₹${formatMoneyWhole(runningBalance)} Due`, className: 'text-orange-700' };
+  if (runningBalance < -0.005) return { label: `Store owes ₹${formatMoneyWhole(Math.abs(runningBalance))}`, className: 'text-blue-700' };
   return { label: 'Settled', className: 'text-slate-500' };
 };
 
@@ -2691,7 +2691,7 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
                                           </div>
                                         </div>
                                       </td>
-                                      <td className="whitespace-nowrap px-2 py-1.5 text-right text-[13px] font-semibold text-slate-800">?{formatMoneyWhole(row.amount)}</td>
+                                      <td className="whitespace-nowrap px-2 py-1.5 text-right text-[13px] font-semibold text-slate-800">₹{formatMoneyWhole(row.amount)}</td>
                                       {customerDetailPermissions.canEditTransactions && (
                                         <td className="px-2 py-1.5">
                                           {transaction ? (

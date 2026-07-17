@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, RepairHistoryEntry, SupplierPaymentLedgerEntry } from '../types';
-import { appendRepairHistoryEntry, applyConfirmedPurchasePartyOrderOnlyMerge, applyMissingProductPurchaseHistoryRowsSafePatches, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, deleteSupplierPayment, editInventoryPurchaseHistoryEntry, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, searchPurchaseOrdersRuntime, updatePurchaseOrder, updatePurchaseParty, updateSupplierPayment, ApplyMissingProductPurchaseHistorySafeRestoreResult, MissingProductPurchaseHistoryDryRunResult, PurchaseOrderRuntimeSearchResult } from '../services/storage';
+import { appendRepairHistoryEntry, applyConfirmedPurchasePartyOrderOnlyMerge, applyMissingProductPurchaseHistoryRowsSafePatches, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, deleteSupplierPayment, editInventoryPurchaseHistoryEntry, getPurchaseOrders, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, searchPurchaseOrdersRuntime, updatePurchaseOrder, updatePurchaseParty, updateSupplierPayment, ApplyMissingProductPurchaseHistorySafeRestoreResult, MissingProductPurchaseHistoryDryRunResult, PurchaseOrderRuntimeSearchResult } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows, NO_COLOR, NO_VARIANT } from '../services/productVariants';
@@ -21,6 +21,7 @@ import { can, isAdmin } from '../src/auth/simplePermissions';
 import { useRoleSession } from '../src/auth/roleSession';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
 import { auth } from '../services/firebase';
+import { buildPurchasePartyCanonicalView, buildPurchasePartyDuplicateCheckReport, classifyPurchasePartyReference, type PurchasePartyReferenceStatus } from '../services/purchasePartyIdentity';
 
 type PurchaseTab = 'orders' | 'parties';
 type WizardStep = 'source' | 'product' | 'variants' | 'pricing' | 'review' | 'newProduct';
@@ -70,8 +71,17 @@ const parseAccountingNumber = (value: string) => {
 };
 const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const EMPTY_DASH = '\u2014';
-const DISPLAY_SEPARATOR = '\u2022';
+const DISPLAY_SEPARATOR = '·';
 const formatDisplayText = (value: unknown, fallback = EMPTY_DASH) => sanitizeDisplayText(value, fallback);
+const fixPurchasePanelTextNode = (value: string) => value
+  .replace(/Ã¢â€ â€™|â†’/g, '→')
+  .replace(/Ã¢â‚¬â€|â€”/g, '—')
+  .replace(/Ã‚Â·|Â·|â€¢/g, ` ${DISPLAY_SEPARATOR} `)
+  .replace(/Ã—/g, '×')
+  .replace(/\s+·\s+/g, ` ${DISPLAY_SEPARATOR} `)
+  .replace(/(^|[\s(])\?(\d[\d,]*(?:\.\d{1,2})?)/g, '$1₹$2')
+  .replace(/Ã‚/g, '')
+  .replace(/\s+/g, ' ');
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
 const toDateTimeLocalNow = () => {
   const d = new Date();
@@ -90,14 +100,7 @@ const parseDateTimeInput = (value: string) => {
   return parsed.toISOString();
 };
 const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
-const partyMatchesCredit = (party: { id?: string; name?: string }, creditEntry: { partyId?: string; partyName?: string }) => {
-  const partyId = String(party.id || '').trim();
-  const creditPartyId = String(creditEntry.partyId || '').trim();
-  if (partyId && creditPartyId) return partyId === creditPartyId;
-  const partyName = normalizePartyName(party.name);
-  const creditPartyName = normalizePartyName(creditEntry.partyName);
-  return !!partyName && !!creditPartyName && partyName === creditPartyName;
-};
+const partyMatchesCredit = (partyIds: Set<string>, creditEntry: { partyId?: string; partyName?: string }) => partyIds.has(String(creditEntry.partyId || '').trim());
 const makePendingBarcode = () => `PENDING-${Math.floor(100000 + Math.random() * 900000)}`;
 const normalizeText = (v?: string) => (v || '').trim();
 const comboKey = (variant?: string, color?: string) => `${normalizeText(variant)}::${normalizeText(color)}`;
@@ -185,6 +188,8 @@ type PurchaseOrderDiagnosticRow = {
   orderPartyId: string;
   orderPartyName: string;
   partyFound: boolean;
+  partyReferenceStatus: PurchasePartyReferenceStatus;
+  resolvedCanonicalPartyId: string;
   lineIndex: number;
   lineId: string;
   productId: string;
@@ -535,8 +540,8 @@ function PurchaseHistoryCards({
             )}
             <div className="mt-2 grid gap-2 sm:grid-cols-3">
               <SummaryCard label="Qty" value={formatNumber(Math.max(0, Number(row.quantity || 0)), 0)} />
-              <SummaryCard label="Unit Cost" value={`?${formatNumber(Math.max(0, Number(row.unitPrice || 0)))}`} />
-              <SummaryCard label="Line Total" value={`?${formatNumber(lineTotal)}`} />
+              <SummaryCard label="Unit Cost" value={formatCurrency(Math.max(0, Number(row.unitPrice || 0)))} />
+              <SummaryCard label="Line Total" value={formatCurrency(lineTotal)} />
             </div>
             <div className="mt-2 text-[11px] text-slate-600">
               Variant: <span className="font-medium text-slate-900">{formatVariantValue(row.variant, NO_VARIANT)}</span> Â· Color: <span className="font-medium text-slate-900">{formatVariantValue(row.color, NO_COLOR)}</span>
@@ -577,8 +582,8 @@ function LegacyAuditHistoryCards({ productName, rows }: { productName: string; r
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             <SummaryCard label="Qty" value={formatNumber(Math.max(0, Number(row.quantity || 0)), 0)} />
-            <SummaryCard label="Unit Cost" value={`?${formatNumber(Math.max(0, Number(row.unitPrice || 0)))}`} />
-            <SummaryCard label="Line Total" value={`?${formatNumber(Math.max(0, Number(row.lineTotal || (row.quantity * row.unitPrice) || 0)))}`} />
+            <SummaryCard label="Unit Cost" value={formatCurrency(Math.max(0, Number(row.unitPrice || 0)))} />
+            <SummaryCard label="Line Total" value={formatCurrency(Math.max(0, Number(row.lineTotal || (row.quantity * row.unitPrice) || 0)))} />
           </div>
           <div className="mt-2 grid gap-1 text-[11px] text-slate-600">
             <div>Purchase Order: <span className="font-medium text-slate-900">{row.purchaseOrderLabel || row.purchaseOrderId || 'Not linked'}</span></div>
@@ -614,6 +619,7 @@ type PurchasePanelProps = {
 };
 
 export default function PurchasePanel({ repairMode = false, embeddedRepairCenter = false }: PurchasePanelProps) {
+  const purchasePanelRootRef = useRef<HTMLDivElement | null>(null);
   const { requestAdminOverride } = useRoleSession();
   const ORDERS_PAGE_SIZE = 15;
   const [activeTab] = useState<PurchaseTab>('parties');
@@ -664,6 +670,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const [newPartyContactPerson, setNewPartyContactPerson] = useState('');
   const [newPartyNotes, setNewPartyNotes] = useState('');
   const [partyDuplicateWarning, setPartyDuplicateWarning] = useState<PurchaseParty | null>(null);
+  const [showDuplicatePartyChecker, setShowDuplicatePartyChecker] = useState(false);
   const [supplierMergeApplyStatus, setSupplierMergeApplyStatus] = useState<SupplierMergeApplyStatus | null>(null);
   const [applyingSupplierMergeGroupId, setApplyingSupplierMergeGroupId] = useState<string | null>(null);
   const [manualMayurbhaiMergeStatus, setManualMayurbhaiMergeStatus] = useState<SupplierMergeApplyStatus | null>(null);
@@ -751,13 +758,28 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const [partyCreditTouched, setPartyCreditTouched] = useState(false);
   const [purchaseCreditApplyError, setPurchaseCreditApplyError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const root = purchasePanelRootRef.current;
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    while (walker.nextNode()) {
+      const current = walker.currentNode;
+      if (current instanceof Text) textNodes.push(current);
+    }
+    textNodes.forEach((node) => {
+      const original = node.textContent || '';
+      const cleaned = fixPurchasePanelTextNode(original);
+      if (cleaned !== original) node.textContent = cleaned;
+    });
+  });
+
   const refresh = () => {
     const data = loadData();
     const nextOrders = getPurchaseOrders();
-    const nextParties = getPurchaseParties();
     setProducts(data.products || []);
     setOrders(nextOrders);
-    setParties(nextParties);
+    setParties(Array.isArray(data.purchaseParties) ? data.purchaseParties : []);
   };
 
   const refreshPurchaseReceipts = async () => {
@@ -874,14 +896,27 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const hasMeaningfulVariantChoices = sourceMode === 'inventory' ? selectableInventoryVariants.length > 0 : true;
   const canGoVariantsNext = sourceMode === 'new' ? true : (!hasMeaningfulVariantChoices || selectedVariantKeys.length > 0);
   const canGoReviewNext = !!partyId && activeLines.length > 0 && activeLines.every(l => toNum(l.quantity) > 0 && toNum(l.unitCost) > 0);
+  const canonicalPartyView = useMemo(() => buildPurchasePartyCanonicalView(
+    parties,
+    {
+      purchaseOrders: orders,
+      supplierPayments: loadData().supplierPayments || [],
+      partyCreditLedger: loadData().partyCreditLedger || [],
+    },
+  ), [parties, orders]);
+  const visibleParties = useMemo(() => canonicalPartyView.visibleParties, [canonicalPartyView]);
+  const visiblePartyById = useMemo(() => new Map(visibleParties.map((party) => [party.id, party])), [visibleParties]);
+  const getRelatedPartyIds = (partyId: string): string[] => canonicalPartyView.canonicalIdToRelatedIds.get(partyId) || [partyId];
+  const getRelatedPartyIdSet = (partyId: string): Set<string> => new Set<string>(getRelatedPartyIds(partyId));
   const selectedPartyCreditAvailable = useMemo(() => {
     if (!partyId) return 0;
-    const selectedParty = parties.find((p) => p.id === partyId);
+    const selectedParty = visiblePartyById.get(partyId);
     if (!selectedParty) return 0;
+    const relatedIds = getRelatedPartyIdSet(selectedParty.id);
     return (loadData().partyCreditLedger || [])
-      .filter((entry) => partyMatchesCredit({ id: selectedParty.id, name: selectedParty.name }, { partyId: entry.partyId, partyName: entry.partyName }))
+      .filter((entry) => partyMatchesCredit(relatedIds, { partyId: entry.partyId, partyName: entry.partyName }))
       .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
-  }, [partyId, parties, orders.length]);
+  }, [partyId, visiblePartyById, canonicalPartyView, orders.length]);
   const gstRateForPreview = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
   const grossTotalPreview = useMemo(() => draftTotals.totalAmount + ((draftTotals.totalAmount * gstRateForPreview) / 100), [draftTotals.totalAmount, gstRateForPreview]);
   const initialPaidPreview = Math.max(0, Number(initialPaidAmount) || 0);
@@ -1091,7 +1126,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   };
 
   const buildPurchaseOrderFromWizard = () => {
-    const party = parties.find(p => p.id === partyId);
+    const party = visiblePartyById.get(partyId);
     if (!party) throw new Error('Please select a supplier party.');
     setPurchaseCreditApplyError(null);
 
@@ -1152,8 +1187,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
     const initialPaid = Math.max(0, Number(initialPaidAmount) || 0);
     const latestData = loadData();
+    const relatedIds = getRelatedPartyIdSet(party.id);
     const latestAvailablePartyCredit = (latestData.partyCreditLedger || [])
-      .filter((entry) => partyMatchesCredit({ id: party.id, name: party.name }, { partyId: entry.partyId, partyName: entry.partyName }))
+      .filter((entry) => partyMatchesCredit(relatedIds, { partyId: entry.partyId, partyName: entry.partyName }))
       .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
     if (initialPaid > taxableAmount + gstAmount) throw new Error('Initial paid cannot exceed the purchase total.');
     const latestMaxCreditUsable = Math.max(0, Number((taxableAmount + gstAmount - initialPaid).toFixed(2)));
@@ -1392,7 +1428,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   };
 
   const openSupplierPaymentEditModal = (payment: SupplierPaymentLedgerEntry) => {
-    const party = parties.find((item) => item.id === payment.partyId) || null;
+    const canonicalPartyId = canonicalPartyView.partyIdToCanonicalId.get(String(payment.partyId || '').trim()) || String(payment.partyId || '').trim();
+    const party = visiblePartyById.get(canonicalPartyId) || null;
     if (!party) return;
     setPaymentTargetParty(party);
     setEditingSupplierPaymentId(payment.id);
@@ -1521,16 +1558,20 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
 
   const partyFinancials = useMemo(() => {
     const map = new Map<string, { totalPurchase: number; totalPaid: number; remaining: number }>();
-    orders.forEach((order) => {
-      const current = map.get(order.partyId) || { totalPurchase: 0, totalPaid: 0, remaining: 0 };
-      const totalPurchase = current.totalPurchase + Math.max(0, Number(order.totalAmount) || 0);
-      const orderPaid = Math.max(0, Number(order.totalPaid) || 0);
-      const totalPaid = current.totalPaid + orderPaid;
-      const remaining = current.remaining + Math.max(0, Number(order.remainingAmount ?? ((order.totalAmount || 0) - orderPaid)) || 0);
-      map.set(order.partyId, { totalPurchase, totalPaid, remaining });
+    visibleParties.forEach((party) => {
+      const relatedIds = new Set(getRelatedPartyIds(party.id));
+      const summary = (orders || []).reduce((acc, order) => {
+        if (!relatedIds.has(String(order.partyId || '').trim())) return acc;
+        const totalPurchase = acc.totalPurchase + Math.max(0, Number(order.totalAmount) || 0);
+        const orderPaid = Math.max(0, Number(order.totalPaid) || 0);
+        const totalPaid = acc.totalPaid + orderPaid;
+        const remaining = acc.remaining + Math.max(0, Number(order.remainingAmount ?? ((order.totalAmount || 0) - orderPaid)) || 0);
+        return { totalPurchase, totalPaid, remaining };
+      }, { totalPurchase: 0, totalPaid: 0, remaining: 0 });
+      map.set(party.id, summary);
     });
     return map;
-  }, [orders]);
+  }, [orders, visibleParties, canonicalPartyView]);
   const diagnosticProducts = products ?? [];
   const diagnosticParties = parties ?? [];
   const diagnosticOrders = orders ?? [];
@@ -1575,7 +1616,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
           return sum + (String(entry.method || '').toLowerCase() === 'party_credit' ? Math.max(0, Number(entry.amount || 0)) : 0);
         }, 0));
         const paymentMethodLabel = Array.from(new Set((order.paymentHistory || []).map((entry) => String(entry.method || '').trim()).filter(Boolean))).join(', ') || (orderRemaining > 0 ? 'credit' : 'cash');
-        const partyFound = partyById.has(order.partyId);
+        const partyReference = classifyPurchasePartyReference(canonicalPartyView, diagnosticParties, order.partyId);
+        const partyFound = partyReference.status !== 'MISSING_PARTY';
         return (order.lines || []).map((line, lineIndex) => {
           const productId = String(line.productId || '').trim();
           const lineProductName = String(line.productName || '').trim();
@@ -1606,6 +1648,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
             orderPartyId: String(order.partyId || ''),
             orderPartyName: String(order.partyName || ''),
             partyFound,
+            partyReferenceStatus: partyReference.status,
+            resolvedCanonicalPartyId: partyReference.canonicalPartyId,
             lineIndex,
             lineId: String(line.id || ''),
             productId,
@@ -1729,11 +1773,20 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const partyCreditLedger = useMemo(() => dataSnapshot.partyCreditLedger || [], [dataSnapshot]);
   const partyLedgers = useMemo(() => {
     const map = new Map<string, ReturnType<typeof buildPurchasePartyLedger>>();
-    parties.forEach((party) => {
-      map.set(party.id, buildPurchasePartyLedger({ partyId: party.id, purchaseOrders: orders, supplierPayments, partyCreditLedger }));
+    visibleParties.forEach((party) => {
+      map.set(party.id, buildPurchasePartyLedger({ partyId: party.id, relatedPartyIds: getRelatedPartyIds(party.id), purchaseOrders: orders, supplierPayments, partyCreditLedger }));
     });
     return map;
-  }, [parties, orders, supplierPayments, partyCreditLedger]);
+  }, [visibleParties, orders, supplierPayments, partyCreditLedger, canonicalPartyView]);
+
+  const duplicatePartyCheckReport = useMemo(() => buildPurchasePartyDuplicateCheckReport(
+    parties,
+    {
+      purchaseOrders: orders,
+      supplierPayments,
+      partyCreditLedger,
+    },
+  ), [parties, orders, supplierPayments, partyCreditLedger]);
 
   const duplicatePartyReport = useMemo(() => buildDuplicatePurchasePartyReport({ parties, orders, supplierPayments, partyCreditLedger }), [parties, orders, supplierPayments, partyCreditLedger]);
 
@@ -1761,9 +1814,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     if (!canonicalParty) validationMessages.push('Canonical Mayurbhai supplier is not visible.');
     if (!duplicateParty) validationMessages.push('Duplicate no-phone Mayurbhai supplier is not visible. It may already be archived.');
     if (purchaseOrdersToReassign.length !== MAYURBHAI_MANUAL_MERGE.expectedOrderCount) validationMessages.push(`Expected ${MAYURBHAI_MANUAL_MERGE.expectedOrderCount} purchase orders to reassign, found ${purchaseOrdersToReassign.length}.`);
-    if (!moneyMatches(mergedLedger.summary.totalPurchase, MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)) validationMessages.push(`Merged purchases preview is ?${formatNumber(mergedLedger.summary.totalPurchase)}, expected ?${formatNumber(MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)}.`);
-    if (!moneyMatches(mergedLedger.summary.actualPayments, MAYURBHAI_MANUAL_MERGE.expectedPayments)) validationMessages.push(`Merged payments preview is ?${formatNumber(mergedLedger.summary.actualPayments)}, expected ?${formatNumber(MAYURBHAI_MANUAL_MERGE.expectedPayments)}.`);
-    if (!moneyMatches(mergedLedger.summary.netPayable, MAYURBHAI_MANUAL_MERGE.expectedNetPayable)) validationMessages.push(`Merged net payable preview is ?${formatNumber(mergedLedger.summary.netPayable)}, expected ?${formatNumber(MAYURBHAI_MANUAL_MERGE.expectedNetPayable)}.`);
+    if (!moneyMatches(mergedLedger.summary.totalPurchase, MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)) validationMessages.push(`Merged purchases preview is ${formatCurrency(mergedLedger.summary.totalPurchase)}, expected ${formatCurrency(MAYURBHAI_MANUAL_MERGE.expectedTotalPurchases)}.`);
+    if (!moneyMatches(mergedLedger.summary.actualPayments, MAYURBHAI_MANUAL_MERGE.expectedPayments)) validationMessages.push(`Merged payments preview is ${formatCurrency(mergedLedger.summary.actualPayments)}, expected ${formatCurrency(MAYURBHAI_MANUAL_MERGE.expectedPayments)}.`);
+    if (!moneyMatches(mergedLedger.summary.netPayable, MAYURBHAI_MANUAL_MERGE.expectedNetPayable)) validationMessages.push(`Merged net payable preview is ${formatCurrency(mergedLedger.summary.netPayable)}, expected ${formatCurrency(MAYURBHAI_MANUAL_MERGE.expectedNetPayable)}.`);
     return {
       canonicalParty,
       duplicateParty,
@@ -1950,22 +2003,25 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const partyCreditsByPartyId = useMemo(() => {
     const ledger = (loadData().partyCreditLedger || []) as Array<{ partyId?: string; partyName?: string; remainingAmount?: number }>;
     const map = new Map<string, number>();
-    parties.forEach((party) => {
+    visibleParties.forEach((party) => {
+      const relatedIds = getRelatedPartyIdSet(party.id);
       const total = ledger
-        .filter((entry) => partyMatchesCredit({ id: party.id, name: party.name }, entry))
+        .filter((entry) => partyMatchesCredit(relatedIds, entry))
         .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
       map.set(party.id, Number(total.toFixed(2)));
     });
     return map;
-  }, [parties, orders]);
+  }, [visibleParties, partyCreditLedger, canonicalPartyView]);
 
   const purchaseRepairHistoryEntries = useMemo(
-    () => expandedPartyId ? (loadData().repairHistoryEntries || []).filter((entry) => entry.entityType === 'purchase_party' && entry.entityId === expandedPartyId) : [],
-    [expandedPartyId, parties, orders, supplierPayments, partyCreditLedger],
+    () => expandedPartyId
+      ? (loadData().repairHistoryEntries || []).filter((entry) => entry.entityType === 'purchase_party' && getRelatedPartyIdSet(expandedPartyId).has(String(entry.entityId || '').trim()))
+      : [],
+    [expandedPartyId, canonicalPartyView, orders, supplierPayments, partyCreditLedger],
   );
 
   const getPartyRepairBalances = (party: PurchaseParty, nextOrders = orders, nextSupplierPayments = supplierPayments) => {
-    const ledger = buildPurchasePartyLedger({ partyId: party.id, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger });
+    const ledger = buildPurchasePartyLedger({ partyId: party.id, relatedPartyIds: getRelatedPartyIds(party.id), purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments, partyCreditLedger });
     return {
       currentPayable: Number((ledger.summary.currentPayable || 0).toFixed(2)),
       currentCredit: Number((ledger.summary.currentCredit || 0).toFixed(2)),
@@ -1974,7 +2030,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   };
 
   const buildPurchaseRepairPreview = (draft: PurchaseRepairDraft): PurchaseRepairPreview => {
-    const party = parties.find((item) => item.id === draft.partyId);
+    const party = visiblePartyById.get(draft.partyId);
     if (!party) throw new Error('Supplier party not found.');
     let nextOrders = orders;
     let nextSupplierPayments = supplierPayments;
@@ -2142,9 +2198,10 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
 
   const deletePartySafely = async (party: PurchaseParty) => {
     setDeletePartyError(null);
-    const hasOrders = orders.some((o) => o.partyId === party.id || normalizePartyName(o.partyName) === normalizePartyName(party.name));
-    const hasPayments = supplierPayments.some((p: any) => !p.deletedAt && (p.partyId === party.id || normalizePartyName(p.partyName) === normalizePartyName(party.name)));
-    const hasCredits = partyCreditLedger.some((c: any) => (c.partyId === party.id || normalizePartyName(c.partyName) === normalizePartyName(party.name)));
+    const relatedIds = getRelatedPartyIdSet(party.id);
+    const hasOrders = orders.some((o) => relatedIds.has(String(o.partyId || '').trim()));
+    const hasPayments = supplierPayments.some((p: any) => !p.deletedAt && relatedIds.has(String(p.partyId || '').trim()));
+    const hasCredits = partyCreditLedger.some((c: any) => relatedIds.has(String(c.partyId || '').trim()));
     if (hasOrders || hasPayments || hasCredits) {
       setDeletePartyError('This party has transactions and cannot be deleted.');
       return;
@@ -2332,7 +2389,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   }, [expandedPartyId, partyLedgers]);
   const repairCenterFilteredParties = useMemo(() => {
     const query = homeSearch.trim().toLowerCase();
-    const rows = parties.filter((party) => {
+    const rows = visibleParties.filter((party) => {
       if (!query) return true;
       return [
         party.name,
@@ -2343,26 +2400,26 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       ].join(' ').toLowerCase().includes(query);
     });
     return rows.sort((a, b) => a.name.localeCompare(b.name));
-  }, [parties, homeSearch]);
+  }, [visibleParties, homeSearch]);
   const selectedRepairParty = useMemo(
-    () => (expandedPartyId ? parties.find((party) => party.id === expandedPartyId) || null : null),
-    [expandedPartyId, parties],
+    () => (expandedPartyId ? visibleParties.find((party) => party.id === expandedPartyId) || null : null),
+    [expandedPartyId, visibleParties],
   );
   const selectedRepairOrders = useMemo(
     () => expandedPartyId
       ? orders
-        .filter((order) => order.partyId === expandedPartyId)
+        .filter((order) => getRelatedPartyIdSet(expandedPartyId).has(String(order.partyId || '').trim()))
         .sort((a, b) => new Date(b.effectiveAt || b.orderDate || b.createdAt || '').getTime() - new Date(a.effectiveAt || a.orderDate || a.createdAt || '').getTime())
       : [],
-    [expandedPartyId, orders],
+    [expandedPartyId, orders, canonicalPartyView],
   );
   const selectedRepairPayments = useMemo(
     () => expandedPartyId
       ? supplierPayments
-        .filter((payment) => payment.partyId === expandedPartyId && !payment.deletedAt)
+        .filter((payment) => getRelatedPartyIdSet(expandedPartyId).has(String(payment.partyId || '').trim()) && !payment.deletedAt)
         .sort((a, b) => new Date(b.effectiveAt || b.paidAt || b.createdAt || '').getTime() - new Date(a.effectiveAt || a.paidAt || a.createdAt || '').getTime())
       : [],
-    [expandedPartyId, supplierPayments],
+    [expandedPartyId, supplierPayments, canonicalPartyView],
   );
   const isPurchaseLedgerDebugEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
@@ -2373,15 +2430,16 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   }, []);
   const purchaseLedgerDebugPayload = useMemo(() => {
     if (!isPurchaseLedgerDebugEnabled || !expandedPartyId) return null;
-    const party = parties.find((p) => p.id === expandedPartyId);
+    const party = visibleParties.find((p) => p.id === expandedPartyId);
     if (!party) return null;
-    const partyOrders = (orders || []).filter((o) => o.partyId === party.id).map((o) => ({
+    const relatedIds = getRelatedPartyIdSet(party.id);
+    const partyOrders = (orders || []).filter((o) => relatedIds.has(String(o.partyId || '').trim())).map((o) => ({
       id: o.id, billNumber: o.billNumber, date: o.orderDate || o.createdAt, totalAmount: o.totalAmount, remainingAmount: o.remainingAmount, paymentHistory: o.paymentHistory || [],
     }));
-    const partyPayments = (supplierPayments || []).filter((p: any) => p.partyId === party.id && !p.deletedAt).map((p: any) => ({
+    const partyPayments = (supplierPayments || []).filter((p: any) => relatedIds.has(String(p.partyId || '').trim()) && !p.deletedAt).map((p: any) => ({
       id: p.id, voucherNo: p.voucherNo, date: p.paidAt || p.createdAt, amount: p.amount, paymentAppliedToPayable: p.paymentAppliedToPayable, payableApplied: p.payableApplied, partyCreditCreated: p.partyCreditCreated,
     }));
-    const partyCredits = (partyCreditLedger || []).filter((c: any) => c.partyId === party.id).map((c: any) => ({
+    const partyCredits = (partyCreditLedger || []).filter((c: any) => relatedIds.has(String(c.partyId || '').trim())).map((c: any) => ({
       id: c.id, partyId: c.partyId, sourceRef: c.sourceVoucherNo || c.sourcePaymentId, amountCreated: c.amountCreated, remainingAmount: c.remainingAmount, usedAmount: c.usageHistory?.reduce((s: number, u: any) => s + Math.max(0, Number(u.amount || 0)), 0) || 0,
     }));
     const helperOutput = partyLedgers.get(party.id) || null;
@@ -2395,7 +2453,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
         summary: helperOutput?.summary || null,
       },
     };
-  }, [isPurchaseLedgerDebugEnabled, expandedPartyId, parties, orders, supplierPayments, partyCreditLedger, partyLedgers]);
+  }, [isPurchaseLedgerDebugEnabled, expandedPartyId, visibleParties, orders, supplierPayments, partyCreditLedger, partyLedgers, canonicalPartyView]);
   useEffect(() => {
     if (!purchaseLedgerDebugPayload) return;
     console.log('[PURCHASE_LEDGER_DEBUG]', purchaseLedgerDebugPayload);
@@ -2773,17 +2831,292 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
 
   return (
     <>
+      <Modal open={showDuplicatePartyChecker} title="Purchase Party Integrity Check" onClose={() => setShowDuplicatePartyChecker(false)}>
+        <div className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <SummaryCard label="Total raw parties" value={String(duplicatePartyCheckReport.totalRawParties)} />
+            <SummaryCard label="Canonical visible parties" value={String(duplicatePartyCheckReport.canonicalVisibleParties)} />
+            <SummaryCard label="Confirmed duplicate groups" value={String(duplicatePartyCheckReport.duplicateGroupsFound)} />
+            <SummaryCard label="Hidden duplicate/alias parties" value={String(duplicatePartyCheckReport.hiddenDuplicateAliasParties)} />
+            <SummaryCard label="Merged aliases" value={String(duplicatePartyCheckReport.mergedArchivedAliases)} />
+            <SummaryCard label="Ambiguous same-name groups" value={String(duplicatePartyCheckReport.ambiguousSameNameGroups)} />
+          </div>
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <SummaryCard label="Missing party IDs in purchase orders" value={String(duplicatePartyCheckReport.missingPurchaseOrderPartyIds)} />
+            <SummaryCard label="Missing party IDs in supplier payments" value={String(duplicatePartyCheckReport.missingSupplierPaymentPartyIds)} />
+            <SummaryCard label="Missing party IDs in party credit" value={String(duplicatePartyCheckReport.missingPartyCreditIds)} />
+            <SummaryCard label="Unique orphan party IDs" value={String(duplicatePartyCheckReport.uniqueOrphanPartyIds)} />
+            <SummaryCard label="Potentially recoverable orphan IDs" value={String(duplicatePartyCheckReport.potentiallyRecoverableOrphanIds)} />
+            <SummaryCard label="Unresolved orphan IDs" value={String(duplicatePartyCheckReport.unresolvedOrphanIds)} />
+          </div>
+
+          <div className={`rounded-xl border p-3 text-sm ${duplicatePartyCheckReport.integrityIssueCount > 0 ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+            <div className="font-semibold">Status</div>
+            <div className="mt-1">
+              {duplicatePartyCheckReport.integrityIssueCount > 0
+                ? `${duplicatePartyCheckReport.duplicateGroupsFound} duplicate group${duplicatePartyCheckReport.duplicateGroupsFound === 1 ? '' : 's'} and ${duplicatePartyCheckReport.uniqueOrphanPartyIds} orphan party reference group${duplicatePartyCheckReport.uniqueOrphanPartyIds === 1 ? '' : 's'} found.`
+                : 'No duplicate or orphan Purchase Party issues found.'}
+            </div>
+          </div>
+
+          {duplicatePartyCheckReport.investigatedPartyId && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-sm">
+              <div className="font-semibold text-slate-900">Investigated Party ID</div>
+              <div className="mt-1 font-mono text-[11px] text-slate-600">{duplicatePartyCheckReport.investigatedPartyId.partyId}</div>
+              <div className="mt-2 grid gap-3 md:grid-cols-2 xl:grid-cols-3 text-xs text-slate-600">
+                <div>Exists in raw masters: <span className="font-medium text-slate-900">{duplicatePartyCheckReport.investigatedPartyId.exists ? 'Yes' : 'No'}</span></div>
+                <div>Classification: <span className="font-medium text-slate-900">{duplicatePartyCheckReport.investigatedPartyId.status}</span></div>
+                <div>Canonical party: <span className="font-medium text-slate-900">{duplicatePartyCheckReport.investigatedPartyId.canonicalPartyName || '\u2014'}</span></div>
+              </div>
+            </div>
+          )}
+
+          <div className="overflow-auto rounded-xl border">
+            <table className="w-full min-w-[980px] text-xs">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="p-2 text-left">Canonical Party</th>
+                  <th className="p-2 text-left">Canonical ID</th>
+                  <th className="p-2 text-left">Duplicate/Alias</th>
+                  <th className="p-2 text-left">Duplicate ID</th>
+                  <th className="p-2 text-left">Match Reason</th>
+                  <th className="p-2 text-left">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!duplicatePartyCheckReport.groups.length ? (
+                  <tr>
+                    <td colSpan={6} className="p-4 text-center text-sm text-muted-foreground">No confirmed canonical duplicate groups.</td>
+                  </tr>
+                ) : duplicatePartyCheckReport.groups.flatMap((group) => (
+                  group.aliases.map((alias) => (
+                    <tr key={`${group.canonicalPartyId}-${alias.duplicatePartyId}`} className="border-t">
+                      <td className="p-2 font-medium">{group.canonicalPartyName}</td>
+                      <td className="p-2 font-mono text-[11px]">{group.canonicalPartyId}</td>
+                      <td className="p-2">{alias.duplicatePartyName}</td>
+                      <td className="p-2 font-mono text-[11px]">{alias.duplicatePartyId}</td>
+                      <td className="p-2">{alias.matchReason}</td>
+                      <td className="p-2">{alias.status}</td>
+                    </tr>
+                  ))
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {!!duplicatePartyCheckReport.groups.length && (
+            <div className="space-y-3">
+              {duplicatePartyCheckReport.groups.map((group) => (
+                <details key={group.canonicalPartyId} className="rounded-2xl border bg-white">
+                  <summary className="cursor-pointer list-none px-4 py-3">
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="font-semibold text-slate-900">Canonical: {group.canonicalPartyName}</div>
+                        <div className="text-xs text-slate-500">
+                          Related IDs: {group.relatedPartyIds.join(', ')}
+                        </div>
+                      </div>
+                      <div className="text-xs text-slate-600">
+                        Aliases: {group.aliases.length} {'\u00B7'} Evidence: {group.evidence.filter((item) => item !== 'self').join(', ') || 'self'}
+                      </div>
+                    </div>
+                  </summary>
+                  <div className="border-t px-4 py-4">
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      {group.relatedParties.map((party) => {
+                        const activity = group.activityCountsByPartyId[party.id] || { purchaseOrders: 0, supplierPayments: 0, partyCreditEntries: 0 };
+                        return (
+                          <div key={party.id} className="rounded-xl border p-3 text-xs">
+                            <div className="font-semibold text-slate-900">{party.name}</div>
+                            <div className="mt-1 font-mono text-[11px] text-slate-500">{party.id}</div>
+                            <div className="mt-2 space-y-1 text-slate-600">
+                              <div>GST: <span className="font-medium text-slate-900">{party.gst || '\u2014'}</span></div>
+                              <div>Phone: <span className="font-medium text-slate-900">{party.phone || '\u2014'}</span></div>
+                              <div>Created: <span className="font-medium text-slate-900">{party.createdAt ? new Date(party.createdAt).toLocaleString() : '\u2014'}</span></div>
+                              <div>isDeleted: <span className="font-medium text-slate-900">{party.isDeleted ? 'true' : 'false'}</span></div>
+                              <div>mergedIntoPartyId: <span className="font-medium text-slate-900">{party.mergedIntoPartyId || '\u2014'}</span></div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-3 gap-2">
+                              <SummaryCard label="Purchases" value={String(activity.purchaseOrders)} />
+                              <SummaryCard label="Payments" value={String(activity.supplierPayments)} />
+                              <SummaryCard label="Credits" value={String(activity.partyCreditEntries)} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-4 rounded-xl border">
+                      <div className="border-b bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900">Activity Counts Across Related IDs</div>
+                      <div className="overflow-auto">
+                        <table className="w-full min-w-[680px] text-xs">
+                          <thead className="bg-slate-50/70">
+                            <tr>
+                              <th className="p-2 text-left">Party</th>
+                              <th className="p-2 text-left">Party ID</th>
+                              <th className="p-2 text-right">Purchase Orders</th>
+                              <th className="p-2 text-right">Supplier Payments</th>
+                              <th className="p-2 text-right">Party Credit Entries</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {group.relatedParties.map((party) => {
+                              const activity = group.activityCountsByPartyId[party.id] || { purchaseOrders: 0, supplierPayments: 0, partyCreditEntries: 0 };
+                              return (
+                                <tr key={`${group.canonicalPartyId}-${party.id}-activity`} className="border-t">
+                                  <td className="p-2">{party.name}</td>
+                                  <td className="p-2 font-mono text-[11px]">{party.id}</td>
+                                  <td className="p-2 text-right">{activity.purchaseOrders}</td>
+                                  <td className="p-2 text-right">{activity.supplierPayments}</td>
+                                  <td className="p-2 text-right">{activity.partyCreditEntries}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-rose-200 bg-rose-50/40 p-4">
+            <div className="font-semibold text-slate-900">Orphan / Missing Party References</div>
+            <div className="mt-1 text-xs text-slate-600">These references exist in historical orders, payments, or party credit, but the referenced Purchase Party master is missing from the currently loaded raw party dataset.</div>
+            {!duplicatePartyCheckReport.orphanGroups.length ? (
+              <div className="mt-3 text-sm text-muted-foreground">No orphan Purchase Party references found.</div>
+            ) : (
+              <div className="mt-3 space-y-3">
+                {duplicatePartyCheckReport.orphanGroups.map((group) => (
+                  <details key={`orphan-${group.partyId}`} className="rounded-xl border bg-white">
+                    <summary className="cursor-pointer list-none px-4 py-3">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="font-semibold text-slate-900">Missing Party ID: <span className="font-mono text-[11px]">{group.partyId}</span></div>
+                          <div className="text-xs text-slate-500">Snapshot Name: {group.snapshotName || 'Unknown supplier snapshot'}</div>
+                        </div>
+                        <div className="text-xs text-slate-600">
+                          {group.purchaseOrderCount} purchase order{group.purchaseOrderCount === 1 ? '' : 's'} {'\u00B7'} {group.supplierPaymentCount} payment{group.supplierPaymentCount === 1 ? '' : 's'} {'\u00B7'} {group.partyCreditCount} credit entr{group.partyCreditCount === 1 ? 'y' : 'ies'}
+                        </div>
+                      </div>
+                    </summary>
+                    <div className="border-t px-4 py-4">
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                        <SummaryCard label="Purchase orders" value={String(group.purchaseOrderCount)} />
+                        <SummaryCard label="Supplier payments" value={String(group.supplierPaymentCount)} />
+                        <SummaryCard label="Party credit entries" value={String(group.partyCreditCount)} />
+                        <SummaryCard label="Status" value={group.status} />
+                      </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        <div className="rounded-xl border p-3 text-xs">
+                          <div className="font-semibold text-slate-900">Snapshot</div>
+                          <div className="mt-2 space-y-1 text-slate-600">
+                            <div>Name: <span className="font-medium text-slate-900">{group.snapshotName || '\u2014'}</span></div>
+                            <div>GST: <span className="font-medium text-slate-900">{group.snapshotGst || '\u2014'}</span></div>
+                            <div>Phone: <span className="font-medium text-slate-900">{group.snapshotPhone || '\u2014'}</span></div>
+                          </div>
+                        </div>
+                        <div className="rounded-xl border p-3 text-xs">
+                          <div className="font-semibold text-slate-900">Reference Totals</div>
+                          <div className="mt-2 space-y-1 text-slate-600">
+                            <div>Purchase total: <span className="font-medium text-slate-900">{formatCurrency(group.purchaseOrderTotalAmount)}</span></div>
+                            <div>Payment total: <span className="font-medium text-slate-900">{formatCurrency(group.supplierPaymentTotalAmount)}</span></div>
+                            <div>Credit total: <span className="font-medium text-slate-900">{formatCurrency(group.partyCreditTotalAmount)}</span></div>
+                          </div>
+                        </div>
+                        <div className="rounded-xl border p-3 text-xs">
+                          <div className="font-semibold text-slate-900">Possible Canonical Match</div>
+                          {group.possibleCanonical ? (
+                            <div className="mt-2 space-y-1 text-slate-600">
+                              <div className="font-medium text-slate-900">{group.possibleCanonical.canonicalPartyName}</div>
+                              <div className="font-mono text-[11px] text-slate-500">{group.possibleCanonical.canonicalPartyId}</div>
+                              <div>Reason: <span className="font-medium text-slate-900">{group.possibleCanonical.reason}</span></div>
+                              <div>Confidence: <span className="font-medium text-slate-900">{group.possibleCanonical.confidence}</span></div>
+                            </div>
+                          ) : (
+                            <div className="mt-2 text-slate-600">No safe match</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-3">
+                        <div className="rounded-xl border p-3 text-xs text-slate-600">
+                          <div className="font-semibold text-slate-900">Purchase Orders</div>
+                          <div className="mt-2">Earliest: <span className="font-medium text-slate-900">{group.earliestOrderAt ? new Date(group.earliestOrderAt).toLocaleString() : '\u2014'}</span></div>
+                          <div>Latest: <span className="font-medium text-slate-900">{group.latestOrderAt ? new Date(group.latestOrderAt).toLocaleString() : '\u2014'}</span></div>
+                          <div className="mt-2 font-mono text-[11px] text-slate-500 break-all">{group.relatedPurchaseOrderIds.join(', ') || '\u2014'}</div>
+                        </div>
+                        <div className="rounded-xl border p-3 text-xs text-slate-600">
+                          <div className="font-semibold text-slate-900">Supplier Payments</div>
+                          <div className="mt-2">Earliest: <span className="font-medium text-slate-900">{group.earliestPaymentAt ? new Date(group.earliestPaymentAt).toLocaleString() : '\u2014'}</span></div>
+                          <div>Latest: <span className="font-medium text-slate-900">{group.latestPaymentAt ? new Date(group.latestPaymentAt).toLocaleString() : '\u2014'}</span></div>
+                          <div className="mt-2 font-mono text-[11px] text-slate-500 break-all">{group.relatedSupplierPaymentIds.join(', ') || '\u2014'}</div>
+                        </div>
+                        <div className="rounded-xl border p-3 text-xs text-slate-600">
+                          <div className="font-semibold text-slate-900">Party Credit</div>
+                          <div className="mt-2">Earliest: <span className="font-medium text-slate-900">{group.earliestCreditAt ? new Date(group.earliestCreditAt).toLocaleString() : '\u2014'}</span></div>
+                          <div>Latest: <span className="font-medium text-slate-900">{group.latestCreditAt ? new Date(group.latestCreditAt).toLocaleString() : '\u2014'}</span></div>
+                          <div className="mt-2 font-mono text-[11px] text-slate-500 break-all">{group.relatedPartyCreditIds.join(', ') || '\u2014'}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-blue-200 bg-blue-50/50 p-4">
+            <div className="font-semibold text-slate-900">Potential Duplicate Warnings</div>
+            <div className="mt-1 text-xs font-semibold text-amber-800">WARNING ONLY — NOT AUTO GROUPED</div>
+            {!duplicatePartyCheckReport.warnings.length ? (
+              <div className="mt-3 text-sm text-muted-foreground">No same-name warning groups detected.</div>
+            ) : (
+              <div className="mt-3 space-y-3">
+                {duplicatePartyCheckReport.warnings.map((warning) => (
+                  <div key={warning.warningKey} className="rounded-xl border bg-white p-3 text-xs">
+                    <div className="font-semibold text-slate-900">{warning.reason}</div>
+                    <div className="mt-2 grid gap-2 md:grid-cols-2">
+                      {warning.parties.map((party) => (
+                        <div key={`${warning.warningKey}-${party.id}`} className="rounded-lg border p-2">
+                          <div className="font-medium text-slate-900">{party.name}</div>
+                          <div className="mt-1 font-mono text-[11px] text-slate-500">{party.id}</div>
+                          <div className="mt-1 text-slate-600">{party.phone || 'No phone'} {'\u00B7'} GST {party.gst || '\u2014'}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </Modal>
       {embeddedRepairCenter ? embeddedRepairCenterContent : (
-    <div className="space-y-4">
+    <div ref={purchasePanelRootRef} className="space-y-4">
       <div>
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Purchase Parties</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-2xl font-semibold tracking-tight">Purchase Parties</h1>
+              <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${duplicatePartyCheckReport.duplicateGroupsFound > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                Duplicates: {duplicatePartyCheckReport.duplicateGroupsFound}
+              </span>
+              <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${duplicatePartyCheckReport.integrityIssueCount > 0 ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                Party Issues: {duplicatePartyCheckReport.integrityIssueCount}
+              </span>
+            </div>
             <p className="text-sm text-muted-foreground">Manage purchase parties, payable, credit, and party payment ledger. Purchases are now created from Inventory â†’ Add Purchase.</p>
           </div>
-          <Button size="sm" variant="outline" onClick={() => void refreshPurchaseReceipts()}>
-            Refresh receipts
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => setShowDuplicatePartyChecker(true)}>
+              Check Party Integrity
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void refreshPurchaseReceipts()}>
+              Refresh receipts
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -2967,9 +3300,22 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
             </CardContent>
           </Card>
           <Card>
-            <CardHeader><CardTitle>Saved Parties</CardTitle></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between gap-3">
+              <CardTitle>Saved Parties</CardTitle>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${duplicatePartyCheckReport.duplicateGroupsFound > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                  Duplicates: {duplicatePartyCheckReport.duplicateGroupsFound}
+                </span>
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${duplicatePartyCheckReport.integrityIssueCount > 0 ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                  Party Issues: {duplicatePartyCheckReport.integrityIssueCount}
+                </span>
+                <Button size="sm" variant="outline" onClick={() => setShowDuplicatePartyChecker(true)}>
+                  Check Party Integrity
+                </Button>
+              </div>
+            </CardHeader>
             <CardContent className="space-y-2">
-              {parties.map(p => (
+              {visibleParties.map(p => (
                 <div key={p.id} className="rounded-xl border p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="font-medium">{getProductName(p)}</div>
@@ -3001,7 +3347,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                   </div>
                 </div>
               ))}
-              {!parties.length && <div className="text-sm text-muted-foreground">No parties yet.</div>}
+              {!visibleParties.length && <div className="text-sm text-muted-foreground">No parties yet.</div>}
               {deletePartyError && <div className="text-xs text-red-600">{deletePartyError}</div>}
             </CardContent>
           </Card>
@@ -3032,10 +3378,10 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                           <td className="p-2">{{ purchase: 'Purchase', supplier_payment: 'Payment', credit_used: 'Credit Applied', legacy_payment: 'Payment', edit_credit: 'Adjustment', reversal: 'Adjustment' }[row.type] || row.type || 'â€”'}</td>
                           <td className="p-2">{row.reference || 'â€”'}</td>
                           <td className="p-2">{row.description || 'â€”'}</td>
-                          <td className="p-2 text-right">{row.purchaseAmount ? `?${formatNumber(row.purchaseAmount)}` : 'â€”'}</td>
-                          <td className="p-2 text-right">{row.paymentAmount ? `?${formatNumber(row.paymentAmount)}` : 'â€”'}</td>
-                          <td className="p-2 text-right">{row.creditApplied ? `?${formatNumber(row.creditApplied)}` : 'â€”'}</td>
-                          <td className="p-2 text-right">{row.creditCreated ? `?${formatNumber(row.creditCreated)}` : 'â€”'}</td>
+                          <td className="p-2 text-right">{row.purchaseAmount ? formatCurrency(row.purchaseAmount) : EMPTY_DASH}</td>
+                          <td className="p-2 text-right">{row.paymentAmount ? formatCurrency(row.paymentAmount) : EMPTY_DASH}</td>
+                          <td className="p-2 text-right">{row.creditApplied ? formatCurrency(row.creditApplied) : EMPTY_DASH}</td>
+                          <td className="p-2 text-right">{row.creditCreated ? formatCurrency(row.creditCreated) : EMPTY_DASH}</td>
                           <td className="p-2 text-right">?{formatNumber((row.runningPayable ?? row.grossPayable ?? row.runningGrossPayable) || 0)}</td>
                           <td className="p-2 text-right">?{formatNumber((row.runningCredit ?? row.ourCredit ?? row.runningOurCredit) || 0)}</td>
                           <td className="p-2 text-right font-semibold">?{formatNumber((row.netPayable ?? row.runningNetPayable) || 0)}</td>
@@ -3050,7 +3396,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Supplier Payment Repairs</div>
                     <div className="mt-2 space-y-2">
-                      {supplierPayments.filter((payment) => payment.partyId === expandedPartyId && !payment.deletedAt).map((payment) => (
+                      {supplierPayments.filter((payment) => expandedPartyId && getRelatedPartyIdSet(expandedPartyId).has(String(payment.partyId || '').trim()) && !payment.deletedAt).map((payment) => (
                         <div key={payment.id} className="flex items-center justify-between rounded-xl border px-3 py-2 text-sm">
                           <div>
                             <div className="font-medium text-slate-900">{payment.voucherNo || payment.id}</div>
@@ -3062,7 +3408,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                           </div>
                         </div>
                       ))}
-                      {!supplierPayments.some((payment) => payment.partyId === expandedPartyId && !payment.deletedAt) && <div className="text-xs text-slate-500">No supplier payments yet for this party.</div>}
+                      {!supplierPayments.some((payment) => expandedPartyId && getRelatedPartyIdSet(expandedPartyId).has(String(payment.partyId || '').trim()) && !payment.deletedAt) && <div className="text-xs text-slate-500">No supplier payments yet for this party.</div>}
                     </div>
                   </div>
                   <div>
@@ -3164,7 +3510,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
               </div>
               <select value={purchaseRowsPartyFilter} onChange={e => setPurchaseRowsPartyFilter(e.target.value)} className="h-10 rounded-xl border border-slate-200 px-3 text-sm">
                 <option value="all">All Parties</option>
-                {parties.map((party) => <option key={party.id} value={party.id}>{party.name}</option>)}
+                {visibleParties.map((party) => <option key={party.id} value={party.id}>{party.name}</option>)}
               </select>
               <select value={purchaseRowsPaymentFilter} onChange={e => setPurchaseRowsPaymentFilter(e.target.value as any)} className="h-10 rounded-xl border border-slate-200 px-3 text-sm">
                 <option value="all">All Payment Status</option>
@@ -3285,6 +3631,17 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                           </div>
                         )}
                         <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.partyFound ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{row.partyFound ? 'Party found' : 'Party missing'}</div>
+                        <div className="mt-1 text-[10px] text-muted-foreground">
+                          {row.partyReferenceStatus === 'MISSING_PARTY'
+                            ? 'Missing party master'
+                            : row.partyReferenceStatus === 'MERGED_ALIAS'
+                              ? `Merged alias${row.resolvedCanonicalPartyId ? ` -> ${row.resolvedCanonicalPartyId}` : ''}`
+                              : row.partyReferenceStatus === 'HIDDEN_ALIAS'
+                                ? `Hidden alias${row.resolvedCanonicalPartyId ? ` -> ${row.resolvedCanonicalPartyId}` : ''}`
+                                : row.partyReferenceStatus === 'CANONICAL_PARTY'
+                                  ? 'Canonical party record'
+                                  : 'Active party record'}
+                        </div>
                         {row.linkReviewReason === 'product_missing' && !row.productFound && (
                           <div className="mt-1 rounded-full bg-rose-100 px-2 py-1 text-[10px] font-semibold text-rose-700">
                             No matching product found in inventory
@@ -3597,7 +3954,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                 <div><span className="font-medium">Supplier:</span> {purchaseRuntimeSearchResult.criteria.supplierName || 'â€”'}</div>
                 <div><span className="font-medium">Product ID:</span> {purchaseRuntimeSearchResult.criteria.productId || 'â€”'}</div>
                 <div><span className="font-medium">Party ID:</span> {purchaseRuntimeSearchResult.criteria.partyId || 'â€”'}</div>
-                <div><span className="font-medium">Amount:</span> {purchaseRuntimeSearchResult.criteria.amount !== null ? `?${formatNumber(purchaseRuntimeSearchResult.criteria.amount)}` : 'â€”'}</div>
+                <div><span className="font-medium">Amount:</span> {purchaseRuntimeSearchResult.criteria.amount !== null ? formatCurrency(purchaseRuntimeSearchResult.criteria.amount) : EMPTY_DASH}</div>
                 <div><span className="font-medium">Quantity:</span> {purchaseRuntimeSearchResult.criteria.quantity !== null ? formatNumber(purchaseRuntimeSearchResult.criteria.quantity, 0) : 'â€”'}</div>
                 <div><span className="font-medium">Date From:</span> {purchaseRuntimeSearchResult.criteria.dateFrom || 'â€”'}</div>
                 <div><span className="font-medium">Date To:</span> {purchaseRuntimeSearchResult.criteria.dateTo || 'â€”'}</div>
@@ -3904,7 +4261,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
           <div>
             <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
             <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-              Linked party for this purchase order: <span className="font-semibold text-slate-900">{parties.find(p => p.id === partyId)?.name || 'Not selected yet (set in Pricing step)'}</span>
+              Linked party for this purchase order: <span className="font-semibold text-slate-900">{visiblePartyById.get(partyId)?.name || 'Not selected yet (set in Pricing step)'}</span>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div><Label>Product Name</Label><Input value={newProductDraft.name} onChange={e => updateNewDraft({ name: e.target.value })} placeholder="e.g. Wireless Mouse" /></div>
@@ -3995,9 +4352,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                     <Label>Party</Label>
                     <select className="h-10 w-full rounded-md border px-3 text-sm" value={partyId} onChange={e => setPartyId(e.target.value)}>
                       <option value="">Select party</option>
-                      {parties.map(p => <option key={p.id} value={p.id}>{p.name} ({p.phone || 'No phone'})</option>)}
+                      {visibleParties.map(p => <option key={p.id} value={p.id}>{p.name} ({p.phone || 'No phone'})</option>)}
                     </select>
-                    <div className="mt-2 flex gap-2"><button type="button" onClick={() => { setEditingPartyId(null); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button><button type="button" disabled={!partyId} onClick={() => { const p = parties.find(x => x.id === partyId); if (!p) return; startEditingParty(p, true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Pencil className="h-3.5 w-3.5" /> Edit Party</button></div>
+                    <div className="mt-2 flex gap-2"><button type="button" onClick={() => { setEditingPartyId(null); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button><button type="button" disabled={!partyId} onClick={() => { const p = visiblePartyById.get(partyId); if (!p) return; startEditingParty(p, true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Pencil className="h-3.5 w-3.5" /> Edit Party</button></div>
                   </div>
                   <div><Label>Order Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
                   <div><Label>Bill Number</Label><Input value={billNumber} onChange={e => setBillNumber(e.target.value)} placeholder="Supplier invoice no." /></div>
@@ -4031,7 +4388,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                   <SummaryCard label="Total Qty" value={formatNumber(draftTotals.totalQty, 0)} />
                   <SummaryCard label="Total Amount" value={formatCurrency(draftTotals.totalAmount)} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
-                  <SummaryCard label="Party" value={parties.find(p => p.id === partyId)?.name || 'Not selected'} />
+                  <SummaryCard label="Party" value={visiblePartyById.get(partyId)?.name || 'Not selected'} />
                   <SummaryCard label="GST Amount" value={formatCurrency((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)} />
                   <SummaryCard label="Grand Total" value={formatCurrency(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))} />
                   <SummaryCard label="Initial Due" value={formatCurrency(Math.max(0, (draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)) - (initialPaidAmount === '' ? 0 : Number(initialPaidAmount) || 0)))} />
@@ -4113,9 +4470,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
               <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                 <div className="text-sm font-semibold text-slate-900">Order Summary</div>
                 <div className="mt-4 space-y-3">
-                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party</div><div className="font-medium text-slate-900">{parties.find(p => p.id === partyId)?.name || 'â€”'}</div></div>
-                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party Details</div><div className="font-medium text-slate-900 text-sm">{parties.find(p => p.id === partyId)?.phone || 'â€”'} Â· GST {parties.find(p => p.id === partyId)?.gst || 'â€”'}</div></div>
-                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Location</div><div className="font-medium text-slate-900">{parties.find(p => p.id === partyId)?.location || 'â€”'}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party</div><div className="font-medium text-slate-900">{visiblePartyById.get(partyId)?.name || 'â€”'}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party Details</div><div className="font-medium text-slate-900 text-sm">{visiblePartyById.get(partyId)?.phone || 'â€”'} Â· GST {visiblePartyById.get(partyId)?.gst || 'â€”'}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Location</div><div className="font-medium text-slate-900">{visiblePartyById.get(partyId)?.location || 'â€”'}</div></div>
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Bill</div><div className="font-medium text-slate-900 text-sm">{billNumber || 'â€”'} {billDate ? `â€¢ ${billDate}` : ''}</div></div>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-3">

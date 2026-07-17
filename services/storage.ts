@@ -39,6 +39,7 @@ import { normalizeTransactionItems } from '../utils/transactionItems';
 import { getFriendlyErrorMessage, logStockFlowError } from './errorMessages';
 import { safeText } from '../utils/productText';
 import { enforceAppStateInvariants, InvariantOverride } from './invariants';
+import { buildPurchasePartyCanonicalView, mergePurchasePartyMasterData, resolveCanonicalPurchasePartyForDraft, resolvePurchasePartyIdentity } from './purchasePartyIdentity';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -142,14 +143,9 @@ const shouldTraceDevFlag = (flag: string) => {
 };
 
 const STORAGE_HYDRATION_DEBUG_PREFIX = '[STORAGE_HYDRATION_DEBUG]';
+const STORAGE_DEBUG_LOGS_ENABLED = String((import.meta as any).env?.VITE_DEBUG_STORAGE_LOGS || 'false').toLowerCase() === 'true';
 const isStorageHydrationDebugEnabled = () => {
-  if (typeof window === 'undefined') return Boolean((import.meta as any).env?.DEV);
-  try {
-    return Boolean((import.meta as any).env?.DEV)
-      || window.localStorage.getItem('STORAGE_HYDRATION_DEBUG') === '1';
-  } catch {
-    return Boolean((import.meta as any).env?.DEV);
-  }
+  return STORAGE_DEBUG_LOGS_ENABLED;
 };
 const logStorageHydrationDebug = (event: string, payload: Record<string, unknown>) => {
   if (!isStorageHydrationDebugEnabled()) return;
@@ -344,6 +340,7 @@ const getProductAuditSample = (products: Product[] = []) => products.slice(0, 3)
 }));
 
 const logStockFlowDataAudit = (event: string, detail: Record<string, unknown>) => {
+  if (!STORAGE_DEBUG_LOGS_ENABLED) return;
   try {
     console.info(STOCKFLOW_DATA_AUDIT_PREFIX, event, detail);
   } catch (_error) {
@@ -443,6 +440,7 @@ const assertNoLargeArraysInRootStorePayload = (payload: Record<string, unknown>,
 
 const cleanupLegacyRootStoreFields = async (uid: string, reason: string) => {
   if (!db) return;
+  await backfillLegacyRootPurchasePartiesToSubcollection(uid, reason);
   const cleanupPayload = Object.fromEntries(
     ROOT_STORE_LEGACY_CLEANUP_FIELDS.map((field) => [field, deleteField()])
   );
@@ -670,9 +668,42 @@ const upsertPurchasePartyInSubcollection = async (party: PurchaseParty, reason: 
   await setDoc(doc(db!, 'stores', user.uid, 'purchaseParties', party.id), sanitizeData(party), { merge: true });
 };
 
-const deletePurchasePartyInSubcollection = async (partyId: string, reason: string) => {
-  const user = await assertCloudWriteReady(reason);
-  await deleteDoc(doc(db!, 'stores', user.uid, 'purchaseParties', partyId));
+let purchasePartyLegacyBackfillPromise: Promise<void> | null = null;
+
+const backfillLegacyRootPurchasePartiesToSubcollection = async (uid: string, reason: string) => {
+  if (!db) return;
+  const rootOnlyParties = legacyRootPurchasePartiesCache.filter((party) => {
+    const partyId = String(party?.id || '').trim();
+    return Boolean(partyId) && !subcollectionPurchasePartiesCache.some((subcollectionParty) => String(subcollectionParty?.id || '').trim() === partyId);
+  });
+  if (!rootOnlyParties.length) return;
+  if (purchasePartyLegacyBackfillPromise) return purchasePartyLegacyBackfillPromise;
+
+  purchasePartyLegacyBackfillPromise = (async () => {
+    await Promise.all(
+      rootOnlyParties.map((party) => setDoc(
+        doc(db!, 'stores', uid, 'purchaseParties', party.id),
+        sanitizeData(party),
+        { merge: true },
+      )),
+    );
+    subcollectionPurchasePartiesCache = mergeByIdPreferPrimary(
+      rootOnlyParties,
+      subcollectionPurchasePartiesCache,
+    );
+    applyMergedPurchaseHydrationToMemory(uid, `${reason}_purchaseParties_legacy_backfill`);
+    await writeAuditEvent('UPDATE', {
+      reason: `${reason}_purchaseParties_legacy_backfill`,
+      restoredLegacyPurchasePartiesCount: rootOnlyParties.length,
+      restoredLegacyPurchasePartyIds: rootOnlyParties.slice(0, 25).map((party) => party.id),
+    });
+  })();
+
+  try {
+    await purchasePartyLegacyBackfillPromise;
+  } finally {
+    purchasePartyLegacyBackfillPromise = null;
+  }
 };
 
 const upsertSupplierPaymentInSubcollection = async (payment: SupplierPaymentLedgerEntry, reason: string) => {
@@ -3039,6 +3070,7 @@ const syncFromCloud = async (): Promise<void> => {
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) },
                     ...buildHydratedFinanceState(cloudData as AppState & Record<string, unknown>, financeDocumentCache),
                 };
+                void backfillLegacyRootPurchasePartiesToSubcollection(user.uid, 'root_snapshot_hydration');
                 if (memoryState.profile.defaultTaxRate === undefined) {
                     memoryState.profile.defaultTaxRate = 0;
                     memoryState.profile.defaultTaxLabel = 'None';
@@ -5979,6 +6011,18 @@ export const createManualCashbookEntry = async (
 
 export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'createdAt' | 'updatedAt'>): Promise<PurchaseParty> => {
   const data = loadData();
+  const resolution = resolvePurchasePartyIdentity(
+    (data.purchaseParties || []).filter((party) => !isSoftDeletedRow(party)),
+    payload,
+  );
+  if (resolution.status === 'matched') {
+    const enrichedParty = mergePurchasePartyMasterData(resolution.party, payload);
+    const hasMasterDataChange = JSON.stringify(enrichedParty) !== JSON.stringify(resolution.party);
+    if (hasMasterDataChange) {
+      return updatePurchaseParty(enrichedParty);
+    }
+    return resolution.party;
+  }
   const now = new Date().toISOString();
   const party: PurchaseParty = {
     id: `party-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
@@ -6003,6 +6047,37 @@ export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'c
   return party;
 };
 
+const buildPurchasePartyCanonicalStorageView = (data: ReturnType<typeof loadData>) => buildPurchasePartyCanonicalView(
+  data.purchaseParties || [],
+  {
+    purchaseOrders: data.purchaseOrders || [],
+    supplierPayments: data.supplierPayments || [],
+    partyCreditLedger: data.partyCreditLedger || [],
+  },
+);
+
+const resolveCanonicalPurchasePartyForStorage = (
+  data: ReturnType<typeof loadData>,
+  draft: { id?: string | null; name?: string; phone?: string; gst?: string; location?: string; contactPerson?: string; notes?: string },
+) => {
+  return resolveCanonicalPurchasePartyForDraft(data.purchaseParties || [], draft, {
+    purchaseOrders: data.purchaseOrders || [],
+    supplierPayments: data.supplierPayments || [],
+    partyCreditLedger: data.partyCreditLedger || [],
+  });
+};
+
+const getRelatedPurchasePartyIdsForStorage = (
+  data: ReturnType<typeof loadData>,
+  partyId?: string | null,
+) => {
+  const normalizedId = String(partyId || '').trim();
+  if (!normalizedId) return [] as string[];
+  const canonicalView = buildPurchasePartyCanonicalStorageView(data);
+  const canonicalId = canonicalView.partyIdToCanonicalId.get(normalizedId) || normalizedId;
+  return canonicalView.canonicalIdToRelatedIds.get(canonicalId) || [canonicalId];
+};
+
 export const updatePurchaseParty = async (party: PurchaseParty): Promise<PurchaseParty> => {
   const data = loadData();
   const updatedParty = { ...party, updatedAt: new Date().toISOString() };
@@ -6023,14 +6098,41 @@ export const updatePurchaseParty = async (party: PurchaseParty): Promise<Purchas
 
 export const deletePurchaseParty = async (partyId: string): Promise<void> => {
   const data = loadData();
-  const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
+  const normalizedPartyId = String(partyId || '').trim();
+  if (!normalizedPartyId) return;
+  const existingParty = (data.purchaseParties || []).find((item) => item.id === normalizedPartyId);
+  if (!existingParty) return;
+
+  const relatedPartyIds = new Set(getRelatedPurchasePartyIdsForStorage(data, normalizedPartyId));
+  const purchaseOrders = (data.purchaseOrders || []).filter((order) => relatedPartyIds.has(String(order.partyId || '').trim()));
+  const supplierPayments = (data.supplierPayments || []).filter((payment) => !payment.deletedAt && relatedPartyIds.has(String(payment.partyId || '').trim()));
+  const partyCreditLedger = (data.partyCreditLedger || []).filter((entry) => relatedPartyIds.has(String(entry.partyId || '').trim()));
+  if (purchaseOrders.length || supplierPayments.length || partyCreditLedger.length) {
+    throw new Error('This party has historical purchase references. Archive or merge it instead of deleting the master record.');
+  }
+
+  const softDeletedParty: PurchaseParty = {
+    ...existingParty,
+    isDeleted: true,
+    updatedAt: new Date().toISOString(),
+  };
+  const next = (data.purchaseParties || []).map((item) => item.id === normalizedPartyId ? softDeletedParty : item);
   if (db) {
-    await deletePurchasePartyInSubcollection(partyId, 'deletePurchaseParty');
+    await upsertPurchasePartyInSubcollection(softDeletedParty, 'deletePurchaseParty');
     memoryState = { ...memoryState, purchaseParties: next };
     emitLocalStorageUpdate();
-    await writeAuditEvent('DELETE', { reason: 'deletePurchaseParty_subcollection', purchasePartyId: partyId, purchasePartiesCount: next.length });
+    await writeAuditEvent('DELETE', {
+      reason: 'softDeletePurchaseParty_subcollection',
+      purchasePartyId: normalizedPartyId,
+      purchasePartiesCount: next.length,
+      blockedReferenceCounts: {
+        purchaseOrders: purchaseOrders.length,
+        supplierPayments: supplierPayments.length,
+        partyCreditLedger: partyCreditLedger.length,
+      },
+    });
   } else {
-    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty_local_fallback', auditOperation: 'DELETE' });
+    await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'softDeletePurchaseParty_local_fallback', auditOperation: 'DELETE' });
   }
 };
 
@@ -7379,9 +7481,24 @@ export const repairMissingProductPurchaseHistoryRowsDryRun = (): MissingProductP
 };
 
 export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
-  const orderForPersistence = normalizePurchaseOrderForPersistence(order);
-  assertPurchaseOrderPayload(orderForPersistence);
   const data = loadData();
+  const canonicalParty = resolveCanonicalPurchasePartyForStorage(data, {
+    id: order.partyId,
+    name: order.partyName,
+    phone: order.partyPhone,
+    gst: order.partyGst,
+    location: order.partyLocation,
+  });
+  const canonicalizedOrder = canonicalParty ? {
+    ...order,
+    partyId: canonicalParty.id,
+    partyName: canonicalParty.name,
+    partyPhone: canonicalParty.phone,
+    partyGst: canonicalParty.gst,
+    partyLocation: canonicalParty.location,
+  } : order;
+  const orderForPersistence = normalizePurchaseOrderForPersistence(canonicalizedOrder);
+  assertPurchaseOrderPayload(orderForPersistence);
   const totalAmount = Math.max(0, Number(orderForPersistence.totalAmount) || 0);
   const totalPaid = Math.max(0, Math.min(totalAmount, Number(orderForPersistence.totalPaid) || 0));
   const normalizedOrder: PurchaseOrder = {
@@ -7403,9 +7520,24 @@ export const createPurchaseOrder = async (order: PurchaseOrder): Promise<Purchas
 };
 
 export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
-  const orderForPersistence = normalizePurchaseOrderForPersistence(order);
-  assertPurchaseOrderPayload(orderForPersistence);
   const data = loadData();
+  const canonicalParty = resolveCanonicalPurchasePartyForStorage(data, {
+    id: order.partyId,
+    name: order.partyName,
+    phone: order.partyPhone,
+    gst: order.partyGst,
+    location: order.partyLocation,
+  });
+  const canonicalizedOrder = canonicalParty ? {
+    ...order,
+    partyId: canonicalParty.id,
+    partyName: canonicalParty.name,
+    partyPhone: canonicalParty.phone,
+    partyGst: canonicalParty.gst,
+    partyLocation: canonicalParty.location,
+  } : order;
+  const orderForPersistence = normalizePurchaseOrderForPersistence(canonicalizedOrder);
+  assertPurchaseOrderPayload(orderForPersistence);
   const totalAmount = Math.max(0, Number(orderForPersistence.totalAmount) || 0);
   const totalPaid = Math.max(0, Math.min(totalAmount, Number(orderForPersistence.totalPaid) || 0));
   const normalizedOrder: PurchaseOrder = {
@@ -7459,18 +7591,19 @@ export const recordPurchaseOrderPayment = async (orderId: string, amount: number
 
 const allocateSupplierPaymentAcrossOrders = (
   orders: PurchaseOrder[],
-  partyId: string,
+  partyIds: string[],
   paymentId: string,
   amount: number,
   method: 'cash' | 'online',
   note?: string,
   paidAt?: string,
 ) => {
+  const relatedIds = new Set((partyIds || []).map((value) => String(value || '').trim()).filter(Boolean));
   let remaining = Math.max(0, Number(amount) || 0);
   const nextOrders = [...orders];
   const allocations: Array<{ orderId: string; orderRef?: string; amount: number }> = [];
   const dueOrders = nextOrders
-    .filter((order) => order.partyId === partyId && order.status !== 'cancelled')
+    .filter((order) => relatedIds.has(String(order.partyId || '').trim()) && order.status !== 'cancelled')
     .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
   dueOrders.forEach((order) => {
     if (remaining <= 0) return;
@@ -7533,28 +7666,35 @@ export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerE
   const now = new Date().toISOString();
   const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const amount = Math.max(0, Number(payload.amount) || 0);
+  const canonicalParty = resolveCanonicalPurchasePartyForStorage(data, {
+    id: payload.partyId,
+    name: payload.partyName,
+  });
+  const resolvedPartyId = canonicalParty?.id || payload.partyId;
+  const resolvedPartyName = canonicalParty?.name || payload.partyName;
+  const relatedPartyIds = getRelatedPurchasePartyIdsForStorage(data, resolvedPartyId);
   // Supplier payment accounting is service-owned. The UI may send preview values,
   // but create must recompute from the current persisted open payable to avoid
   // stale payableApplied / creditCreated values.
   const actualOpenPayable = (data.purchaseOrders || [])
-    .filter((order) => order.partyId === payload.partyId && order.status !== 'cancelled')
+    .filter((order) => relatedPartyIds.includes(String(order.partyId || '').trim()) && order.status !== 'cancelled')
     .reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
   const payableApplied = Number(Math.min(amount, Math.max(0, actualOpenPayable)).toFixed(2));
   const partyCreditCreated = Number(Math.max(0, amount - payableApplied).toFixed(2));
-  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, payableApplied, payload.method, payload.note, payload.paidAt || now);
+  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], relatedPartyIds, paymentId, payableApplied, payload.method, payload.note, payload.paidAt || now);
   let voucherNo = payload.voucherNo;
   if (!voucherNo) {
     const allocated = allocateSupplierPaymentVoucherNumber(data);
     data = allocated.state;
     voucherNo = allocated.voucherNo;
   }
-  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, voucherNo, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations, paymentAppliedToPayable: Number(payableApplied.toFixed(2)), partyCreditCreated: Number(partyCreditCreated.toFixed(2)) };
+  const payment: SupplierPaymentLedgerEntry = { ...payload, partyId: resolvedPartyId, partyName: resolvedPartyName, id: paymentId, voucherNo, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations, paymentAppliedToPayable: Number(payableApplied.toFixed(2)), partyCreditCreated: Number(partyCreditCreated.toFixed(2)) };
   const nextPartyCredits = [...(data.partyCreditLedger || [])];
   if (partyCreditCreated > 0) {
     const creditEntry: PartyCreditLedgerEntry = {
       id: `pcl-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-      partyId: payload.partyId,
-      partyName: payload.partyName,
+      partyId: resolvedPartyId,
+      partyName: resolvedPartyName,
       amountCreated: Number(partyCreditCreated.toFixed(2)),
       remainingAmount: Number(partyCreditCreated.toFixed(2)),
       sourcePaymentId: paymentId,
@@ -7593,13 +7733,12 @@ export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmo
   const data = loadData();
   const order = (data.purchaseOrders || []).find((o) => o.id === orderId);
   if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
-  const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const relatedPartyIds = getRelatedPurchasePartyIdsForStorage(data, order.partyId);
+  const relatedPartyIdSet = new Set(relatedPartyIds.map((value) => String(value || '').trim()).filter(Boolean));
   const availableEntries = (data.partyCreditLedger || []).filter((entry) => {
     const hasRemaining = Math.max(0, Number(entry.remainingAmount || 0)) > 0;
     if (!hasRemaining) return false;
-    const byId = entry.partyId && order.partyId && String(entry.partyId).trim() === String(order.partyId).trim();
-    if (byId) return true;
-    return normalizePartyName(entry.partyName) === normalizePartyName(order.partyName);
+    return relatedPartyIdSet.has(String(entry.partyId || '').trim());
   });
   let remaining = Math.max(0, Number(creditAmount) || 0);
   if (remaining <= 0) {
@@ -7656,6 +7795,13 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
   const data = loadData();
   const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
   if (!existing) throw new Error('Supplier payment not found.');
+  const canonicalParty = resolveCanonicalPurchasePartyForStorage(data, {
+    id: existing.partyId,
+    name: existing.partyName,
+  });
+  const resolvedPartyId = canonicalParty?.id || existing.partyId;
+  const resolvedPartyName = canonicalParty?.name || existing.partyName;
+  const relatedPartyIds = getRelatedPurchasePartyIdsForStorage(data, resolvedPartyId);
   const shouldTraceSupplierPaymentEdit = shouldTraceDevFlag('TRACE_SUPPLIER_PAYMENT_EDIT');
   const linkedCredits = (data.partyCreditLedger || []).filter((entry) => entry.type === 'supplier_overpayment' && (
     entry.sourcePaymentId === paymentId
@@ -7673,20 +7819,22 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
   const strippedOrders = stripSupplierPaymentAllocations(data.purchaseOrders || [], paymentId);
   const nextAmount = Number(Math.max(0, Number(updates.amount ?? existing.amount) || 0).toFixed(2));
   const payableBeforeThisPayment = (strippedOrders || [])
-    .filter((order) => order.partyId === existing.partyId)
+    .filter((order) => relatedPartyIds.includes(String(order.partyId || '').trim()))
     .reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0);
   const paymentAppliedToPayable = Number(Math.max(0, Math.min(nextAmount, payableBeforeThisPayment)).toFixed(2));
   const partyCreditCreated = Number(Math.max(0, nextAmount - paymentAppliedToPayable).toFixed(2));
   const nextEntry: SupplierPaymentLedgerEntry & { payableApplied?: number } = {
     ...existing,
     ...updates,
+    partyId: resolvedPartyId,
+    partyName: resolvedPartyName,
     amount: nextAmount,
     paymentAppliedToPayable,
     partyCreditCreated,
     payableApplied: paymentAppliedToPayable,
     updatedAt: new Date().toISOString()
   };
-  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(strippedOrders, nextEntry.partyId, paymentId, paymentAppliedToPayable, nextEntry.method, nextEntry.note, nextEntry.paidAt);
+  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(strippedOrders, relatedPartyIds, paymentId, paymentAppliedToPayable, nextEntry.method, nextEntry.note, nextEntry.paidAt);
   nextEntry.allocations = allocations;
   const nextSupplierPayments = (data.supplierPayments || []).map((item) => item.id === paymentId ? nextEntry : item);
   const nextPartyCreditLedger = (data.partyCreditLedger || []).filter((entry) => !linkedCredits.some((linked) => linked.id === entry.id));
@@ -7694,8 +7842,8 @@ export const updateSupplierPayment = async (paymentId: string, updates: Partial<
   if (partyCreditCreated > 0) {
     recreatedCreditEntry = {
       id: linkedCredits[0]?.id || `pcl-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-      partyId: existing.partyId,
-      partyName: existing.partyName,
+      partyId: resolvedPartyId,
+      partyName: resolvedPartyName,
       amountCreated: partyCreditCreated,
       remainingAmount: partyCreditCreated,
       sourcePaymentId: existing.id,
