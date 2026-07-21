@@ -47,6 +47,43 @@ const BALANCE_AUDIT_SOURCE_LABELS = {
   unknown: 'Unknown',
 } as const;
 type BalanceAuditSourceKey = keyof typeof BALANCE_AUDIT_SOURCE_LABELS;
+type UnifiedPurchaseHistoryRow = {
+  id: string;
+  date: string;
+  variant: string;
+  color: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  reference: string | null;
+  notes: string | null;
+  partyName: string | null;
+  paymentMethod: string | null;
+  paidAmount: number | null;
+  orderPaid: number | null;
+  orderTotal: number | null;
+  remainingPayable: number | null;
+  purchaseOrderId: string | null;
+  purchaseOrderLabel: string | null;
+  sourceKind: 'resolved' | 'needs_review' | 'legacy_only';
+  sourceLabel: string;
+  sourceToneClassName: string;
+  productName: string | null;
+  reviewReason: string | null;
+  paymentBreakdown: {
+    cash: number;
+    online: number;
+    partyCredit: number;
+  };
+  previousStock: number | null;
+  previousBuyPrice: number | null;
+  nextBuyPrice: number | null;
+  legacyHistoryId: string | null;
+  compatibilityWarnings: string[];
+  ledgerIndicatorLabel: string;
+  ledgerIndicatorToneClassName: string;
+  ledgerIndicatorReason: string;
+};
 
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   useEscapeLayer(open, onCancel, { priority: 120 });
@@ -164,6 +201,7 @@ export default function Admin() {
   const [purchaseEditQuantity, setPurchaseEditQuantity] = useState('');
   const [purchaseEditUnitPrice, setPurchaseEditUnitPrice] = useState('');
   const [purchaseEditError, setPurchaseEditError] = useState<string | null>(null);
+  const [addingLedgerHistoryId, setAddingLedgerHistoryId] = useState<string | null>(null);
   const [missingHistoryAnalysis, setMissingHistoryAnalysis] = useState<MissingProductPurchaseHistoryRowsAnalysis | null>(null);
   const [selectedPhotoProduct, setSelectedPhotoProduct] = useState<Product | null>(null);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
@@ -749,6 +787,132 @@ export default function Admin() {
     }
   };
 
+  const handleAddPurchaseHistoryEntryToLedger = async (historyId: string) => {
+    if (!purchaseTarget) return;
+    const historyEntry = (purchaseTarget.purchaseHistory || []).find((entry) => entry.id === historyId);
+    if (!historyEntry) {
+      setNotice({ type: 'error', message: 'Purchase history entry could not be found.' });
+      return;
+    }
+
+    const partyName = String(historyEntry.partyName || '').trim();
+    if (!partyName) {
+      setNotice({ type: 'error', message: 'Supplier name is missing. Use Edit Snapshot first, then add this row to the ledger.' });
+      return;
+    }
+
+    const quantity = toNonNegativeNumber(historyEntry.quantity);
+    const unitPrice = toNonNegativeNumber(historyEntry.unitPrice);
+    const totalAmount = Number((Math.max(0, quantity * unitPrice)).toFixed(2));
+    if (quantity <= 0 || unitPrice < 0 || totalAmount <= 0) {
+      setNotice({ type: 'error', message: 'This legacy row has invalid quantity or price. Edit it first before adding it to the ledger.' });
+      return;
+    }
+
+    const partyResolution = resolvePurchasePartyForAdmin({
+      name: partyName,
+    });
+    if (partyResolution.status === 'ambiguous') {
+      setNotice({ type: 'error', message: 'Multiple supplier parties match this name. Please repair the supplier identity before adding this row to the ledger.' });
+      return;
+    }
+
+    setAddingLedgerHistoryId(historyId);
+    try {
+      const party = partyResolution.status === 'matched'
+        ? partyResolution.party
+        : await createPurchaseParty({ name: partyName });
+      const now = new Date().toISOString();
+      const paidAmount = Math.max(0, Number(historyEntry.paidAmount ?? historyEntry.totalPaid ?? 0));
+      const normalizedPaymentMethod = String(historyEntry.paymentMethod || '').trim().toLowerCase();
+      const paymentMethod = normalizedPaymentMethod === 'online' || normalizedPaymentMethod === 'cash'
+        ? normalizedPaymentMethod as 'online' | 'cash'
+        : null;
+      const paymentHistory = paidAmount > 0
+        ? [{
+            id: `pop-legacy-recover-${Date.now()}`,
+            paidAt: historyEntry.date || now,
+            amount: paidAmount,
+            method: paymentMethod || 'cash' as const,
+            note: paymentMethod
+              ? (historyEntry.reference || 'Recovered from inventory purchase history')
+              : `Recovered paid amount from legacy snapshot. Original payment method unavailable. ${historyEntry.reference || ''}`.trim(),
+          }]
+        : [];
+      const nextOrderId = `po-legacy-recover-${Date.now()}`;
+      const nextOrder: PurchaseOrder = {
+        id: nextOrderId,
+        partyId: party.id,
+        partyName: party.name,
+        partyPhone: party.phone,
+        partyGst: party.gst,
+        partyLocation: party.location,
+        status: 'received',
+        orderDate: historyEntry.date || now,
+        notes: [
+          historyEntry.notes || '',
+          historyEntry.reference ? `Legacy reference: ${historyEntry.reference}` : '',
+          'Recovered from inventory purchase history',
+        ].filter(Boolean).join(' | '),
+        lines: [{
+          id: `line-legacy-recover-${Date.now()}`,
+          sourceType: 'inventory',
+          productId: purchaseTarget.id,
+          productName: purchaseTarget.name,
+          category: purchaseTarget.category,
+          image: purchaseTarget.image,
+          variant: historyEntry.variant || NO_VARIANT,
+          color: historyEntry.color || NO_COLOR,
+          quantity,
+          unitCost: unitPrice,
+          totalCost: totalAmount,
+          lineTotal: totalAmount,
+        }],
+        totalQuantity: quantity,
+        totalAmount,
+        totalPaid: paidAmount,
+        remainingAmount: Math.max(0, Number((totalAmount - paidAmount).toFixed(2))),
+        paymentHistory,
+        receivedQuantity: quantity,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: 'inventory_purchase_history_recovery',
+        updatedBy: 'inventory_purchase_history_recovery',
+      };
+
+      await createPurchaseOrder(nextOrder);
+
+      const updatedProduct: Product = {
+        ...purchaseTarget,
+        purchaseHistory: (purchaseTarget.purchaseHistory || []).map((entry) => {
+          if (entry.id !== historyId) return entry;
+          return {
+            ...entry,
+            purchaseOrderId: nextOrderId,
+            partyName: party.name,
+            reference: entry.reference || nextOrderId,
+            notes: entry.notes || 'Recovered into purchase ledger',
+          };
+        }),
+      };
+      const updatedProducts = await updateProduct(updatedProduct);
+      setProducts(updatedProducts);
+      setPurchaseOrders(loadData().purchaseOrders || []);
+      const nextTarget = updatedProducts.find((item) => item.id === purchaseTarget.id) || null;
+      setPurchaseTarget(nextTarget);
+      setNotice({
+        type: paymentMethod || paidAmount <= 0 ? 'success' : 'info',
+        message: paymentMethod || paidAmount <= 0
+          ? 'Purchase row was added to the purchase party ledger.'
+          : 'Purchase row was added to the ledger. Paid amount was recovered, but payment method was unavailable and was saved as cash for ledger continuity.',
+      });
+    } catch (error) {
+      setNotice({ type: 'error', message: getFriendlyErrorMessage(error, 'admin.add_purchase_history_to_ledger') });
+    } finally {
+      setAddingLedgerHistoryId(null);
+    }
+  };
+
   const renderPurchaseHistoryCards = (
     productName: string,
     rows: PurchaseOrderDerivedHistoryRow[]
@@ -826,6 +990,169 @@ export default function Admin() {
           );
         })()
       ))}
+    </div>
+  );
+
+  const renderUnifiedPurchaseHistoryCards = (
+    productName: string,
+    rows: UnifiedPurchaseHistoryRow[]
+  ) => (
+    <div className="space-y-3">
+      {rows.map((row) => {
+        const lineTotal = Number((toNonNegativeNumber(row.lineTotal || (toNonNegativeNumber(row.quantity) * toNonNegativeNumber(row.unitPrice)))).toFixed(2));
+        const orderTotal = row.orderTotal == null ? null : toNonNegativeNumber(row.orderTotal);
+        const orderPaid = row.orderPaid == null ? (row.paidAmount == null ? null : toNonNegativeNumber(row.paidAmount)) : toNonNegativeNumber(row.orderPaid);
+        const remainingPayable = row.remainingPayable == null ? null : toNonNegativeNumber(row.remainingPayable);
+        const paymentSummary = row.paymentBreakdown || { cash: 0, online: 0, partyCredit: 0 };
+        const partyName = row.partyName || 'Not linked / Unknown';
+        const poLabel = row.purchaseOrderLabel || row.purchaseOrderId || 'Not linked';
+        const subMeta = [
+          partyName,
+          row.reference ? `Ref ${row.reference}` : null,
+          row.purchaseOrderId ? `PO ${poLabel}` : null,
+        ].filter(Boolean).join(' • ');
+        const secondaryAuditMeta = [
+          row.legacyHistoryId ? `Legacy ID ${row.legacyHistoryId}` : null,
+          row.productName && row.productName !== productName ? `Order name ${row.productName}` : null,
+          row.previousStock != null ? `Prev stock ${row.previousStock}` : null,
+          row.previousBuyPrice != null ? `Prev buy ${row.previousBuyPrice.toFixed(2)}` : null,
+          row.nextBuyPrice != null ? `Next buy ${row.nextBuyPrice.toFixed(2)}` : null,
+        ].filter(Boolean).join(' • ');
+        const canEditSnapshot = !!row.legacyHistoryId;
+        const canAddToLedger = row.ledgerIndicatorLabel === 'Not Counted' && !!row.legacyHistoryId;
+        const canOpenLedger = !canAddToLedger && !!row.purchaseOrderId;
+        const editSnapshotHelp = canEditSnapshot
+          ? 'Edit this purchase history snapshot.'
+          : 'No editable legacy snapshot exists for this row.';
+        const secondaryActionLabel = canAddToLedger ? 'Add to Ledger' : canOpenLedger ? 'Open Ledger' : 'Ledger Review Needed';
+        const secondaryActionHelp = canAddToLedger
+          ? 'Create a purchase ledger entry from this history row.'
+          : canOpenLedger
+            ? 'Open the purchase ledger screen for this transaction.'
+            : 'This row needs supplier or order-link review before it can be safely added to the ledger.';
+
+        return (
+          <div key={row.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-base font-semibold text-slate-950">{productName}</div>
+                  <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${row.sourceToneClassName}`}>{row.sourceLabel}</span>
+                </div>
+                <div className="text-sm text-slate-600">{subMeta}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">Date</div>
+                <div className="text-sm font-medium text-slate-900">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Qty</div>
+                <div className="mt-1 text-lg font-semibold text-slate-950">{toNonNegativeNumber(row.quantity)}</div>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Unit Cost</div>
+                <div className="mt-1 text-lg font-semibold text-slate-950">{toNonNegativeNumber(row.unitPrice).toFixed(2)}</div>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Line Total</div>
+                <div className="mt-1 text-lg font-semibold text-slate-950">{lineTotal.toFixed(2)}</div>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Paid</div>
+                <div className="mt-1 text-lg font-semibold text-slate-950">{orderPaid != null ? orderPaid.toFixed(2) : '—'}</div>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Due</div>
+                <div className="mt-1 text-lg font-semibold text-slate-950">{remainingPayable != null ? remainingPayable.toFixed(2) : '—'}</div>
+              </div>
+            </div>
+
+            <div className={`mt-3 rounded-lg px-3 py-2 text-sm ${row.ledgerIndicatorToneClassName}`}>
+              <span className="font-semibold">Purchase Party Ledger:</span> {row.ledgerIndicatorLabel}
+              <div className="mt-1 text-[12px] opacity-90">{row.ledgerIndicatorReason}</div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="text-[12px] text-slate-600">
+                Actions
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  disabled={!canEditSnapshot}
+                  title={editSnapshotHelp}
+                  onClick={() => canEditSnapshot && openEditPurchaseHistoryEntry(String(row.legacyHistoryId))}
+                >
+                  Edit Snapshot
+                </Button>
+                <Button
+                  size="sm"
+                  variant={canAddToLedger ? 'default' : 'outline'}
+                  className={canAddToLedger ? 'h-8 bg-slate-900 text-white hover:bg-slate-800' : 'h-8'}
+                  disabled={(!canAddToLedger && !canOpenLedger) || addingLedgerHistoryId === row.legacyHistoryId}
+                  title={secondaryActionHelp}
+                  onClick={() => {
+                    if (canAddToLedger) {
+                      void handleAddPurchaseHistoryEntryToLedger(String(row.legacyHistoryId));
+                      return;
+                    }
+                    if (canOpenLedger) {
+                      navigate('/purchase-panel');
+                    }
+                  }}
+                >
+                  {addingLedgerHistoryId === row.legacyHistoryId ? 'Adding…' : secondaryActionLabel}
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Details</div>
+                <div className="grid gap-1 text-sm text-slate-700">
+                  <div><span className="text-slate-500">Variant:</span> <span className="font-medium text-slate-900">{formatVariantColorValue(row.variant, NO_VARIANT)}</span></div>
+                  <div><span className="text-slate-500">Color:</span> <span className="font-medium text-slate-900">{formatVariantColorValue(row.color, NO_COLOR)}</span></div>
+                  <div><span className="text-slate-500">Payment Method:</span> <span className="font-medium text-slate-900">{row.paymentMethod || '—'}</span></div>
+                  {row.notes ? <div><span className="text-slate-500">Notes:</span> <span className="font-medium text-slate-900">{row.notes}</span></div> : null}
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Payment Breakdown</div>
+                <div className="grid gap-1 text-sm text-slate-700">
+                  <div><span className="text-slate-500">Order Total:</span> <span className="font-medium text-slate-900">{orderTotal != null ? orderTotal.toFixed(2) : '—'}</span></div>
+                  <div><span className="text-slate-500">Cash:</span> <span className="font-medium text-slate-900">{paymentSummary.cash.toFixed(2)}</span></div>
+                  <div><span className="text-slate-500">Online/Bank:</span> <span className="font-medium text-slate-900">{paymentSummary.online.toFixed(2)}</span></div>
+                  <div><span className="text-slate-500">Party Credit:</span> <span className="font-medium text-slate-900">{paymentSummary.partyCredit.toFixed(2)}</span></div>
+                </div>
+              </div>
+            </div>
+
+            {(row.reviewReason || row.compatibilityWarnings.length > 0 || secondaryAuditMeta) && (
+              <div className="mt-4 space-y-2">
+                {row.reviewReason && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    <span className="font-semibold">Needs attention:</span> {row.reviewReason}
+                  </div>
+                )}
+                {row.compatibilityWarnings.length > 0 && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                    <span className="font-semibold text-slate-900">Legacy notes:</span> {row.compatibilityWarnings.join(' • ')}
+                  </div>
+                )}
+                {secondaryAuditMeta && (
+                  <div className="text-[11px] text-slate-500">{secondaryAuditMeta}</div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 
@@ -1181,17 +1508,188 @@ export default function Admin() {
     () => getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseTarget, purchaseOrders),
     [purchaseTarget, purchaseOrders]
   );
+  const purchaseOrdersById = useMemo(
+    () => new Map((purchaseOrders || []).map((order) => [String(order.id || '').trim(), order] as const)),
+    [purchaseOrders]
+  );
+  const brokenPurchaseHistoryRows = useMemo(() => {
+    if (!purchaseTarget) return [];
+    return getBrokenPurchaseLinkRowsForProduct(purchaseTarget, purchaseOrders)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [purchaseTarget, purchaseOrders]);
+  const legacyOnlyPurchaseHistoryRows = useMemo(() => {
+    if (!purchaseTarget) return [];
+    return getLegacyOnlyPurchaseHistoryRowsForProduct(purchaseTarget, purchaseOrders);
+  }, [purchaseTarget, purchaseOrders]);
+  const purchaseHistoryAllRows = useMemo(() => {
+    const getLedgerIndicator = (purchaseOrderId: string | null, options?: { sourceKind?: UnifiedPurchaseHistoryRow['sourceKind'] }) => {
+      const normalizedId = String(purchaseOrderId || '').trim();
+      if (!normalizedId) {
+        return {
+          ledgerIndicatorLabel: 'Not Counted',
+          ledgerIndicatorToneClassName: 'bg-rose-100 text-rose-800 border border-rose-200',
+          ledgerIndicatorReason: 'No purchase order link was found, so this row is not included in any purchase party payable.',
+        };
+      }
+
+      const linkedOrder = purchaseOrdersById.get(normalizedId);
+      if (!linkedOrder) {
+        return {
+          ledgerIndicatorLabel: 'Not Counted',
+          ledgerIndicatorToneClassName: 'bg-rose-100 text-rose-800 border border-rose-200',
+          ledgerIndicatorReason: 'This row does not have a loaded purchase order, so it is not currently counted in the party ledger.',
+        };
+      }
+
+      if (String(linkedOrder.status || '').trim().toLowerCase() === 'cancelled') {
+        return {
+          ledgerIndicatorLabel: 'Not Counted',
+          ledgerIndicatorToneClassName: 'bg-rose-100 text-rose-800 border border-rose-200',
+          ledgerIndicatorReason: 'The linked purchase order is cancelled, so it is excluded from current purchase party payable.',
+        };
+      }
+
+      const linkedPartyId = String(linkedOrder.partyId || '').trim();
+      if (!linkedPartyId) {
+        return {
+          ledgerIndicatorLabel: 'Needs Review',
+          ledgerIndicatorToneClassName: 'bg-amber-100 text-amber-900 border border-amber-200',
+          ledgerIndicatorReason: 'The purchase order exists but is missing its party link, so payable cannot be assigned correctly.',
+        };
+      }
+
+      if (options?.sourceKind === 'needs_review') {
+        return {
+          ledgerIndicatorLabel: 'Counted in Payable',
+          ledgerIndicatorToneClassName: 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+          ledgerIndicatorReason: 'This purchase order is counted in the supplier ledger, but the product link needs review in inventory history.',
+        };
+      }
+
+      return {
+        ledgerIndicatorLabel: 'Counted in Payable',
+        ledgerIndicatorToneClassName: 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+        ledgerIndicatorReason: 'This linked purchase order is active and tied to a party, so it is included in current purchase party payable.',
+      };
+    };
+
+    const resolvedRows: UnifiedPurchaseHistoryRow[] = canonicalPurchaseHistoryRows.map((row) => ({
+      ...getLedgerIndicator(row.purchaseOrderId, { sourceKind: 'resolved' }),
+      id: row.id,
+      date: row.date,
+      variant: row.variant,
+      color: row.color,
+      quantity: row.quantity,
+      unitPrice: row.unitPrice,
+      lineTotal: row.lineTotal,
+      reference: row.reference,
+      notes: row.notes,
+      partyName: row.partyName,
+      paymentMethod: row.paymentMethod,
+      paidAmount: row.paidAmount,
+      orderPaid: row.orderPaid,
+      orderTotal: row.orderTotal,
+      remainingPayable: row.remainingPayable,
+      purchaseOrderId: row.purchaseOrderId,
+      purchaseOrderLabel: row.purchaseOrderLabel,
+      sourceKind: 'resolved',
+      sourceLabel: 'Purchase Order',
+      sourceToneClassName: 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+      productName: row.productName,
+      reviewReason: row.reviewReason,
+      paymentBreakdown: row.paymentBreakdown,
+      previousStock: row.previousStock,
+      previousBuyPrice: row.previousBuyPrice,
+      nextBuyPrice: row.nextBuyPrice,
+      legacyHistoryId: row.legacyHistoryId,
+      compatibilityWarnings: [],
+    }));
+    const reviewRows: UnifiedPurchaseHistoryRow[] = brokenPurchaseHistoryRows.map((row) => ({
+      ...getLedgerIndicator(row.purchaseOrderId, { sourceKind: 'needs_review' }),
+      id: row.id,
+      date: row.date,
+      variant: row.variant,
+      color: row.color,
+      quantity: row.quantity,
+      unitPrice: row.unitPrice,
+      lineTotal: row.lineTotal,
+      reference: row.reference,
+      notes: row.notes,
+      partyName: row.partyName,
+      paymentMethod: row.paymentMethod,
+      paidAmount: row.paidAmount,
+      orderPaid: row.orderPaid,
+      orderTotal: row.orderTotal,
+      remainingPayable: row.remainingPayable,
+      purchaseOrderId: row.purchaseOrderId,
+      purchaseOrderLabel: row.purchaseOrderLabel,
+      sourceKind: 'needs_review',
+      sourceLabel: 'Needs Link Review',
+      sourceToneClassName: 'bg-amber-100 text-amber-900 border border-amber-200',
+      productName: row.productName,
+      reviewReason: row.reviewReason,
+      paymentBreakdown: row.paymentBreakdown,
+      previousStock: row.previousStock,
+      previousBuyPrice: row.previousBuyPrice,
+      nextBuyPrice: row.nextBuyPrice,
+      legacyHistoryId: row.legacyHistoryId,
+      compatibilityWarnings: [],
+    }));
+    const legacyRows: UnifiedPurchaseHistoryRow[] = legacyOnlyPurchaseHistoryRows.map((row) => {
+      const compatibilityWarnings = [
+        row.compatibility.missingPreviousStock ? 'Previous stock missing' : null,
+        row.compatibility.missingPreviousBuyPrice ? 'Previous buy price missing' : null,
+        row.compatibility.missingNextBuyPrice ? 'Next buy price missing' : null,
+        row.compatibility.missingReference ? 'Reference missing' : null,
+        row.compatibility.orphanedLegacyRow ? 'No matching purchase order found' : null,
+      ].filter((value): value is string => Boolean(value));
+      return {
+        ...getLedgerIndicator(row.purchaseOrderId, { sourceKind: 'legacy_only' }),
+        id: row.id,
+        date: row.date,
+        variant: row.variant,
+        color: row.color,
+        quantity: row.quantity,
+        unitPrice: row.unitPrice,
+        lineTotal: row.lineTotal,
+        reference: row.reference,
+        notes: row.notes,
+        partyName: row.partyName,
+        paymentMethod: row.paymentMethod,
+        paidAmount: row.paidAmount,
+        orderPaid: row.orderPaid,
+        orderTotal: row.orderTotal,
+        remainingPayable: row.remainingPayable,
+        purchaseOrderId: row.purchaseOrderId,
+        purchaseOrderLabel: row.purchaseOrderLabel,
+        sourceKind: 'legacy_only',
+        sourceLabel: 'Legacy Snapshot',
+        sourceToneClassName: 'bg-slate-100 text-slate-800 border border-slate-200',
+        productName: null,
+        reviewReason: row.compatibility.orphanedLegacyRow ? 'Legacy snapshot exists without a matching purchase order row.' : 'Legacy-only purchase snapshot kept for audit and recovery.',
+        paymentBreakdown: row.paymentBreakdown,
+        previousStock: row.previousStock,
+        previousBuyPrice: row.previousBuyPrice,
+        nextBuyPrice: row.nextBuyPrice,
+        legacyHistoryId: row.legacyHistoryId,
+        compatibilityWarnings,
+      };
+    });
+
+    return [...resolvedRows, ...reviewRows, ...legacyRows]
+      .sort((a, b) => new Date(b.date || '').getTime() - new Date(a.date || '').getTime());
+  }, [canonicalPurchaseHistoryRows, brokenPurchaseHistoryRows, legacyOnlyPurchaseHistoryRows, purchaseOrdersById]);
   const purchaseHistoryRows = useMemo(() => {
     if (!purchaseTarget) return [];
-    const rows = [...canonicalPurchaseHistoryRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const rows = [...purchaseHistoryAllRows];
     if (purchaseHistoryVariantFilter === 'all') return rows;
     return rows.filter((row) => `${row.variant || NO_VARIANT}::${row.color || NO_COLOR}` === purchaseHistoryVariantFilter);
-  }, [purchaseTarget, purchaseHistoryVariantFilter, canonicalPurchaseHistoryRows]);
+  }, [purchaseTarget, purchaseHistoryVariantFilter, purchaseHistoryAllRows]);
 
   const purchaseHistoryVariantOptions = useMemo(() => {
     if (!purchaseTarget) return [];
     const map = new Map<string, { variant: string; color: string }>();
-    canonicalPurchaseHistoryRows.forEach((row) => {
+    purchaseHistoryAllRows.forEach((row) => {
       const variant = row.variant || NO_VARIANT;
       const color = row.color || NO_COLOR;
       const key = `${variant}::${color}`;
@@ -1200,7 +1698,7 @@ export default function Admin() {
       }
     });
     return Array.from(map.entries()).map(([key, value]) => ({ key, ...value }));
-  }, [purchaseTarget, canonicalPurchaseHistoryRows]);
+  }, [purchaseTarget, purchaseHistoryAllRows]);
 
   const viewingPurchaseHistoryRows = useMemo(() => {
     if (!viewingProduct) return [];
@@ -3870,11 +4368,34 @@ export default function Admin() {
                       No purchase history found for this product yet.
                     </div>
                   ) : (
-                    <div className="space-y-3">
-                      <div className="space-y-2">
-                        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Purchase History</div>
+                <div className="space-y-3">
+                  {!!purchaseHistoryRows.length && (
+                    <div className="grid gap-2 md:grid-cols-4">
+                      <div className="rounded-lg border bg-emerald-50 p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Purchase Orders</div>
+                        <div className="mt-1 text-xl font-black text-emerald-900">{purchaseHistoryRows.filter((row) => row.sourceKind === 'resolved').length}</div>
+                      </div>
+                      <div className="rounded-lg border bg-amber-50 p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">Needs Review</div>
+                        <div className="mt-1 text-xl font-black text-amber-900">{purchaseHistoryRows.filter((row) => row.sourceKind === 'needs_review').length}</div>
+                      </div>
+                      <div className="rounded-lg border bg-slate-50 p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-700">Legacy Snapshots</div>
+                        <div className="mt-1 text-xl font-black text-slate-900">{purchaseHistoryRows.filter((row) => row.sourceKind === 'legacy_only').length}</div>
+                      </div>
+                      <div className="rounded-lg border bg-blue-50 p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Total Rows</div>
+                        <div className="mt-1 text-xl font-black text-blue-900">{purchaseHistoryRows.length}</div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="rounded-lg border bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+                    This view combines canonical purchase orders, rows needing product-link review, and legacy-only history snapshots so no purchase transaction is hidden.
+                  </div>
+                  <div className="space-y-2">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Unified Purchase History</div>
                         <div className="max-h-[420px] overflow-y-auto rounded-md border p-2">
-                          {renderPurchaseHistoryCards(purchaseTarget.name, purchaseHistoryRows)}
+                          {renderUnifiedPurchaseHistoryCards(purchaseTarget.name, purchaseHistoryRows)}
                         </div>
                       </div>
                     </div>

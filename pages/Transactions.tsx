@@ -677,6 +677,21 @@ export default function Transactions() {
     const isReturn = txTypeUi.isReturn;
     const isPayment = txTypeUi.isPayment;
     const itemCount = normalizeTransactionItems(tx.items).reduce((acc, item) => acc + item.quantity, 0);
+    const rowToneClass = isSale
+      ? 'text-emerald-800'
+      : isReturn
+        ? 'text-rose-800'
+        : 'text-blue-800';
+    const rowMutedToneClass = isSale
+      ? 'text-emerald-700'
+      : isReturn
+        ? 'text-rose-700'
+        : 'text-blue-700';
+    const rowSubtleToneClass = isSale
+      ? 'text-emerald-600'
+      : isReturn
+        ? 'text-rose-600'
+        : 'text-blue-600';
     return {
       tx,
       isSale,
@@ -687,6 +702,9 @@ export default function Transactions() {
       typeTone: txTypeUi.typeTone,
       typeVariant: 'outline',
       amountClass: isSale ? 'text-green-700' : isReturn ? 'text-red-700' : 'text-blue-700',
+      rowToneClass,
+      rowMutedToneClass,
+      rowSubtleToneClass,
     };
   }), [paginatedTransactions]);
   const deletedTotalPages = useMemo(
@@ -1931,7 +1949,7 @@ export default function Transactions() {
                             </tr>
                         </thead>
                         <tbody className="divide-y">
-                            {paginatedTransactionRows.map(({ tx, isSale, isReturn, isPayment, itemCount, typeLabel, typeTone, typeVariant, amountClass }) => {
+                            {paginatedTransactionRows.map(({ tx, isSale, isReturn, isPayment, itemCount, typeLabel, typeTone, typeVariant, amountClass, rowToneClass, rowMutedToneClass, rowSubtleToneClass }) => {
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
                                         <td className="px-4 py-3">
@@ -1944,15 +1962,15 @@ export default function Transactions() {
                                             />
                                         </td>
                                         <td className="px-4 py-3">
-                                            <div className="font-medium text-foreground">{new Date(tx.date).toLocaleDateString()}</div>
-                                            <div className="text-[10px] font-mono text-muted-foreground">#{getTransactionReference(tx)}</div>
+                                            <div className={`font-semibold ${rowToneClass}`}>{new Date(tx.date).toLocaleDateString()}</div>
+                                            <div className={`text-[10px] font-mono ${rowSubtleToneClass}`}>#{getTransactionReference(tx)}</div>
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="flex items-center gap-2">
                                                 <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center shrink-0">
                                                     <User className="w-3 h-3" />
                                                 </div>
-                                                <span className="font-medium truncate max-w-[120px]">{tx.customerName || 'Walk-in'}</span>
+                                                <span className={`font-semibold truncate max-w-[120px] ${rowToneClass}`}>{tx.customerName || 'Walk-in'}</span>
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
@@ -1963,7 +1981,7 @@ export default function Transactions() {
                                         {viewMode === 'list-details' && (
                                             <td className="px-4 py-3">
                                                 <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">{itemCount} Items</span>
+                                                    <span className={`text-[10px] font-bold uppercase tracking-tight ${rowSubtleToneClass}`}>{itemCount} Items</span>
                                                     <div className="flex -space-x-2 overflow-hidden">
                                                         {normalizeTransactionItems(tx.items).slice(0, 3).map((item, i) => (
                                                             <div key={i} className="inline-block h-5 w-5 rounded-full ring-2 ring-background bg-muted overflow-hidden border">
@@ -1980,12 +1998,12 @@ export default function Transactions() {
                                             </td>
                                         )}
                                         <td className="px-4 py-3">
-                                            <span className="text-xs font-medium text-muted-foreground">{getDisplayPaymentMethod(tx)}</span>
+                                            <span className={`text-xs font-semibold ${rowMutedToneClass}`}>{getDisplayPaymentMethod(tx)}</span>
                                         </td>
                                         <td className={`px-4 py-3 text-right font-bold ${amountClass}`}>
                                             <div>{formatMoneyWhole(Math.abs(tx.total))}</div>
                                             {getSaleSettlementText(tx) && (
-                                              <div className="text-[10px] font-medium text-muted-foreground">{getSaleSettlementText(tx)}</div>
+                                              <div className={`text-[10px] font-medium ${rowSubtleToneClass}`}>{getSaleSettlementText(tx)}</div>
                                             )}
                                         </td>
                                         <td className="px-4 py-3 text-center">
