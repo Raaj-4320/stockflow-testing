@@ -772,7 +772,22 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       const cleaned = fixPurchasePanelTextNode(original);
       if (cleaned !== original) node.textContent = cleaned;
     });
-  });
+  }, [
+    products,
+    orders,
+    parties,
+    isModalOpen,
+    wizardStep,
+    showPartyPopup,
+    showReceivePopup,
+    showPartyPaymentPopup,
+    showPaymentPopup,
+    showDuplicatePartyChecker,
+    purchaseViewProduct,
+    purchaseHistoryEditTarget,
+    repairDryRunResult,
+    purchaseRuntimeSearchResult,
+  ]);
 
   const refresh = () => {
     const data = loadData();
@@ -2285,6 +2300,17 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     if (!purchaseViewProduct) return [];
     return getLegacyOnlyPurchaseHistoryRowsForProduct(purchaseViewProduct, orders);
   }, [purchaseViewProduct, orders]);
+  const purchaseHistoryEditModalData = useMemo(() => {
+    if (!purchaseHistoryEditTarget) return null;
+    const targetProduct = products.find((item) => item.id === purchaseHistoryEditTarget.productId) || purchaseViewProduct;
+    const targetHistory = (targetProduct?.purchaseHistory || []).find((item) => item.id === purchaseHistoryEditTarget.historyId);
+    const linkedOrder = orders.find((order) => order.id === targetHistory?.purchaseOrderId);
+    return {
+      targetProduct,
+      targetHistory,
+      linkedOrder,
+    };
+  }, [orders, products, purchaseHistoryEditTarget, purchaseViewProduct]);
   const openRepairDryRun = () => {
     setRepairApplyResult(null);
     setRepairRollbackPreviewDownloadedAt('');
@@ -4105,10 +4131,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
           </div>
         ) : null}
       </Modal>
-      {purchaseHistoryEditTarget && (() => {
-        const targetProduct = (loadData().products || []).find((item) => item.id === purchaseHistoryEditTarget.productId) || purchaseViewProduct;
-        const targetHistory = (targetProduct?.purchaseHistory || []).find((item) => item.id === purchaseHistoryEditTarget.historyId);
-        const linkedOrder = orders.find((order) => order.id === targetHistory?.purchaseOrderId);
+      {purchaseHistoryEditTarget && purchaseHistoryEditModalData && (() => {
+        const { targetProduct, targetHistory, linkedOrder } = purchaseHistoryEditModalData;
         const oldQty = Math.max(0, Number(targetHistory?.quantity || 0));
         const oldUnitPrice = Math.max(0, Number(targetHistory?.unitPrice || 0));
         const oldAvgPrice = Math.max(0, Number(targetHistory?.nextBuyPrice || targetProduct?.buyPrice || 0));

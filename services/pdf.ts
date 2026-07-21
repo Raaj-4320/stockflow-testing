@@ -7,6 +7,7 @@ import { getCanonicalCustomerBalanceResult } from './customerBalanceView';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from './numberFormat';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { resolveInvoicePrintProfile } from './invoicePrintPreferences';
 
 type ReceiptPaymentDetails = {
     cashReceived?: number;
@@ -556,7 +557,8 @@ export const generateProductCatalogPDF = async (
     const cardPadding = 3;
     const imageBlockHeight = Math.max(24, Math.min(cardHeight * 0.48, 34));
     const imageCache = new Map<string, string | null>();
-    const { profile } = loadData();
+    const { profile: rawProfile } = loadData();
+    const profile = resolveInvoicePrintProfile(rawProfile);
     const storeCatalogTitle = (options?.catalogTitle || '').trim() || `${(profile?.storeName || '').trim() || 'Product'} Catalog`;
     const formatOrdinalDate = (d: Date) => {
         const day = d.getDate();
@@ -749,7 +751,7 @@ const buildThermalInvoiceHtml = (
   paymentDetails?: ReceiptPaymentDetails,
 ) => {
     const data = loadData();
-    const { profile } = data;
+    const profile = resolveInvoicePrintProfile(data.profile);
     const customer = customers.find((entry) => entry.id === transaction.customerId);
     const canonicalBalance = customer ? getCanonicalCustomerBalanceResult(customer, data.transactions || [], data.upfrontOrders || []) : null;
     const settlement = transaction.saleSettlement || { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
@@ -1150,7 +1152,8 @@ export const generateReceiptPDF = (
   paymentDetails?: ReceiptPaymentDetails,
   options?: { returnDataUrl?: boolean }
 ) => {
-    const { profile } = loadData();
+    const { profile: rawProfile } = loadData();
+    const profile = resolveInvoicePrintProfile(rawProfile);
     const sanitizeHeaderText = (value?: string) => {
       const raw = String(value || '');
       const cleaned = raw
@@ -1251,13 +1254,22 @@ export const generateReceiptPDF = (
     doc.setFont("helvetica", "bold");
     doc.text(transaction.customerName || "Walk-in Customer", 14, billSectionY + 7);
     doc.setFont("helvetica", "normal");
-    const customerPhone = transaction.customerPhone || customers.find(c => c.id === transaction.customerId)?.phone || "Walk-in";
+    const customer = customers.find(c => c.id === transaction.customerId);
+    const customerPhone = transaction.customerPhone || customer?.phone || "Walk-in";
     doc.text(`Contact No.: ${customerPhone}`, 14, billSectionY + 13);
     const gstDetailsStartY = billSectionY + 19;
     let tableStartY = billSectionY + 20;
-    if (transaction.gstApplied) {
-      doc.text(`GST Name: ${transaction.gstName || '-'}`, 14, gstDetailsStartY);
-      doc.text(`GST Number: ${transaction.gstNumber || '-'}`, 14, gstDetailsStartY + 6);
+    const customerGstName = String(transaction.gstName || customer?.gstName || '-').trim() || '-';
+    const customerGstNumber = String(transaction.gstNumber || customer?.gstNumber || '-').trim() || '-';
+    const shouldShowCustomerGst = Boolean(
+      String(transaction.gstName || '').trim()
+      || String(transaction.gstNumber || '').trim()
+      || String(customer?.gstName || '').trim()
+      || String(customer?.gstNumber || '').trim()
+    );
+    if (shouldShowCustomerGst) {
+      doc.text(`GST Name: ${customerGstName}`, 14, gstDetailsStartY);
+      doc.text(`GST Number: ${customerGstNumber}`, 14, gstDetailsStartY + 6);
       tableStartY = gstDetailsStartY + 13;
     }
 
@@ -1436,7 +1448,7 @@ export const generateReceiptPDFDataUrl = (
 
 const printThermalInvoiceLegacy = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
     const data = loadData();
-    const { profile } = data;
+    const profile = resolveInvoicePrintProfile(data.profile);
     const customer = customers.find(c => c.id === transaction.customerId);
     const canonicalBalance = customer ? getCanonicalCustomerBalanceResult(customer, data.transactions || [], data.upfrontOrders || []) : null;
     const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(canonicalBalance.currentDue)}` : 'Ledger unavailable';
@@ -1469,9 +1481,14 @@ const printThermalInvoiceLegacy = (transaction: Transaction, customers: Customer
       : (transaction.invoiceNo || `IN-${transaction.id.slice(-6)}`);
     const date = new Date(transaction.date).toLocaleDateString();
     const time = new Date(transaction.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const shouldShowCustomerGst = Boolean(transaction.gstApplied && (transaction.gstName || transaction.gstNumber));
-    const customerGstName = String(transaction.gstName || '-').trim() || '-';
-    const customerGstNumber = String(transaction.gstNumber || '-').trim() || '-';
+    const shouldShowCustomerGst = Boolean(
+      String(transaction.gstName || '').trim()
+      || String(transaction.gstNumber || '').trim()
+      || String(customer?.gstName || '').trim()
+      || String(customer?.gstNumber || '').trim()
+    );
+    const customerGstName = String(transaction.gstName || customer?.gstName || '-').trim() || '-';
+    const customerGstNumber = String(transaction.gstNumber || customer?.gstNumber || '-').trim() || '-';
 
     const html = `
 <!DOCTYPE html>
@@ -1712,7 +1729,8 @@ export const printReceipt = async (
   customers: Customer[],
   paymentDetails?: ReceiptPaymentDetails,
 ): Promise<ReceiptPrintResult> => {
-  const { profile } = loadData();
+  const { profile: rawProfile } = loadData();
+  const profile = resolveInvoicePrintProfile(rawProfile);
   if (getInvoiceFormat(profile) === 'thermal') {
     return printThermalInvoice(transaction, customers, paymentDetails);
   }

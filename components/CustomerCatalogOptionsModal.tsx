@@ -102,9 +102,15 @@ export function CustomerCatalogOptionsModal({ isOpen, onClose, products, onGener
   const [pickerSelectedIds, setPickerSelectedIds] = useState<string[]>([]);
   const [draggingProductId, setDraggingProductId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const wasOpenRef = useRef(false);
 
   React.useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
     setCatalogMode('category');
     setSelectedCategories(categories);
     setCatalogProductIds(defaultNewArrivalIds);

@@ -12,6 +12,7 @@ import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCi
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
 import { getEffectiveAdminPin } from '../src/auth/permissions';
 import { isAdmin } from '../src/auth/simplePermissions';
+import { getNormalizedInvoicePrintPreferences, getStoredInvoicePrintPreferences, saveInvoicePrintPreferences } from '../services/invoicePrintPreferences';
 const isValidOperatorPin = (value: string) => /^\d{6,8}$/.test(value.trim());
 
 const THERMAL_STYLE_OPTIONS = [
@@ -34,6 +35,14 @@ const THERMAL_PREVIEW_ITEMS = [
   { name: 'Surf Excel Easy Wash 1kg', qty: 1, rate: 210, amount: 210 },
   { name: 'Tata Salt 1kg', qty: 3, rate: 30, amount: 90 },
 ] as const;
+
+const mergeInvoicePrintFields = (profile: StoreProfile, source?: Partial<StoreProfile> | null): StoreProfile => {
+  const normalized = getNormalizedInvoicePrintPreferences(source);
+  return {
+    ...profile,
+    ...normalized,
+  };
+};
 
 const formatPreviewCurrency = (value: number) => `₹${value.toFixed(2)}`;
 
@@ -91,7 +100,7 @@ export default function Settings() {
   useEffect(() => {
     const refreshData = () => {
       const data = loadData();
-      setProfile({
+      const baseProfile: StoreProfile = {
         ...data.profile,
         invoiceFormat: data.profile?.invoiceFormat === 'thermal' ? 'thermal' : 'standard',
         thermalPaperWidth: data.profile?.thermalPaperWidth === '58mm' ? '58mm' : '80mm',
@@ -103,7 +112,8 @@ export default function Settings() {
         customerCatalogFirstPage: typeof data.profile?.customerCatalogFirstPage === 'string' ? data.profile.customerCatalogFirstPage : '',
         customerCatalogFirstPageName: typeof data.profile?.customerCatalogFirstPageName === 'string' ? data.profile.customerCatalogFirstPageName : '',
         customerCatalogFirstPageMimeType: typeof data.profile?.customerCatalogFirstPageMimeType === 'string' ? data.profile.customerCatalogFirstPageMimeType : '',
-      });
+      };
+      setProfile(adminAccess ? baseProfile : mergeInvoicePrintFields(baseProfile, getStoredInvoicePrintPreferences()));
       setUserEmail(getCurrentUser());
       setOperatorUsers(Array.isArray(data.operatorUsers) ? data.operatorUsers : []);
     };
@@ -138,10 +148,25 @@ export default function Settings() {
     setSuccess(false);
     setProfileMessage(null);
     try {
-      const savedProfile = await updateStoreProfile(safeProfile);
-      setProfile(savedProfile);
+      if (adminAccess) {
+        const savedProfile = await updateStoreProfile(safeProfile);
+        setProfile(savedProfile);
+      } else {
+        const currentData = loadData();
+        const globalPrintProfile = getNormalizedInvoicePrintPreferences(currentData.profile);
+        const sharedProfileToSave: StoreProfile = {
+          ...safeProfile,
+          ...globalPrintProfile,
+        };
+        await updateStoreProfile(sharedProfileToSave);
+        const personalPrintProfile = saveInvoicePrintPreferences(safeProfile);
+        setProfile(mergeInvoicePrintFields(sharedProfileToSave, personalPrintProfile));
+      }
       setSuccess(true);
-      setProfileMessage({ type: 'success', text: 'Profile Saved!' });
+      setProfileMessage({
+        type: 'success',
+        text: adminAccess ? 'Profile Saved!' : 'Profile saved. Print settings were saved only for this staff login.',
+      });
       window.setTimeout(() => {
         setSuccess(false);
         setProfileMessage((current) => current?.type === 'success' ? null : current);
@@ -499,7 +524,7 @@ export default function Settings() {
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Settings</h1>
-          <p className="text-muted-foreground">{adminAccess ? 'Manage your store profile.' : 'Staff settings can update tax defaults and invoice behavior only.'}</p>
+          <p className="text-muted-foreground">{adminAccess ? 'Manage your store profile.' : 'Staff can update shared tax defaults, while print layout settings stay personal to this login.'}</p>
           {userEmail && (
             <p className="text-xs font-medium text-primary mt-1 flex items-center gap-1">
               <ShieldCheck className="w-3 h-3" /> Logged in as: {userEmail}
@@ -621,6 +646,11 @@ export default function Settings() {
                       <p>Standard format generates a professional A4 PDF document for downloading or sharing.</p>
                   )}
               </div>
+              {!adminAccess && (
+                <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-[10px] text-primary">
+                  These invoice print layout settings are saved only for your current staff login and do not change admin or other staff preferences.
+                </div>
+              )}
               {profile.invoiceFormat === 'thermal' && (
                 <div className="space-y-4 rounded-xl border bg-slate-50/80 p-4">
                   <div className="grid gap-4 md:grid-cols-2">

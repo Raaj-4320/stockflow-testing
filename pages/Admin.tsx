@@ -1685,6 +1685,12 @@ export default function Admin() {
     if (purchaseHistoryVariantFilter === 'all') return rows;
     return rows.filter((row) => `${row.variant || NO_VARIANT}::${row.color || NO_COLOR}` === purchaseHistoryVariantFilter);
   }, [purchaseTarget, purchaseHistoryVariantFilter, purchaseHistoryAllRows]);
+  const purchaseHistorySummary = useMemo(() => ({
+    resolved: purchaseHistoryRows.filter((row) => row.sourceKind === 'resolved').length,
+    needsReview: purchaseHistoryRows.filter((row) => row.sourceKind === 'needs_review').length,
+    legacyOnly: purchaseHistoryRows.filter((row) => row.sourceKind === 'legacy_only').length,
+    total: purchaseHistoryRows.length,
+  }), [purchaseHistoryRows]);
 
   const purchaseHistoryVariantOptions = useMemo(() => {
     if (!purchaseTarget) return [];
@@ -1699,6 +1705,17 @@ export default function Admin() {
     });
     return Array.from(map.entries()).map(([key, value]) => ({ key, ...value }));
   }, [purchaseTarget, purchaseHistoryAllRows]);
+  const purchaseEditModalData = useMemo(() => {
+    if (!purchaseEditTarget) return null;
+    const targetProduct = products.find((product) => product.id === purchaseEditTarget.productId) || purchaseTarget;
+    const targetHistory = (targetProduct?.purchaseHistory || []).find((history) => history.id === purchaseEditTarget.historyId);
+    const linkedOrder = purchaseOrders.find((order) => order.id === targetHistory?.purchaseOrderId);
+    return {
+      targetProduct,
+      targetHistory,
+      linkedOrder,
+    };
+  }, [products, purchaseOrders, purchaseEditTarget, purchaseTarget]);
 
   const viewingPurchaseHistoryRows = useMemo(() => {
     if (!viewingProduct) return [];
@@ -1719,14 +1736,18 @@ export default function Admin() {
 
   useEffect(() => {
     if (!purchaseTarget || !productHasCombinationStock(purchaseTarget)) {
-      setSelectedPurchaseVariantKey('');
+      setSelectedPurchaseVariantKey((prev) => (prev ? '' : prev));
       return;
     }
     if (!purchaseVariantRows.length) {
-      setSelectedPurchaseVariantKey('');
+      setSelectedPurchaseVariantKey((prev) => (prev ? '' : prev));
       return;
     }
-    setSelectedPurchaseVariantKey(prev => (prev && purchaseVariantRows.some(row => row.key === prev)) ? prev : purchaseVariantRows[0].key);
+    setSelectedPurchaseVariantKey((prev) => {
+      if (prev && purchaseVariantRows.some((row) => row.key === prev)) return prev;
+      const nextKey = purchaseVariantRows[0].key;
+      return prev === nextKey ? prev : nextKey;
+    });
   }, [purchaseTarget, purchaseVariantRows]);
 
   const purchaseTotalCost = useMemo(() => {
@@ -1790,7 +1811,12 @@ export default function Admin() {
     const stock = toNonNegativeNumber(formData.stock);
     const totalPurchaseBlank = formData.totalPurchase === '' || formData.totalPurchase === null || formData.totalPurchase === undefined;
     if (totalPurchaseBlank && stock > 0) {
-      setFormData((prev: any) => ({ ...prev, totalPurchase: String(stock) }));
+      setFormData((prev: any) => {
+        const nextTotalPurchase = String(stock);
+        return prev.totalPurchase === nextTotalPurchase
+          ? prev
+          : { ...prev, totalPurchase: nextTotalPurchase };
+      });
     }
   }, [formData.stock, formData.totalPurchase, editingProduct]);
 
@@ -1801,7 +1827,12 @@ export default function Admin() {
     const totalPurchase = toNonNegativeNumber(formData.totalPurchase);
     const qty = openingStock > 0 ? openingStock : totalPurchase;
     const autoPayable = qty > 0 && buyPrice > 0 ? Number((qty * buyPrice).toFixed(2)) : 0;
-    setFormData((prev: any) => ({ ...prev, supplierTotalPayable: String(autoPayable) }));
+    setFormData((prev: any) => {
+      const nextPayable = String(autoPayable);
+      return prev.supplierTotalPayable === nextPayable
+        ? prev
+        : { ...prev, supplierTotalPayable: nextPayable };
+    });
   }, [formData.buyPrice, formData.stock, formData.totalPurchase, editingProduct, supplierPayableManuallyEdited]);
 
   const handleAddPurchase = async () => {
@@ -4373,19 +4404,19 @@ export default function Admin() {
                     <div className="grid gap-2 md:grid-cols-4">
                       <div className="rounded-lg border bg-emerald-50 p-3">
                         <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Purchase Orders</div>
-                        <div className="mt-1 text-xl font-black text-emerald-900">{purchaseHistoryRows.filter((row) => row.sourceKind === 'resolved').length}</div>
+                        <div className="mt-1 text-xl font-black text-emerald-900">{purchaseHistorySummary.resolved}</div>
                       </div>
                       <div className="rounded-lg border bg-amber-50 p-3">
                         <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">Needs Review</div>
-                        <div className="mt-1 text-xl font-black text-amber-900">{purchaseHistoryRows.filter((row) => row.sourceKind === 'needs_review').length}</div>
+                        <div className="mt-1 text-xl font-black text-amber-900">{purchaseHistorySummary.needsReview}</div>
                       </div>
                       <div className="rounded-lg border bg-slate-50 p-3">
                         <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-700">Legacy Snapshots</div>
-                        <div className="mt-1 text-xl font-black text-slate-900">{purchaseHistoryRows.filter((row) => row.sourceKind === 'legacy_only').length}</div>
+                        <div className="mt-1 text-xl font-black text-slate-900">{purchaseHistorySummary.legacyOnly}</div>
                       </div>
                       <div className="rounded-lg border bg-blue-50 p-3">
                         <div className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Total Rows</div>
-                        <div className="mt-1 text-xl font-black text-blue-900">{purchaseHistoryRows.length}</div>
+                        <div className="mt-1 text-xl font-black text-blue-900">{purchaseHistorySummary.total}</div>
                       </div>
                     </div>
                   )}
@@ -4881,10 +4912,8 @@ export default function Admin() {
             onExport={handleExport}
             title={exportType === 'inventory' ? "Export Inventory" : "Export Low Stock Report"}
         />
-      {purchaseEditTarget && (() => {
-        const targetProduct = products.find((p) => p.id === purchaseEditTarget.productId) || purchaseTarget;
-        const targetHistory = (targetProduct?.purchaseHistory || []).find((h) => h.id === purchaseEditTarget.historyId);
-        const linkedOrder = (loadData().purchaseOrders || []).find((o) => o.id === targetHistory?.purchaseOrderId);
+      {purchaseEditTarget && purchaseEditModalData && (() => {
+        const { targetProduct, targetHistory, linkedOrder } = purchaseEditModalData;
         const oldQty = toNonNegativeNumber(targetHistory?.quantity);
         const oldUnitPrice = toNonNegativeNumber(targetHistory?.unitPrice);
         const oldTotal = oldQty * oldUnitPrice;
