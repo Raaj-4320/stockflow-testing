@@ -869,7 +869,7 @@ const buildThermalInvoiceHtml = (
       </div>`).join('') + '<div class="rule solid"></div>';
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="thermal-print-root">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -889,9 +889,10 @@ const buildThermalInvoiceHtml = (
       --header-tone: ${headerTone};
       --header-bg: ${headerBackground};
       --line-height: ${densityLineHeight};
+      --print-page-size: ${paperWidth} auto;
     }
     * { box-sizing: border-box; }
-    html, body {
+    html.thermal-print-root, body.thermal-print-body {
       margin: 0;
       padding: 0;
       width: var(--paper-width);
@@ -904,12 +905,12 @@ const buildThermalInvoiceHtml = (
       line-height: var(--line-height);
       height: auto;
     }
-    body {
+    body.thermal-print-body {
       padding: 0;
       overflow: visible;
       display: inline-block;
     }
-    .receipt {
+    .thermal-print-body .receipt {
       width: var(--receipt-width);
       padding: var(--receipt-padding-y) var(--receipt-padding-x);
       margin: 0;
@@ -1061,39 +1062,68 @@ const buildThermalInvoiceHtml = (
       line-height: 1.2;
     }
     @page {
-      margin: 0;
+      margin: 0 !important;
       size: ${paperWidth} auto;
     }
     @media print {
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: var(--paper-width);
-        min-width: var(--paper-width);
-        max-width: var(--paper-width);
-        -webkit-print-color-adjust: exact;
-        print-color-adjust: exact;
+      @page {
+        margin: 0 !important;
+        size: ${paperWidth} auto;
+      }
+      html.thermal-print-root, body.thermal-print-body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: var(--paper-width) !important;
+        min-width: var(--paper-width) !important;
+        max-width: var(--paper-width) !important;
+        background: #fff !important;
+        color: #111827 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
         height: auto !important;
+        overflow-x: hidden !important;
+        overflow-y: visible !important;
       }
-      body {
-        overflow: visible;
-        display: inline-block;
+      body.thermal-print-body {
+        display: block !important;
       }
-      .receipt {
-        width: var(--receipt-width);
-        margin: 0;
-        padding: var(--receipt-padding-y) var(--receipt-padding-x);
-        page-break-after: avoid;
-        break-after: avoid-page;
+      body.thermal-print-body > :not(.receipt) {
+        display: none !important;
       }
-      table, thead, tbody, tr, td, th {
-        page-break-inside: avoid;
-        break-inside: avoid-page;
+      body.thermal-print-body .receipt,
+      body.thermal-print-body .receipt * {
+        transform: none !important;
+        zoom: 1 !important;
+      }
+      body.thermal-print-body .receipt {
+        width: var(--receipt-width) !important;
+        min-width: var(--receipt-width) !important;
+        max-width: var(--receipt-width) !important;
+        margin: 0 !important;
+        padding: var(--receipt-padding-y) var(--receipt-padding-x) !important;
+        page-break-after: avoid !important;
+        break-after: avoid-page !important;
+      }
+      body.thermal-print-body img,
+      body.thermal-print-body canvas,
+      body.thermal-print-body svg {
+        max-width: 100% !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid-page !important;
+      }
+      body.thermal-print-body table,
+      body.thermal-print-body thead,
+      body.thermal-print-body tbody,
+      body.thermal-print-body tr,
+      body.thermal-print-body td,
+      body.thermal-print-body th {
+        page-break-inside: avoid !important;
+        break-inside: avoid-page !important;
       }
     }
   </style>
 </head>
-<body>
+<body class="thermal-print-body">
   <div class="receipt">
     <div class="center">
       <div class="header-title">${escapeHtml(profile.storeName || 'StockFlow')}</div>
